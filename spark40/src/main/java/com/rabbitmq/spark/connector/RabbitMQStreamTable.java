@@ -65,8 +65,7 @@ public class RabbitMQStreamTable implements Table, SupportsRead, SupportsWrite {
 
     @Override
     public WriteBuilder newWriteBuilder(LogicalWriteInfo info) {
-        // TODO: Milestone 6 – implement WriteBuilder
-        throw new UnsupportedOperationException("Sink writes not yet implemented");
+        return new RabbitMQWriteBuilder(options, info.schema(), info.queryId());
     }
 
     /** Returns the parsed connector options. */
