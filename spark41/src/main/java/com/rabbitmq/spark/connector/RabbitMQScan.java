@@ -5,6 +5,7 @@ import com.rabbitmq.stream.NoOffsetException;
 import com.rabbitmq.stream.StreamStats;
 import org.apache.spark.sql.connector.read.Batch;
 import org.apache.spark.sql.connector.read.Scan;
+import org.apache.spark.sql.connector.read.streaming.MicroBatchStream;
 import org.apache.spark.sql.types.StructType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -15,7 +16,8 @@ import java.util.*;
  * Logical representation of a RabbitMQ stream scan.
  *
  * <p>{@link #toBatch()} resolves starting and ending offsets once and returns
- * a fixed {@link RabbitMQBatch}.
+ * a fixed {@link RabbitMQBatch}. {@link #toMicroBatchStream(String)} returns
+ * a {@link RabbitMQMicroBatchStream} for Structured Streaming queries.
  */
 final class RabbitMQScan implements Scan {
 
@@ -47,6 +49,11 @@ final class RabbitMQScan implements Scan {
         List<String> streams = discoverStreams();
         Map<String, long[]> offsetRanges = resolveOffsetRanges(streams);
         return new RabbitMQBatch(options, schema, offsetRanges);
+    }
+
+    @Override
+    public MicroBatchStream toMicroBatchStream(String checkpointLocation) {
+        return new RabbitMQMicroBatchStream(options, schema, checkpointLocation);
     }
 
     /**
