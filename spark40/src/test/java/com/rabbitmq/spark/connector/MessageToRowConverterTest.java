@@ -202,16 +202,16 @@ class MessageToRowConverterTest {
             ArrayBasedMapData mapData = (ArrayBasedMapData) row.getMap(4);
 
             assertThat(mapData.numElements()).isEqualTo(3);
-            // Values are coerced to strings
             var keyArray = mapData.keyArray();
             var valArray = mapData.valueArray();
-            // Order depends on LinkedHashMap iteration order
-            assertThat(keyArray.getUTF8String(0)).isEqualTo(UTF8String.fromString("key1"));
-            assertThat(valArray.getUTF8String(0)).isEqualTo(UTF8String.fromString("value1"));
-            assertThat(keyArray.getUTF8String(1)).isEqualTo(UTF8String.fromString("key2"));
-            assertThat(valArray.getUTF8String(1)).isEqualTo(UTF8String.fromString("42"));
-            assertThat(keyArray.getUTF8String(2)).isEqualTo(UTF8String.fromString("key3"));
-            assertThat(valArray.getUTF8String(2)).isEqualTo(UTF8String.fromString("true"));
+            Map<String, String> valuesByKey = new LinkedHashMap<>();
+            for (int i = 0; i < mapData.numElements(); i++) {
+                valuesByKey.put(keyArray.getUTF8String(i).toString(),
+                        valArray.getUTF8String(i).toString());
+            }
+            assertThat(valuesByKey).containsEntry("key1", "value1");
+            assertThat(valuesByKey).containsEntry("key2", "42");
+            assertThat(valuesByKey).containsEntry("key3", "true");
         }
 
         @Test

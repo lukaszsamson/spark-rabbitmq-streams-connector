@@ -117,6 +117,7 @@ class RabbitMQStreamTableProviderTest {
                     TableCapability.STREAMING_WRITE,
                     TableCapability.ACCEPT_ANY_SCHEMA
             );
+            assertThat(table.capabilities()).doesNotContain(TableCapability.CONTINUOUS_READ);
         }
 
         @Test

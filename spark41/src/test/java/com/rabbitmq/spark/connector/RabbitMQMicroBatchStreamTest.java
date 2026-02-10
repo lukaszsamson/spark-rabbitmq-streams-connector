@@ -7,11 +7,21 @@ import org.apache.spark.sql.connector.read.streaming.*;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
+import com.rabbitmq.stream.ConsumerBuilder;
+import com.rabbitmq.stream.Environment;
+import com.rabbitmq.stream.ProducerBuilder;
+import com.rabbitmq.stream.StreamCreator;
+import com.rabbitmq.stream.StreamStats;
+import com.rabbitmq.stream.codec.QpidProtonCodec;
+
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.*;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /**
  * Unit tests for {@link RabbitMQMicroBatchStream}.
@@ -22,6 +32,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * offsets, latestOffset, commit) are tested in the it-tests module.
  */
 class RabbitMQMicroBatchStreamTest {
+
+    private static final QpidProtonCodec CODEC = new QpidProtonCodec();
 
     // ======================================================================
     // Scan integration
@@ -130,6 +142,132 @@ class RabbitMQMicroBatchStreamTest {
     }
 
     // ======================================================================
+    // initialOffset
+    // ======================================================================
+
+    @Nested
+    class InitialOffset {
+
+        @Test
+        void initialOffsetSkipsLookupWhenServerSideTrackingDisabled() {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("startingOffsets", "offset");
+            opts.put("startingOffset", "42");
+            opts.put("serverSideOffsetTracking", "false");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+
+            RabbitMQStreamOffset offset = (RabbitMQStreamOffset) stream.initialOffset();
+            assertThat(offset.getStreamOffsets()).containsEntry("test-stream", 42L);
+        }
+
+        @Test
+        void initialOffsetExplicitConsumerNameNonFatalLookupFailureFailsFast() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("consumerName", "explicit");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            Environment env = new ThrowingConsumerBuilderEnvironment(
+                    new RuntimeException("tracking consumer limit reached"));
+            setPrivateField(stream, "environment", env);
+
+            assertThatThrownBy(stream::initialOffset)
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("consumerName is explicitly configured");
+        }
+
+        @Test
+        void initialOffsetDerivedConsumerNameNonFatalLookupFallsBackToStartingOffsets() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("startingOffsets", "offset");
+            opts.put("startingOffset", "7");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            Environment env = new ThrowingConsumerBuilderEnvironment(
+                    new RuntimeException("tracking consumer limit reached"));
+            setPrivateField(stream, "environment", env);
+
+            RabbitMQStreamOffset offset = (RabbitMQStreamOffset) stream.initialOffset();
+            assertThat(offset.getStreamOffsets()).containsEntry("test-stream", 7L);
+        }
+
+        @Test
+        void initialOffsetFatalLookupErrorFailsWithExplicitConsumerName() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("consumerName", "explicit");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            Environment env = new ThrowingConsumerBuilderEnvironment(
+                    new RuntimeException("authentication failed"));
+            setPrivateField(stream, "environment", env);
+
+            assertThatThrownBy(stream::initialOffset)
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("Failed to look up stored offsets");
+        }
+
+        @Test
+        void initialOffsetFatalLookupErrorFailsWithDerivedConsumerName() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            Environment env = new ThrowingConsumerBuilderEnvironment(
+                    new RuntimeException("authentication failed"));
+            setPrivateField(stream, "environment", env);
+
+            assertThatThrownBy(stream::initialOffset)
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("Failed to look up stored offsets");
+        }
+
+        @Test
+        void initialOffsetMergesPartialStoredOffsetsWithFallback() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("startingOffsets", "offset");
+            opts.put("startingOffset", "5");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            setPrivateField(stream, "streams", List.of("s1", "s2"));
+            setPrivateField(stream, "environment", new LocatorEnvironment(
+                    Map.of(
+                            "s1", LocatorResponse.ok(9L),
+                            "s2", LocatorResponse.noOffset()
+                    )));
+
+            RabbitMQStreamOffset offset = (RabbitMQStreamOffset) stream.initialOffset();
+            assertThat(offset.getStreamOffsets()).containsEntry("s1", 10L);
+            assertThat(offset.getStreamOffsets()).containsEntry("s2", 5L);
+        }
+
+        @Test
+        void discoverStreamsSuperStreamEmptyPartitionsThrows() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("superstream", "super");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            setPrivateField(stream, "streams", List.of());
+            setPrivateField(stream, "environment", new CountingEnvironment());
+
+            assertThatThrownBy(stream::initialOffset)
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("has no partition streams");
+        }
+    }
+
+    // ======================================================================
     // planInputPartitions
     // ======================================================================
 
@@ -168,6 +306,13 @@ class RabbitMQMicroBatchStreamTest {
                     new RabbitMQStreamOffset(endMap));
 
             assertThat(partitions).hasSize(2);
+            Map<String, long[]> seen = new LinkedHashMap<>();
+            for (InputPartition partition : partitions) {
+                RabbitMQInputPartition rp = (RabbitMQInputPartition) partition;
+                seen.put(rp.getStream(), new long[]{rp.getStartOffset(), rp.getEndOffset()});
+            }
+            assertThat(seen).containsEntry("s1", new long[]{10L, 100L});
+            assertThat(seen).containsEntry("s2", new long[]{50L, 200L});
         }
 
         @Test
@@ -215,6 +360,13 @@ class RabbitMQMicroBatchStreamTest {
                     start, new RabbitMQStreamOffset(endMap));
 
             assertThat(partitions).hasSize(2);
+            Map<String, long[]> seen = new LinkedHashMap<>();
+            for (InputPartition partition : partitions) {
+                RabbitMQInputPartition rp = (RabbitMQInputPartition) partition;
+                seen.put(rp.getStream(), new long[]{rp.getStartOffset(), rp.getEndOffset()});
+            }
+            assertThat(seen).containsEntry("s1", new long[]{10L, 100L});
+            assertThat(seen).containsEntry("new-stream", new long[]{0L, 50L});
         }
 
         @Test
@@ -340,6 +492,377 @@ class RabbitMQMicroBatchStreamTest {
 
             assertThat(stream.reportLatestOffset()).isEqualTo(tail);
         }
+
+        @Test
+        void reportLatestOffsetUsesLimitedWhenTailMissing() throws Exception {
+            RabbitMQMicroBatchStream stream = createStream(minimalOptions());
+            RabbitMQStreamOffset limited = new RabbitMQStreamOffset(Map.of("test-stream", 10L));
+            setPrivateField(stream, "cachedLatestOffset", limited);
+            setPrivateField(stream, "cachedTailOffset", null);
+
+            assertThat(stream.reportLatestOffset()).isEqualTo(limited);
+        }
+    }
+
+    // ======================================================================
+    // latestOffset
+    // ======================================================================
+
+    @Nested
+    class LatestOffset {
+
+        @Test
+        void latestOffsetReturnsStartWhenNoNewData() throws Exception {
+            RabbitMQMicroBatchStream stream = createStream(minimalOptions());
+            Map<String, Long> snapshot = Map.of("test-stream", 10L);
+            setPrivateField(stream, "availableNowSnapshot", snapshot);
+
+            RabbitMQStreamOffset start = new RabbitMQStreamOffset(snapshot);
+            Offset latest = stream.latestOffset(start, ReadLimit.allAvailable());
+
+            assertThat(latest).isSameAs(start);
+        }
+
+        @Test
+        void latestOffsetClampsTailBelowStartOffsets() throws Exception {
+            RabbitMQMicroBatchStream stream = createStream(minimalOptions());
+            Map<String, Long> snapshot = Map.of("s1", 5L, "s2", 100L);
+            setPrivateField(stream, "availableNowSnapshot", snapshot);
+
+            RabbitMQStreamOffset start = new RabbitMQStreamOffset(Map.of("s1", 10L, "s2", 50L));
+            Offset latest = stream.latestOffset(start, ReadLimit.allAvailable());
+
+            RabbitMQStreamOffset latestOffset = (RabbitMQStreamOffset) latest;
+            assertThat(latestOffset.getStreamOffsets()).containsEntry("s1", 10L);
+            assertThat(latestOffset.getStreamOffsets()).containsEntry("s2", 100L);
+        }
+
+        @Test
+        void latestOffsetUnknownReadLimitDefaultsToAllAvailable() throws Exception {
+            RabbitMQMicroBatchStream stream = createStream(minimalOptions());
+            Map<String, Long> snapshot = Map.of("s1", 20L);
+            setPrivateField(stream, "availableNowSnapshot", snapshot);
+
+            RabbitMQStreamOffset start = new RabbitMQStreamOffset(Map.of("s1", 10L));
+            ReadLimit unknownLimit = ReadLimit.minRows(5, 1000);
+
+            RabbitMQStreamOffset latest = (RabbitMQStreamOffset) stream.latestOffset(start, unknownLimit);
+            assertThat(latest.getStreamOffsets()).containsEntry("s1", 20L);
+        }
+
+        @Test
+        void compositeReadLimitAppliesMostRestrictivePerStream() throws Exception {
+            RabbitMQMicroBatchStream stream = createStream(minimalOptions());
+            Map<String, Long> snapshot = new LinkedHashMap<>();
+            snapshot.put("s1", 100L);
+            snapshot.put("s2", 200L);
+            setPrivateField(stream, "availableNowSnapshot", snapshot);
+            setPrivateField(stream, "estimatedMessageSize", 2);
+
+            Map<String, Long> startOffsets = new LinkedHashMap<>();
+            startOffsets.put("s1", 0L);
+            startOffsets.put("s2", 0L);
+            RabbitMQStreamOffset start = new RabbitMQStreamOffset(startOffsets);
+
+            ReadLimit limit = ReadLimit.compositeLimit(new ReadLimit[]{
+                    ReadLimit.maxRows(100),
+                    ReadLimit.maxBytes(50_000)
+            });
+
+            RabbitMQStreamOffset latest = (RabbitMQStreamOffset) stream.latestOffset(start, limit);
+            assertThat(latest.getStreamOffsets()).containsEntry("s1", 34L);
+            assertThat(latest.getStreamOffsets()).containsEntry("s2", 66L);
+        }
+
+        @Test
+        void resolveStartingOffsetTimestampUsesFirstAvailable() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("startingOffsets", "timestamp");
+            opts.put("startingTimestamp", "1700000000000");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            setPrivateField(stream, "environment", new FirstOffsetEnvironment(10L));
+
+            RabbitMQStreamOffset offset = (RabbitMQStreamOffset) stream.initialOffset();
+            assertThat(offset.getStreamOffsets()).containsEntry("test-stream", 10L);
+        }
+    }
+
+    @Nested
+    class TriggerAvailableNow {
+
+        @Test
+        void prepareForTriggerAvailableNowSnapshotsAndFreezesTail() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("failOnDataLoss", "false");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            setPrivateField(stream, "environment", new CountingEnvironment());
+            setPrivateField(stream, "availableNowSnapshot", Map.of("test-stream", 5L));
+
+            stream.prepareForTriggerAvailableNow();
+
+            RabbitMQStreamOffset start = new RabbitMQStreamOffset(Map.of("test-stream", 0L));
+            RabbitMQStreamOffset latest =
+                    (RabbitMQStreamOffset) stream.latestOffset(start, ReadLimit.allAvailable());
+            assertThat(latest.getStreamOffsets()).containsEntry("test-stream", 5L);
+
+            RabbitMQStreamOffset latestAgain =
+                    (RabbitMQStreamOffset) stream.latestOffset(start, ReadLimit.allAvailable());
+            assertThat(latestAgain.getStreamOffsets()).containsEntry("test-stream", 5L);
+        }
+
+        @Test
+        void latestOffsetRespectsAvailableNowSnapshotUnderLargerTails() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("failOnDataLoss", "false");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            setPrivateField(stream, "environment", new CountingEnvironment());
+            setPrivateField(stream, "availableNowSnapshot", Map.of("test-stream", 5L));
+
+            stream.prepareForTriggerAvailableNow();
+
+            RabbitMQStreamOffset start = new RabbitMQStreamOffset(Map.of("test-stream", 0L));
+            RabbitMQStreamOffset latest =
+                    (RabbitMQStreamOffset) stream.latestOffset(start, ReadLimit.allAvailable());
+            assertThat(latest.getStreamOffsets()).containsEntry("test-stream", 5L);
+        }
+
+        @Test
+        void queryTailOffsetsForAvailableNowChoosesMaxOfStatsAndProbe() throws Exception {
+            RabbitMQMicroBatchStream stream = createStream(minimalOptions());
+            setPrivateField(stream, "environment", new CountingEnvironment());
+            setPrivateField(stream, "availableNowSnapshot", null);
+
+            stream.prepareForTriggerAvailableNow();
+
+            RabbitMQStreamOffset latest = (RabbitMQStreamOffset) stream.latestOffset(
+                    new RabbitMQStreamOffset(Map.of("test-stream", 0L)),
+                    ReadLimit.allAvailable());
+            assertThat(latest.getStreamOffsets()).containsEntry("test-stream", 15L);
+        }
+
+        @Test
+        void probeTailOffsetFromLastMessageHandlesInterruptEmptyPollAndCloseFailure() throws Exception {
+            RabbitMQMicroBatchStream stream = createStream(minimalOptions());
+
+            Thread.currentThread().interrupt();
+            long interrupted = invokeProbe(stream, new ProbingErrorEnvironment());
+            Thread.interrupted();
+
+            long empty = invokeProbe(stream, new ProbingErrorEnvironment());
+            long closeFail = invokeProbe(stream, new ProbingErrorEnvironment());
+
+            assertThat(interrupted).isEqualTo(0L);
+            assertThat(empty).isEqualTo(0L);
+            assertThat(closeFail).isEqualTo(0L);
+            Thread.interrupted();
+        }
+    }
+
+    @Nested
+    class CommitAndStopBehavior {
+
+        @Test
+        void stopPersistsCachedOffsetsWhenCommitNotCalled() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            OffsetTrackingEnvironment env = new OffsetTrackingEnvironment();
+            setPrivateField(stream, "environment", env);
+            setPrivateField(stream, "cachedLatestOffset",
+                    new RabbitMQStreamOffset(Map.of("test-stream", 10L)));
+
+            stream.stop();
+
+            assertThat(env.recordedOffsets).containsExactly(Map.entry("test-stream", 9L));
+        }
+
+        @Test
+        void persistBrokerOffsetsDedupesRepeatedEndOffsets() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            OffsetTrackingEnvironment env = new OffsetTrackingEnvironment();
+            setPrivateField(stream, "environment", env);
+
+            stream.commit(new RabbitMQStreamOffset(Map.of("test-stream", 10L)));
+            stream.commit(new RabbitMQStreamOffset(Map.of("test-stream", 10L)));
+
+            assertThat(env.recordedOffsets).containsExactly(Map.entry("test-stream", 9L));
+        }
+
+        @Test
+        void persistBrokerOffsetsIgnoresZeroEndOffsets() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            OffsetTrackingEnvironment env = new OffsetTrackingEnvironment();
+            setPrivateField(stream, "environment", env);
+
+            stream.commit(new RabbitMQStreamOffset(Map.of("test-stream", 0L)));
+
+            assertThat(env.recordedOffsets).isEmpty();
+        }
+    }
+
+    @Nested
+    class PlanInputPartitionsDataLoss {
+
+        @Test
+        void planInputPartitionsRetentionTruncationFailOnDataLossTrueThrows() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("failOnDataLoss", "true");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            setPrivateField(stream, "environment", new FirstOffsetEnvironment(10L));
+
+            RabbitMQStreamOffset start = new RabbitMQStreamOffset(Map.of("test-stream", 0L));
+            RabbitMQStreamOffset end = new RabbitMQStreamOffset(Map.of("test-stream", 20L));
+
+            assertThatThrownBy(() -> stream.planInputPartitions(start, end))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("before the first available offset");
+        }
+
+        @Test
+        void planInputPartitionsRetentionTruncationFailOnDataLossFalseAdvancesStart() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("failOnDataLoss", "false");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            setPrivateField(stream, "environment", new FirstOffsetEnvironment(10L));
+
+            RabbitMQStreamOffset start = new RabbitMQStreamOffset(Map.of("test-stream", 0L));
+            RabbitMQStreamOffset end = new RabbitMQStreamOffset(Map.of("test-stream", 20L));
+
+            InputPartition[] partitions = stream.planInputPartitions(start, end);
+            assertThat(partitions).hasSize(1);
+            RabbitMQInputPartition partition = (RabbitMQInputPartition) partitions[0];
+            assertThat(partition.getStartOffset()).isEqualTo(10L);
+        }
+
+        @Test
+        void planInputPartitionsMissingStreamFailOnDataLossFalseSkips() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("failOnDataLoss", "false");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            setPrivateField(stream, "environment", new MissingStreamEnvironment());
+
+            RabbitMQStreamOffset start = new RabbitMQStreamOffset(Map.of("test-stream", 0L));
+            RabbitMQStreamOffset end = new RabbitMQStreamOffset(Map.of("test-stream", 20L));
+
+            InputPartition[] partitions = stream.planInputPartitions(start, end);
+            assertThat(partitions).isEmpty();
+        }
+
+        @Test
+        void planInputPartitionsMissingStreamFailOnDataLossTrueThrows() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("failOnDataLoss", "true");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            setPrivateField(stream, "environment", new MissingStreamEnvironment());
+
+            RabbitMQStreamOffset start = new RabbitMQStreamOffset(Map.of("test-stream", 0L));
+            RabbitMQStreamOffset end = new RabbitMQStreamOffset(Map.of("test-stream", 20L));
+
+            assertThatThrownBy(() -> stream.planInputPartitions(start, end))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("no longer exists");
+        }
+    }
+
+    @Nested
+    class SplitPlanning {
+
+        @Test
+        void minPartitionsSplitAllocationExactness() {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("minPartitions", "4");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+
+            Map<String, Long> start = new LinkedHashMap<>();
+            start.put("s1", 0L);
+            start.put("s2", 0L);
+            Map<String, Long> end = new LinkedHashMap<>();
+            end.put("s1", 100L);
+            end.put("s2", 100L);
+
+            InputPartition[] partitions = stream.planInputPartitions(
+                    new RabbitMQStreamOffset(start), new RabbitMQStreamOffset(end));
+
+            assertThat(partitions).hasSize(4);
+            Map<String, long[]> merged = new LinkedHashMap<>();
+            for (InputPartition partition : partitions) {
+                RabbitMQInputPartition p = (RabbitMQInputPartition) partition;
+                merged.merge(p.getStream(), new long[]{p.getStartOffset(), p.getEndOffset()},
+                        (current, value) -> new long[]{current[0], value[1]});
+            }
+            assertThat(merged.get("s1")[0]).isEqualTo(0L);
+            assertThat(merged.get("s1")[1]).isEqualTo(100L);
+            assertThat(merged.get("s2")[0]).isEqualTo(0L);
+            assertThat(merged.get("s2")[1]).isEqualTo(100L);
+        }
+
+        @Test
+        void splitAllocationWhenRemainderTiesOccur() {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("minPartitions", "3");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+
+            Map<String, Long> start = new LinkedHashMap<>();
+            start.put("s1", 0L);
+            start.put("s2", 0L);
+            Map<String, Long> end = new LinkedHashMap<>();
+            end.put("s1", 100L);
+            end.put("s2", 100L);
+
+            InputPartition[] partitions = stream.planInputPartitions(
+                    new RabbitMQStreamOffset(start), new RabbitMQStreamOffset(end));
+
+            assertThat(partitions).hasSize(3);
+            int s1Count = 0;
+            int s2Count = 0;
+            for (InputPartition partition : partitions) {
+                RabbitMQInputPartition p = (RabbitMQInputPartition) partition;
+                if (p.getStream().equals("s1")) {
+                    s1Count++;
+                } else if (p.getStream().equals("s2")) {
+                    s2Count++;
+                }
+            }
+            assertThat(s1Count + s2Count).isEqualTo(3);
+            assertThat(Math.abs(s1Count - s2Count)).isLessThanOrEqualTo(1);
+        }
     }
 
     // ======================================================================
@@ -385,7 +908,35 @@ class RabbitMQMicroBatchStreamTest {
 
             assertThat(metrics).containsEntry("minOffsetsBehindLatest", "15");
             assertThat(metrics).containsEntry("maxOffsetsBehindLatest", "15");
-            assertThat(metrics).containsEntry("avgOffsetsBehindLatest", "15.0");
+            assertThat(metrics).containsEntry("avgOffsetsBehindLatest", "15,0");
+        }
+
+        @Test
+        void metricsWithMultipleStreamsAndAsymmetricLag() throws Exception {
+            RabbitMQMicroBatchStream stream = createStream(minimalOptions());
+            setPrivateField(stream, "cachedTailOffset",
+                    new RabbitMQStreamOffset(Map.of("s1", 100L, "s2", 50L)));
+
+            Map<String, String> metrics = stream.metrics(Optional.of(
+                    new RabbitMQStreamOffset(Map.of("s1", 90L, "s2", 10L))));
+
+            assertThat(metrics).containsEntry("minOffsetsBehindLatest", "10");
+            assertThat(metrics).containsEntry("maxOffsetsBehindLatest", "40");
+            assertThat(metrics).containsEntry("avgOffsetsBehindLatest", "25,0");
+        }
+
+        @Test
+        void metricsClampWhenConsumedOffsetAboveTail() throws Exception {
+            RabbitMQMicroBatchStream stream = createStream(minimalOptions());
+            setPrivateField(stream, "cachedTailOffset",
+                    new RabbitMQStreamOffset(Map.of("s1", 50L)));
+
+            Map<String, String> metrics = stream.metrics(Optional.of(
+                    new RabbitMQStreamOffset(Map.of("s1", 70L))));
+
+            assertThat(metrics).containsEntry("minOffsetsBehindLatest", "0");
+            assertThat(metrics).containsEntry("maxOffsetsBehindLatest", "0");
+            assertThat(metrics).containsEntry("avgOffsetsBehindLatest", "0,0");
         }
     }
 
@@ -458,5 +1009,749 @@ class RabbitMQMicroBatchStreamTest {
         Method method = RabbitMQMicroBatchStream.class.getDeclaredMethod(methodName, parameterTypes);
         method.setAccessible(true);
         return method.invoke(null, args);
+    }
+
+    private static long invokeProbe(RabbitMQMicroBatchStream stream,
+                                    com.rabbitmq.stream.Environment env) throws Exception {
+        Method method = RabbitMQMicroBatchStream.class.getDeclaredMethod(
+                "probeTailOffsetFromLastMessage",
+                com.rabbitmq.stream.Environment.class, String.class);
+        method.setAccessible(true);
+        return (long) method.invoke(stream, env, "test-stream");
+    }
+
+
+    private static final class CountingEnvironment implements com.rabbitmq.stream.Environment {
+        private int calls = 0;
+
+        @Override
+        public com.rabbitmq.stream.StreamCreator streamCreator() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void deleteStream(String stream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void deleteSuperStream(String superStream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public com.rabbitmq.stream.StreamStats queryStreamStats(String stream) {
+            calls++;
+            long offset = calls == 1 ? 4L : 9L;
+            return new FixedStreamStats(offset);
+        }
+
+        @Override
+        public void storeOffset(String reference, String stream, long offset) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public boolean streamExists(String stream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public com.rabbitmq.stream.ProducerBuilder producerBuilder() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public com.rabbitmq.stream.ConsumerBuilder consumerBuilder() {
+            return new ProbingConsumerBuilder();
+        }
+
+        @Override
+        public void close() {
+        }
+    }
+
+    private static final class FirstOffsetEnvironment implements com.rabbitmq.stream.Environment {
+        private final long firstOffset;
+
+        private FirstOffsetEnvironment(long firstOffset) {
+            this.firstOffset = firstOffset;
+        }
+
+        @Override
+        public com.rabbitmq.stream.StreamCreator streamCreator() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void deleteStream(String stream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void deleteSuperStream(String superStream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public com.rabbitmq.stream.StreamStats queryStreamStats(String stream) {
+            return new FixedStreamStats(firstOffset);
+        }
+
+        @Override
+        public void storeOffset(String reference, String stream, long offset) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public boolean streamExists(String stream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public com.rabbitmq.stream.ProducerBuilder producerBuilder() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public com.rabbitmq.stream.ConsumerBuilder consumerBuilder() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void close() {
+        }
+    }
+
+    private static final class MissingStreamEnvironment implements com.rabbitmq.stream.Environment {
+        @Override
+        public com.rabbitmq.stream.StreamCreator streamCreator() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void deleteStream(String stream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void deleteSuperStream(String superStream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public com.rabbitmq.stream.StreamStats queryStreamStats(String stream) {
+            throw new com.rabbitmq.stream.StreamDoesNotExistException(stream);
+        }
+
+        @Override
+        public void storeOffset(String reference, String stream, long offset) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public boolean streamExists(String stream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public com.rabbitmq.stream.ProducerBuilder producerBuilder() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public com.rabbitmq.stream.ConsumerBuilder consumerBuilder() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void close() {
+        }
+    }
+
+    private static final class FixedStreamStats implements com.rabbitmq.stream.StreamStats {
+        private final long firstOffset;
+
+        private FixedStreamStats(long firstOffset) {
+            this.firstOffset = firstOffset;
+        }
+
+        @Override
+        public long firstOffset() {
+            return firstOffset;
+        }
+
+        @Override
+        public long committedChunkId() {
+            return firstOffset;
+        }
+    }
+
+
+    private static final class ProbingConsumerBuilder implements com.rabbitmq.stream.ConsumerBuilder {
+        private com.rabbitmq.stream.MessageHandler handler;
+
+        @Override
+        public com.rabbitmq.stream.ConsumerBuilder stream(String stream) {
+            return this;
+        }
+
+        @Override
+        public com.rabbitmq.stream.ConsumerBuilder superStream(String superStream) {
+            return this;
+        }
+
+        @Override
+        public com.rabbitmq.stream.ConsumerBuilder offset(
+                com.rabbitmq.stream.OffsetSpecification offsetSpecification) {
+            return this;
+        }
+
+        @Override
+        public com.rabbitmq.stream.ConsumerBuilder messageHandler(
+                com.rabbitmq.stream.MessageHandler messageHandler) {
+            this.handler = messageHandler;
+            return this;
+        }
+
+        @Override
+        public com.rabbitmq.stream.ConsumerBuilder name(String name) {
+            return this;
+        }
+
+        @Override
+        public com.rabbitmq.stream.ConsumerBuilder singleActiveConsumer() {
+            return this;
+        }
+
+        @Override
+        public com.rabbitmq.stream.ConsumerBuilder consumerUpdateListener(
+                com.rabbitmq.stream.ConsumerUpdateListener consumerUpdateListener) {
+            return this;
+        }
+
+        @Override
+        public com.rabbitmq.stream.ConsumerBuilder subscriptionListener(
+                com.rabbitmq.stream.SubscriptionListener subscriptionListener) {
+            return this;
+        }
+
+        @Override
+        public com.rabbitmq.stream.ConsumerBuilder listeners(
+                com.rabbitmq.stream.Resource.StateListener... listeners) {
+            return this;
+        }
+
+        @Override
+        public com.rabbitmq.stream.ConsumerBuilder.ManualTrackingStrategy manualTrackingStrategy() {
+            return new NoopManualTrackingStrategy(this);
+        }
+
+        @Override
+        public com.rabbitmq.stream.ConsumerBuilder.AutoTrackingStrategy autoTrackingStrategy() {
+            return new NoopAutoTrackingStrategy(this);
+        }
+
+        @Override
+        public com.rabbitmq.stream.ConsumerBuilder noTrackingStrategy() {
+            return this;
+        }
+
+        @Override
+        public ConsumerBuilder.FilterConfiguration filter() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public ConsumerBuilder.FlowConfiguration flow() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public com.rabbitmq.stream.Consumer build() {
+            if (handler != null) {
+                handler.handle(new FixedContext(4L), CODEC.messageBuilder().addData(new byte[0]).build());
+                handler.handle(new FixedContext(14L), CODEC.messageBuilder().addData(new byte[0]).build());
+            }
+            return new NoopConsumer();
+        }
+    }
+
+    private static final class FixedContext implements com.rabbitmq.stream.MessageHandler.Context {
+        private final long offset;
+
+        private FixedContext(long offset) {
+            this.offset = offset;
+        }
+
+        @Override
+        public long offset() {
+            return offset;
+        }
+
+        @Override
+        public void storeOffset() {
+        }
+
+        @Override
+        public long timestamp() {
+            return 0L;
+        }
+
+        @Override
+        public long committedChunkId() {
+            return 0L;
+        }
+
+        @Override
+        public String stream() {
+            return "test-stream";
+        }
+
+        @Override
+        public com.rabbitmq.stream.Consumer consumer() {
+            return null;
+        }
+
+        @Override
+        public void processed() {
+        }
+    }
+
+    private static final class ProbingErrorEnvironment implements com.rabbitmq.stream.Environment {
+        @Override
+        public com.rabbitmq.stream.ConsumerBuilder consumerBuilder() {
+            return new ProbingErrorConsumerBuilder();
+        }
+
+        @Override
+        public com.rabbitmq.stream.StreamCreator streamCreator() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void deleteStream(String stream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void deleteSuperStream(String superStream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public com.rabbitmq.stream.StreamStats queryStreamStats(String stream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void storeOffset(String reference, String stream, long offset) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public boolean streamExists(String stream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public com.rabbitmq.stream.ProducerBuilder producerBuilder() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void close() {
+        }
+    }
+
+    private static final class ThrowingConsumerBuilderEnvironment implements com.rabbitmq.stream.Environment {
+        private final RuntimeException error;
+
+        private ThrowingConsumerBuilderEnvironment(RuntimeException error) {
+            this.error = error;
+        }
+
+        @Override
+        public com.rabbitmq.stream.ConsumerBuilder consumerBuilder() {
+            throw error;
+        }
+
+        @Override
+        public com.rabbitmq.stream.StreamCreator streamCreator() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void deleteStream(String stream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void deleteSuperStream(String superStream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public com.rabbitmq.stream.StreamStats queryStreamStats(String stream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void storeOffset(String reference, String stream, long offset) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public boolean streamExists(String stream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public com.rabbitmq.stream.ProducerBuilder producerBuilder() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void close() {
+        }
+    }
+
+    private static final class ProbingErrorConsumerBuilder implements com.rabbitmq.stream.ConsumerBuilder {
+        private com.rabbitmq.stream.MessageHandler handler;
+
+        @Override
+        public com.rabbitmq.stream.ConsumerBuilder stream(String stream) {
+            return this;
+        }
+
+        @Override
+        public com.rabbitmq.stream.ConsumerBuilder superStream(String superStream) {
+            return this;
+        }
+
+        @Override
+        public com.rabbitmq.stream.ConsumerBuilder offset(
+                com.rabbitmq.stream.OffsetSpecification offsetSpecification) {
+            return this;
+        }
+
+        @Override
+        public com.rabbitmq.stream.ConsumerBuilder messageHandler(
+                com.rabbitmq.stream.MessageHandler messageHandler) {
+            this.handler = messageHandler;
+            return this;
+        }
+
+        @Override
+        public com.rabbitmq.stream.ConsumerBuilder name(String name) {
+            return this;
+        }
+
+        @Override
+        public com.rabbitmq.stream.ConsumerBuilder singleActiveConsumer() {
+            return this;
+        }
+
+        @Override
+        public com.rabbitmq.stream.ConsumerBuilder consumerUpdateListener(
+                com.rabbitmq.stream.ConsumerUpdateListener consumerUpdateListener) {
+            return this;
+        }
+
+        @Override
+        public com.rabbitmq.stream.ConsumerBuilder subscriptionListener(
+                com.rabbitmq.stream.SubscriptionListener subscriptionListener) {
+            return this;
+        }
+
+        @Override
+        public com.rabbitmq.stream.ConsumerBuilder listeners(
+                com.rabbitmq.stream.Resource.StateListener... listeners) {
+            return this;
+        }
+
+        @Override
+        public com.rabbitmq.stream.ConsumerBuilder.ManualTrackingStrategy manualTrackingStrategy() {
+            return new NoopManualTrackingStrategy(this);
+        }
+
+        @Override
+        public com.rabbitmq.stream.ConsumerBuilder.AutoTrackingStrategy autoTrackingStrategy() {
+            return new NoopAutoTrackingStrategy(this);
+        }
+
+        @Override
+        public com.rabbitmq.stream.ConsumerBuilder noTrackingStrategy() {
+            return this;
+        }
+
+        @Override
+        public ConsumerBuilder.FilterConfiguration filter() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public ConsumerBuilder.FlowConfiguration flow() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public com.rabbitmq.stream.Consumer build() {
+            if (handler != null && Thread.currentThread().isInterrupted()) {
+                handler.handle(new FixedContext(1L), CODEC.messageBuilder().addData(new byte[0]).build());
+            }
+            return new ProbingErrorConsumer();
+        }
+    }
+
+    private static final class ProbingErrorConsumer implements com.rabbitmq.stream.Consumer {
+        @Override
+        public void store(long offset) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void close() {
+            throw new RuntimeException("close failed");
+        }
+
+        @Override
+        public long storedOffset() {
+            throw new UnsupportedOperationException();
+        }
+    }
+
+    private static final class NoopConsumer implements com.rabbitmq.stream.Consumer {
+        @Override
+        public void store(long offset) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void close() {
+        }
+
+        @Override
+        public long storedOffset() {
+            throw new UnsupportedOperationException();
+        }
+    }
+
+    private static final class NoopManualTrackingStrategy
+            implements com.rabbitmq.stream.ConsumerBuilder.ManualTrackingStrategy {
+        private final com.rabbitmq.stream.ConsumerBuilder builder;
+
+        private NoopManualTrackingStrategy(com.rabbitmq.stream.ConsumerBuilder builder) {
+            this.builder = builder;
+        }
+
+        @Override
+        public com.rabbitmq.stream.ConsumerBuilder.ManualTrackingStrategy checkInterval(
+                java.time.Duration checkInterval) {
+            return this;
+        }
+
+        @Override
+        public com.rabbitmq.stream.ConsumerBuilder builder() {
+            return builder;
+        }
+    }
+
+    private static final class NoopAutoTrackingStrategy
+            implements com.rabbitmq.stream.ConsumerBuilder.AutoTrackingStrategy {
+        private final com.rabbitmq.stream.ConsumerBuilder builder;
+
+        private NoopAutoTrackingStrategy(com.rabbitmq.stream.ConsumerBuilder builder) {
+            this.builder = builder;
+        }
+
+        @Override
+        public com.rabbitmq.stream.ConsumerBuilder.AutoTrackingStrategy messageCountBeforeStorage(
+                int messageCountBeforeStorage) {
+            return this;
+        }
+
+        @Override
+        public com.rabbitmq.stream.ConsumerBuilder.AutoTrackingStrategy flushInterval(
+                java.time.Duration flushInterval) {
+            return this;
+        }
+
+        @Override
+        public com.rabbitmq.stream.ConsumerBuilder builder() {
+            return builder;
+        }
+    }
+
+    private static final class OffsetTrackingEnvironment implements com.rabbitmq.stream.Environment {
+        private final java.util.List<Map.Entry<String, Long>> recordedOffsets =
+                new java.util.ArrayList<>();
+
+        @Override
+        public com.rabbitmq.stream.StreamCreator streamCreator() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void deleteStream(String stream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void deleteSuperStream(String superStream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public com.rabbitmq.stream.StreamStats queryStreamStats(String stream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void storeOffset(String reference, String stream, long offset) {
+            recordedOffsets.add(Map.entry(stream, offset));
+        }
+
+        @Override
+        public boolean streamExists(String stream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public com.rabbitmq.stream.ProducerBuilder producerBuilder() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public com.rabbitmq.stream.ConsumerBuilder consumerBuilder() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void close() {
+        }
+    }
+
+    private static final class LocatorEnvironment implements Environment {
+        private final Map<String, LocatorResponse> responses;
+
+        private LocatorEnvironment(Map<String, LocatorResponse> responses) {
+            this.responses = responses;
+        }
+
+        @SuppressWarnings("unused")
+        public Object locator() {
+            return new Locator(responses);
+        }
+
+        @Override
+        public StreamCreator streamCreator() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void deleteStream(String stream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void deleteSuperStream(String superStream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public StreamStats queryStreamStats(String stream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void storeOffset(String reference, String stream, long offset) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public boolean streamExists(String stream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public ProducerBuilder producerBuilder() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public ConsumerBuilder consumerBuilder() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void close() {
+        }
+    }
+
+    private static final class Locator {
+        private final Map<String, LocatorResponse> responses;
+
+        private Locator(Map<String, LocatorResponse> responses) {
+            this.responses = responses;
+        }
+
+        @SuppressWarnings("unused")
+        public Object client() {
+            return new LocatorClient(responses);
+        }
+    }
+
+    private static final class LocatorClient {
+        private final Map<String, LocatorResponse> responses;
+
+        private LocatorClient(Map<String, LocatorResponse> responses) {
+            this.responses = responses;
+        }
+
+        @SuppressWarnings("unused")
+        public Object queryOffset(String consumerName, String stream) {
+            LocatorResponse response = responses.get(stream);
+            if (response == null) {
+                return LocatorResponse.noOffset();
+            }
+            return response;
+        }
+    }
+
+    private static final class LocatorResponse {
+        private final boolean ok;
+        private final short responseCode;
+        private final long offset;
+
+        private LocatorResponse(boolean ok, short responseCode, long offset) {
+            this.ok = ok;
+            this.responseCode = responseCode;
+            this.offset = offset;
+        }
+
+        static LocatorResponse ok(long offset) {
+            return new LocatorResponse(true, (short) 1, offset);
+        }
+
+        static LocatorResponse noOffset() {
+            return new LocatorResponse(false,
+                    com.rabbitmq.stream.Constants.RESPONSE_CODE_NO_OFFSET, 0L);
+        }
+
+        @SuppressWarnings("unused")
+        public boolean isOk() {
+            return ok;
+        }
+
+        @SuppressWarnings("unused")
+        public long getOffset() {
+            return offset;
+        }
+
+        @SuppressWarnings("unused")
+        public short getResponseCode() {
+            return responseCode;
+        }
     }
 }

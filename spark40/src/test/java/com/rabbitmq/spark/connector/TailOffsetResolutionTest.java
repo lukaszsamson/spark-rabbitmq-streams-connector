@@ -24,6 +24,20 @@ class TailOffsetResolutionTest {
         assertThat(RabbitMQScan.resolveTailOffset(stats)).isEqualTo(11);
     }
 
+    @Test
+    void fallsBackWhenCommittedOffsetThrowsInvocationTargetException() throws Exception {
+        StreamStats stats = new FailingStats(10, new RuntimeException("boom"));
+
+        assertThat(RabbitMQMicroBatchStream.resolveTailOffset(stats)).isEqualTo(11);
+    }
+
+    @Test
+    void fallsBackWhenCommittedOffsetIllegalAccess() throws Exception {
+        StreamStats stats = new PrivateCommittedOffsetStats(10, 42);
+
+        assertThat(RabbitMQMicroBatchStream.resolveTailOffset(stats)).isEqualTo(11);
+    }
+
     private static final class TestStats implements StreamStats {
         private final long committedChunkId;
         private final long committedOffset;
@@ -51,6 +65,55 @@ class TailOffsetResolutionTest {
             if (throwNoOffsetOnCommittedOffset) {
                 throw new NoOffsetException("committedOffset unavailable");
             }
+            return committedOffset;
+        }
+    }
+
+    private static final class FailingStats implements StreamStats {
+        private final long committedChunkId;
+        private final RuntimeException failure;
+
+        private FailingStats(long committedChunkId, RuntimeException failure) {
+            this.committedChunkId = committedChunkId;
+            this.failure = failure;
+        }
+
+        @Override
+        public long firstOffset() {
+            return 0;
+        }
+
+        @Override
+        public long committedChunkId() {
+            return committedChunkId;
+        }
+
+        public long committedOffset() {
+            throw failure;
+        }
+    }
+
+    private static final class PrivateCommittedOffsetStats implements StreamStats {
+        private final long committedChunkId;
+        private final long committedOffset;
+
+        private PrivateCommittedOffsetStats(long committedChunkId, long committedOffset) {
+            this.committedChunkId = committedChunkId;
+            this.committedOffset = committedOffset;
+        }
+
+        @Override
+        public long firstOffset() {
+            return 0;
+        }
+
+        @Override
+        public long committedChunkId() {
+            return committedChunkId;
+        }
+
+        @SuppressWarnings("unused")
+        private long committedOffset() {
             return committedOffset;
         }
     }

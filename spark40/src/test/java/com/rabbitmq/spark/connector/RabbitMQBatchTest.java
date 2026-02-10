@@ -150,7 +150,8 @@ class RabbitMQBatchTest {
             RabbitMQBatch batch = new RabbitMQBatch(opts, SCHEMA, ranges);
 
             InputPartition[] partitions = batch.planInputPartitions();
-            assertThat(partitions.length).isGreaterThanOrEqualTo(10);
+
+            assertThat(partitions).hasSize(10);
 
             // s1 should have more splits than s2
             long s1Splits = java.util.Arrays.stream(partitions)
@@ -159,7 +160,76 @@ class RabbitMQBatchTest {
             long s2Splits = java.util.Arrays.stream(partitions)
                     .filter(p -> ((RabbitMQInputPartition) p).getStream().equals("s2"))
                     .count();
-            assertThat(s1Splits).isGreaterThan(s2Splits);
+            assertThat(s1Splits).isEqualTo(9);
+            assertThat(s2Splits).isEqualTo(1);
+        }
+
+        @Test
+        void planWithSplittingExactPartitionCount() {
+            Map<String, long[]> ranges = new LinkedHashMap<>();
+            ranges.put("s1", new long[]{0, 500});
+            ranges.put("s2", new long[]{0, 500});
+
+            ConnectorOptions opts = optionsWithMinPartitions(4);
+            RabbitMQBatch batch = new RabbitMQBatch(opts, SCHEMA, ranges);
+
+            InputPartition[] partitions = batch.planInputPartitions();
+            assertThat(partitions).hasSize(4);
+        }
+
+        @Test
+        void allocateSplitsRemainderDeterminismOnTies() throws Exception {
+            Map<String, long[]> ranges = new LinkedHashMap<>();
+            ranges.put("s1", new long[]{0, 100});
+            ranges.put("s2", new long[]{0, 100});
+            ranges.put("s3", new long[]{0, 100});
+
+            RabbitMQBatch batch = new RabbitMQBatch(optionsWithMinPartitions(4), SCHEMA, ranges);
+            @SuppressWarnings("unchecked")
+            Map<String, Integer> splits = (Map<String, Integer>) invokePrivate(
+                    batch, "allocateSplits", new Class<?>[]{int.class, long.class}, 4, 300L);
+
+            assertThat(splits).containsEntry("s1", 2);
+            assertThat(splits).containsEntry("s2", 1);
+            assertThat(splits).containsEntry("s3", 1);
+        }
+
+        @Test
+        void splitStreamAvoidsZeroSizedPartitionsWhenSplitsExceedMessages() throws Exception {
+            Map<String, long[]> ranges = Map.of("s1", new long[]{0, 2});
+            RabbitMQBatch batch = new RabbitMQBatch(optionsWithMinPartitions(5), SCHEMA, ranges);
+
+            java.util.List<InputPartition> partitions = new java.util.ArrayList<>();
+            invokePrivate(batch, "splitStream",
+                    new Class<?>[]{java.util.List.class, String.class, long.class, long.class, int.class},
+                    partitions, "s1", 0L, 2L, 5);
+
+            assertThat(partitions).hasSize(2);
+        }
+
+        @Test
+        void planWithoutSplittingPreservesInputOrder() {
+            Map<String, long[]> ranges = new LinkedHashMap<>();
+            ranges.put("s2", new long[]{0, 10});
+            ranges.put("s1", new long[]{0, 10});
+
+            RabbitMQBatch batch = new RabbitMQBatch(baseOptions(), SCHEMA, ranges);
+            InputPartition[] partitions = batch.planInputPartitions();
+
+            assertThat(((RabbitMQInputPartition) partitions[0]).getStream()).isEqualTo("s2");
+            assertThat(((RabbitMQInputPartition) partitions[1]).getStream()).isEqualTo("s1");
+        }
+
+        @Test
+        void zeroMessageTotalReturnsEmptyPartitions() {
+            Map<String, long[]> ranges = new LinkedHashMap<>();
+            ranges.put("s1", new long[]{10, 10});
+            ranges.put("s2", new long[]{5, 5});
+
+            RabbitMQBatch batch = new RabbitMQBatch(optionsWithMinPartitions(3), SCHEMA, ranges);
+            InputPartition[] partitions = batch.planInputPartitions();
+
+            assertThat(partitions).isEmpty();
         }
 
         @Test
@@ -210,5 +280,12 @@ class RabbitMQBatchTest {
             assertThat(batch.createReaderFactory()).isNotNull();
             assertThat(batch.createReaderFactory()).isInstanceOf(RabbitMQPartitionReaderFactory.class);
         }
+    }
+
+    private static Object invokePrivate(Object target, String methodName,
+                                        Class<?>[] parameterTypes, Object... args) throws Exception {
+        var method = target.getClass().getDeclaredMethod(methodName, parameterTypes);
+        method.setAccessible(true);
+        return method.invoke(target, args);
     }
 }

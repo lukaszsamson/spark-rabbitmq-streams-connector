@@ -224,10 +224,7 @@ class RowToMessageConverterTest {
             InternalRow row = new GenericInternalRow(new Object[]{"body".getBytes(), null});
 
             Message msg = converter.convert(row, CODEC.messageBuilder());
-            // Properties may be null or have creation_time=0 when not set
-            if (msg.getProperties() != null) {
-                assertThat(msg.getProperties().getCreationTime()).isEqualTo(0L);
-            }
+            assertThat(msg.getProperties()).isNull();
         }
     }
 
@@ -289,6 +286,7 @@ class RowToMessageConverterTest {
             Message msg = converter.convert(row, CODEC.messageBuilder());
             // Message should have body but no properties
             assertThat(msg.getBodyAsBinary()).isEqualTo("body".getBytes());
+            assertThat(msg.getProperties()).isNull();
         }
 
         @Test

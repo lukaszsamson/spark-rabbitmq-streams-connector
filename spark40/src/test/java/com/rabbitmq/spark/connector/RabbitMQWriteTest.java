@@ -5,14 +5,22 @@ import org.apache.spark.sql.connector.metric.CustomSumMetric;
 import org.apache.spark.sql.connector.write.*;
 import org.apache.spark.sql.connector.write.streaming.StreamingDataWriterFactory;
 import org.apache.spark.sql.connector.write.streaming.StreamingWrite;
+import org.apache.spark.sql.catalyst.InternalRow;
+import org.apache.spark.sql.catalyst.expressions.GenericInternalRow;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.Metadata;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
+import org.apache.spark.unsafe.types.UTF8String;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
 import static org.assertj.core.api.Assertions.*;
 
@@ -24,6 +32,11 @@ import static org.assertj.core.api.Assertions.*;
  * requiring a real RabbitMQ broker.
  */
 class RabbitMQWriteTest {
+
+    @AfterEach
+    void tearDown() {
+        EnvironmentPool.getInstance().closeAll();
+    }
 
     // ======================================================================
     // WriteBuilder
@@ -182,22 +195,27 @@ class RabbitMQWriteTest {
         }
 
         @Test
-        void commitDoesNotThrow() {
+        void commitResetsWriterCommitMessages() {
             Write write = buildWrite();
             BatchWrite batchWrite = write.toBatch();
             WriterCommitMessage[] messages = {
                     new RabbitMQWriterCommitMessage(0, 1, 100, 5000),
                     new RabbitMQWriterCommitMessage(1, 2, 200, 10000),
             };
-            assertThatCode(() -> batchWrite.commit(messages)).doesNotThrowAnyException();
+            batchWrite.commit(messages);
+            assertThat(messages[0]).isNull();
+            assertThat(messages[1]).isNull();
         }
 
         @Test
-        void abortDoesNotThrow() {
+        void abortDoesNotClearMessages() {
             Write write = buildWrite();
             BatchWrite batchWrite = write.toBatch();
-            assertThatCode(() -> batchWrite.abort(new WriterCommitMessage[0]))
-                    .doesNotThrowAnyException();
+            WriterCommitMessage[] messages = {
+                    new RabbitMQWriterCommitMessage(0, 1, 100, 5000)
+            };
+            batchWrite.abort(messages);
+            assertThat(messages[0]).isNotNull();
         }
     }
 
@@ -225,36 +243,38 @@ class RabbitMQWriteTest {
         }
 
         @Test
-        void commitDoesNotThrow() {
+        void commitResetsWriterCommitMessages() {
             Write write = buildWrite();
             StreamingWrite streamingWrite = write.toStreaming();
             WriterCommitMessage[] messages = {
                     new RabbitMQWriterCommitMessage(0, 1, 50, 2500),
             };
-            assertThatCode(() -> streamingWrite.commit(0L, messages))
-                    .doesNotThrowAnyException();
+            streamingWrite.commit(0L, messages);
+            assertThat(messages[0]).isNull();
         }
 
         @Test
-        void commitIsIdempotent() {
+        void commitIsIdempotentOnClearedMessages() {
             Write write = buildWrite();
             StreamingWrite streamingWrite = write.toStreaming();
             WriterCommitMessage[] messages = {
                     new RabbitMQWriterCommitMessage(0, 1, 50, 2500),
             };
             // Call commit twice for the same epoch
-            assertThatCode(() -> {
-                streamingWrite.commit(0L, messages);
-                streamingWrite.commit(0L, messages);
-            }).doesNotThrowAnyException();
+            streamingWrite.commit(0L, messages);
+            streamingWrite.commit(0L, messages);
+            assertThat(messages[0]).isNull();
         }
 
         @Test
-        void abortDoesNotThrow() {
+        void abortDoesNotClearMessages() {
             Write write = buildWrite();
             StreamingWrite streamingWrite = write.toStreaming();
-            assertThatCode(() -> streamingWrite.abort(0L, new WriterCommitMessage[0]))
-                    .doesNotThrowAnyException();
+            WriterCommitMessage[] messages = {
+                    new RabbitMQWriterCommitMessage(0, 1, 50, 2500),
+            };
+            streamingWrite.abort(0L, messages);
+            assertThat(messages[0]).isNotNull();
         }
     }
 
@@ -404,6 +424,232 @@ class RabbitMQWriteTest {
         }
     }
 
+    @Nested
+    class DataWriterBehaviorTests {
+
+        @Test
+        void writeThrowsWhenPriorSendErrorExists() throws Exception {
+            RabbitMQDataWriter writer = new RabbitMQDataWriter(
+                    minimalSinkOptions(), minimalSinkSchema(), 0, 1, -1);
+            setPrivateField(writer, "sendError", new java.util.concurrent.atomic.AtomicReference<>(
+                    new RuntimeException("boom")));
+
+            assertThatThrownBy(() -> writer.write(new GenericInternalRow(new Object[]{"x".getBytes()})))
+                    .isInstanceOf(IOException.class)
+                    .hasMessageContaining("Previous send failed");
+        }
+
+        @Test
+        void writeFailsOnStreamModeMismatch() throws Exception {
+            StructType schema = new StructType(new StructField[]{
+                    new StructField("value", DataTypes.BinaryType, false, Metadata.empty()),
+                    new StructField("stream", DataTypes.StringType, true, Metadata.empty()),
+            });
+            RabbitMQDataWriter writer = new RabbitMQDataWriter(
+                    minimalSinkOptions(), schema, 0, 1, -1);
+
+            setPrivateField(writer, "producer", new NoopProducer());
+
+            InternalRow row = new GenericInternalRow(new Object[]{
+                    "body".getBytes(), UTF8String.fromString("other-stream")
+            });
+
+            assertThatThrownBy(() -> writer.write(row))
+                    .isInstanceOf(IOException.class)
+                    .hasMessageContaining("Row targets stream");
+        }
+
+        @Test
+        void writeRequiresRoutingKeyForSuperStreamHashKey() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("superstream", "super");
+            opts.put("routingStrategy", "hash");
+            ConnectorOptions options = new ConnectorOptions(opts);
+
+            RabbitMQDataWriter writer = new RabbitMQDataWriter(
+                    options, minimalSinkSchema(), 0, 1, -1);
+            setPrivateField(writer, "producer", new NoopProducer());
+
+            InternalRow row = new GenericInternalRow(new Object[]{"body".getBytes()});
+
+            assertThatThrownBy(() -> writer.write(row))
+                    .isInstanceOf(IOException.class)
+                    .hasMessageContaining("Routing key is required");
+        }
+
+        @Test
+        void writeAcceptsCustomRoutingStrategyWithoutRoutingKey() throws Exception {
+            TestRoutingStrategy.invoked = false;
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("superstream", "super");
+            opts.put("routingStrategy", "custom");
+            opts.put("partitionerClass", TestRoutingStrategy.class.getName());
+            ConnectorOptions options = new ConnectorOptions(opts);
+
+            RabbitMQDataWriter writer = new RabbitMQDataWriter(
+                    options, minimalSinkSchema(), 0, 1, -1);
+            setPrivateField(writer, "producer", new NoopProducer());
+
+            InternalRow row = new GenericInternalRow(new Object[]{"body".getBytes()});
+
+            assertThatCode(() -> writer.write(row)).doesNotThrowAnyException();
+        }
+
+        @Test
+        void commitTimesOutWhenConfirmsOutstanding() throws Exception {
+            Map<String, String> opts = minimalSinkMap();
+            opts.put("publisherConfirmTimeoutMs", "1");
+            ConnectorOptions options = new ConnectorOptions(opts);
+
+            RabbitMQDataWriter writer = new RabbitMQDataWriter(
+                    options, minimalSinkSchema(), 0, 1, -1);
+            setPrivateField(writer, "outstandingConfirms", new java.util.concurrent.atomic.AtomicLong(1));
+
+            assertThatThrownBy(writer::commit)
+                    .isInstanceOf(IOException.class)
+                    .hasMessageContaining("Timed out waiting for publisher confirms");
+        }
+
+        @Test
+        void commitFailsWhenConfirmationNegative() throws Exception {
+            RabbitMQDataWriter writer = new RabbitMQDataWriter(
+                    minimalSinkOptions(), minimalSinkSchema(), 0, 1, -1);
+            setPrivateField(writer, "sendError", new java.util.concurrent.atomic.AtomicReference<>(
+                    new IOException("confirm failed")));
+
+            assertThatThrownBy(writer::commit)
+                    .isInstanceOf(IOException.class)
+                    .hasMessageContaining("failed confirmation");
+        }
+
+        @Test
+        void commitSucceedsWhenAllConfirmsComplete() throws Exception {
+            RabbitMQDataWriter writer = new RabbitMQDataWriter(
+                    minimalSinkOptions(), minimalSinkSchema(), 0, 1, -1);
+            setPrivateField(writer, "outstandingConfirms", new java.util.concurrent.atomic.AtomicLong(0));
+
+            WriterCommitMessage msg = writer.commit();
+            assertThat(msg).isInstanceOf(RabbitMQWriterCommitMessage.class);
+        }
+
+        @Test
+        void confirmationCallbackDecrementsOutstandingAndWakesWaiters() throws Exception {
+            RabbitMQDataWriter writer = new RabbitMQDataWriter(
+                    minimalSinkOptions(), minimalSinkSchema(), 0, 1, -1);
+            setPrivateField(writer, "producer", new CapturingProducer(true));
+
+            writer.write(new GenericInternalRow(new Object[]{"x".getBytes()}));
+
+            var outstanding = (java.util.concurrent.atomic.AtomicLong) getPrivateField(
+                    writer, "outstandingConfirms");
+            assertThat(outstanding.get()).isEqualTo(0L);
+        }
+
+        @Test
+        void dedupPublishingIdInitializationAndIncrement() throws Exception {
+            Map<String, String> opts = minimalSinkMap();
+            opts.put("producerName", "dedup");
+            ConnectorOptions options = new ConnectorOptions(opts);
+
+            RabbitMQDataWriter writer = new RabbitMQDataWriter(
+                    options, minimalSinkSchema(), 0, 1, -1);
+            setPrivateField(writer, "producer", new PublishingIdProducer(5L));
+            setPrivateField(writer, "nextPublishingId", 6L);
+
+            writer.write(new GenericInternalRow(new Object[]{"a".getBytes()}));
+            writer.write(new GenericInternalRow(new Object[]{"b".getBytes()}));
+
+            long nextId = (long) getPrivateField(writer, "nextPublishingId");
+            assertThat(nextId).isEqualTo(8L);
+        }
+
+        @Test
+        void abortClosesResourcesEvenWhenProducerInitFailed() throws Exception {
+            RabbitMQDataWriter writer = new RabbitMQDataWriter(
+                    minimalSinkOptions(), minimalSinkSchema(), 0, 1, -1);
+            CloseTrackingEnvironment env = new CloseTrackingEnvironment();
+            setPrivateField(writer, "environment", env);
+
+            assertThatCode(writer::abort).doesNotThrowAnyException();
+            assertThat(env.closed).isTrue();
+        }
+
+        @Test
+        void metricsBytesWrittenTracksBodySizes() throws Exception {
+            RabbitMQDataWriter writer = new RabbitMQDataWriter(
+                    minimalSinkOptions(), minimalSinkSchema(), 0, 1, -1);
+            setPrivateField(writer, "producer", new NoopProducer());
+
+            writer.write(new GenericInternalRow(new Object[]{"x".getBytes()}));
+            writer.write(new GenericInternalRow(new Object[]{new byte[0]}));
+
+            var metrics = writer.currentMetricsValues();
+            assertThat(metrics[1].value()).isEqualTo(1L);
+        }
+
+        @Test
+        void initProducerAppliesOptions() throws Exception {
+            Map<String, String> opts = minimalSinkMap();
+            opts.put("maxInFlight", "7");
+            opts.put("publisherConfirmTimeoutMs", "1234");
+            opts.put("batchSize", "5");
+            opts.put("batchPublishingDelayMs", "9");
+            ConnectorOptions options = new ConnectorOptions(opts);
+
+            RabbitMQDataWriter writer = new RabbitMQDataWriter(
+                    options, minimalSinkSchema(), 0, 1, -1);
+            CapturingProducerBuilder builder = new CapturingProducerBuilder();
+            seedEnvironmentPool(options, new BuilderEnvironment(builder));
+
+            writer.write(new GenericInternalRow(new Object[]{"x".getBytes()}));
+
+            assertThat(builder.maxInFlight).isEqualTo(7);
+            assertThat(builder.confirmTimeoutMs).isEqualTo(1234L);
+            assertThat(builder.batchSize).isEqualTo(5);
+            assertThat(builder.batchDelayMs).isEqualTo(9L);
+        }
+
+        @Test
+        void initProducerListenerSetsSendErrorOnClosed() throws Exception {
+            RabbitMQDataWriter writer = new RabbitMQDataWriter(
+                    minimalSinkOptions(), minimalSinkSchema(), 0, 1, -1);
+            CapturingProducerBuilder builder = new CapturingProducerBuilder();
+            seedEnvironmentPool(minimalSinkOptions(), new BuilderEnvironment(builder));
+
+            writer.write(new GenericInternalRow(new Object[]{"x".getBytes()}));
+
+            builder.listener.handle(new FakeStateListenerContext(
+                    com.rabbitmq.stream.Resource.State.OPEN,
+                    com.rabbitmq.stream.Resource.State.CLOSED));
+
+            var sendError = (java.util.concurrent.atomic.AtomicReference<?>) getPrivateField(
+                    writer, "sendError");
+            assertThat(sendError.get()).isInstanceOf(IOException.class);
+        }
+
+        @Test
+        void superstreamCustomRoutingStrategyInvokesStrategy() throws Exception {
+            TestRoutingStrategy.invoked = false;
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("superstream", "super");
+            opts.put("routingStrategy", "custom");
+            opts.put("partitionerClass", TestRoutingStrategy.class.getName());
+            ConnectorOptions options = new ConnectorOptions(opts);
+
+            RabbitMQDataWriter writer = new RabbitMQDataWriter(
+                    options, minimalSinkSchema(), 0, 1, -1);
+            CapturingProducerBuilder builder = new CapturingProducerBuilder();
+            seedEnvironmentPool(options, new BuilderEnvironment(builder));
+
+            writer.write(new GenericInternalRow(new Object[]{"x".getBytes()}));
+
+            assertThat(TestRoutingStrategy.invoked).isTrue();
+        }
+    }
+
     // ======================================================================
     // Table integration
     // ======================================================================
@@ -459,6 +705,42 @@ class RabbitMQWriteTest {
         return () -> numPartitions;
     }
 
+    private static void setPrivateField(Object target, String fieldName, Object value)
+            throws Exception {
+        var field = target.getClass().getDeclaredField(fieldName);
+        field.setAccessible(true);
+        field.set(target, value);
+    }
+
+    private static void seedEnvironmentPool(ConnectorOptions options, com.rabbitmq.stream.Environment env)
+            throws Exception {
+        EnvironmentPool.EnvironmentKey key = EnvironmentPool.EnvironmentKey.from(options);
+        getPoolMap().put(key, newEntry(env));
+    }
+
+    @SuppressWarnings("unchecked")
+    private static ConcurrentHashMap<EnvironmentPool.EnvironmentKey, Object> getPoolMap()
+            throws Exception {
+        Field poolField = EnvironmentPool.class.getDeclaredField("pool");
+        poolField.setAccessible(true);
+        return (ConcurrentHashMap<EnvironmentPool.EnvironmentKey, Object>) poolField.get(
+                EnvironmentPool.getInstance());
+    }
+
+    private static Object newEntry(com.rabbitmq.stream.Environment environment) throws Exception {
+        Class<?> entryClass = Class.forName("com.rabbitmq.spark.connector.EnvironmentPool$PooledEntry");
+        Constructor<?> ctor = entryClass.getDeclaredConstructor(com.rabbitmq.stream.Environment.class);
+        ctor.setAccessible(true);
+        return ctor.newInstance(environment);
+    }
+
+    private static Object getPrivateField(Object target, String fieldName)
+            throws Exception {
+        var field = target.getClass().getDeclaredField(fieldName);
+        field.setAccessible(true);
+        return field.get(target);
+    }
+
     /**
      * Minimal LogicalWriteInfo implementation for testing.
      */
@@ -484,6 +766,388 @@ class RabbitMQWriteTest {
         @Override
         public StructType schema() {
             return schema;
+        }
+    }
+
+    private static final class NoopProducer implements com.rabbitmq.stream.Producer {
+        private static final com.rabbitmq.stream.codec.QpidProtonCodec CODEC =
+                new com.rabbitmq.stream.codec.QpidProtonCodec();
+
+        @Override
+        public com.rabbitmq.stream.MessageBuilder messageBuilder() {
+            return CODEC.messageBuilder();
+        }
+
+        @Override
+        public long getLastPublishingId() {
+            return 0L;
+        }
+
+        @Override
+        public void send(com.rabbitmq.stream.Message message,
+                         com.rabbitmq.stream.ConfirmationHandler confirmationHandler) {
+            confirmationHandler.handle(new com.rabbitmq.stream.ConfirmationStatus(message, true, (short) 0));
+        }
+
+        @Override
+        public void close() {
+        }
+    }
+
+    private static final class CapturingProducer implements com.rabbitmq.stream.Producer {
+        private static final com.rabbitmq.stream.codec.QpidProtonCodec CODEC =
+                new com.rabbitmq.stream.codec.QpidProtonCodec();
+
+        private final boolean confirmSuccess;
+
+        private CapturingProducer(boolean confirmSuccess) {
+            this.confirmSuccess = confirmSuccess;
+        }
+
+        @Override
+        public com.rabbitmq.stream.MessageBuilder messageBuilder() {
+            return CODEC.messageBuilder();
+        }
+
+        @Override
+        public long getLastPublishingId() {
+            return 0L;
+        }
+
+        @Override
+        public void send(com.rabbitmq.stream.Message message,
+                         com.rabbitmq.stream.ConfirmationHandler confirmationHandler) {
+            confirmationHandler.handle(new com.rabbitmq.stream.ConfirmationStatus(
+                    message, confirmSuccess, (short) (confirmSuccess ? 0 : 1)));
+        }
+
+        @Override
+        public void close() {
+        }
+    }
+
+    private static final class PublishingIdProducer implements com.rabbitmq.stream.Producer {
+        private static final com.rabbitmq.stream.codec.QpidProtonCodec CODEC =
+                new com.rabbitmq.stream.codec.QpidProtonCodec();
+
+        private final long lastPublishingId;
+
+        private PublishingIdProducer(long lastPublishingId) {
+            this.lastPublishingId = lastPublishingId;
+        }
+
+        @Override
+        public com.rabbitmq.stream.MessageBuilder messageBuilder() {
+            return CODEC.messageBuilder();
+        }
+
+        @Override
+        public long getLastPublishingId() {
+            return lastPublishingId;
+        }
+
+        @Override
+        public void send(com.rabbitmq.stream.Message message,
+                         com.rabbitmq.stream.ConfirmationHandler confirmationHandler) {
+            confirmationHandler.handle(new com.rabbitmq.stream.ConfirmationStatus(message, true, (short) 0));
+        }
+
+        @Override
+        public void close() {
+        }
+    }
+
+    private static final class CloseTrackingEnvironment implements com.rabbitmq.stream.Environment {
+        private boolean closed = false;
+
+        @Override
+        public com.rabbitmq.stream.StreamCreator streamCreator() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void deleteStream(String stream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void deleteSuperStream(String superStream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public com.rabbitmq.stream.StreamStats queryStreamStats(String stream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void storeOffset(String reference, String stream, long offset) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public boolean streamExists(String stream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public com.rabbitmq.stream.ProducerBuilder producerBuilder() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public com.rabbitmq.stream.ConsumerBuilder consumerBuilder() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void close() {
+            closed = true;
+        }
+    }
+
+    private static final class BuilderEnvironment implements com.rabbitmq.stream.Environment {
+        private final CapturingProducerBuilder builder;
+
+        private BuilderEnvironment(CapturingProducerBuilder builder) {
+            this.builder = builder;
+        }
+
+        @Override
+        public com.rabbitmq.stream.ProducerBuilder producerBuilder() {
+            return builder;
+        }
+
+        @Override
+        public com.rabbitmq.stream.StreamCreator streamCreator() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void deleteStream(String stream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void deleteSuperStream(String superStream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public com.rabbitmq.stream.StreamStats queryStreamStats(String stream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void storeOffset(String reference, String stream, long offset) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public boolean streamExists(String stream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public com.rabbitmq.stream.ConsumerBuilder consumerBuilder() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void close() {
+        }
+    }
+
+    private static final class CapturingProducerBuilder implements com.rabbitmq.stream.ProducerBuilder {
+        private int maxInFlight;
+        private long confirmTimeoutMs;
+        private int batchSize;
+        private long batchDelayMs;
+        private com.rabbitmq.stream.Resource.StateListener listener;
+
+        @Override
+        public com.rabbitmq.stream.ProducerBuilder stream(String stream) {
+            return this;
+        }
+
+        @Override
+        public com.rabbitmq.stream.ProducerBuilder superStream(String superStream) {
+            return this;
+        }
+
+        @Override
+        public com.rabbitmq.stream.ProducerBuilder name(String name) {
+            return this;
+        }
+
+        @Override
+        public com.rabbitmq.stream.ProducerBuilder subEntrySize(int subEntrySize) {
+            return this;
+        }
+
+        @Override
+        public com.rabbitmq.stream.ProducerBuilder compression(com.rabbitmq.stream.compression.Compression compression) {
+            return this;
+        }
+
+        @Override
+        public com.rabbitmq.stream.ProducerBuilder batchSize(int batchSize) {
+            this.batchSize = batchSize;
+            return this;
+        }
+
+        @Override
+        public com.rabbitmq.stream.ProducerBuilder batchPublishingDelay(java.time.Duration delay) {
+            this.batchDelayMs = delay.toMillis();
+            return this;
+        }
+
+        @Override
+        public com.rabbitmq.stream.ProducerBuilder maxUnconfirmedMessages(int maxUnconfirmedMessages) {
+            this.maxInFlight = maxUnconfirmedMessages;
+            return this;
+        }
+
+        @Override
+        public com.rabbitmq.stream.ProducerBuilder confirmTimeout(java.time.Duration timeout) {
+            this.confirmTimeoutMs = timeout.toMillis();
+            return this;
+        }
+
+        @Override
+        public com.rabbitmq.stream.ProducerBuilder enqueueTimeout(java.time.Duration timeout) {
+            return this;
+        }
+
+        @Override
+        public com.rabbitmq.stream.ProducerBuilder retryOnRecovery(boolean retryOnRecovery) {
+            return this;
+        }
+
+        @Override
+        public com.rabbitmq.stream.ProducerBuilder dynamicBatch(boolean dynamicBatch) {
+            return this;
+        }
+
+        @Override
+        public com.rabbitmq.stream.ProducerBuilder listeners(
+                com.rabbitmq.stream.Resource.StateListener... listeners) {
+            if (listeners.length > 0) {
+                this.listener = listeners[0];
+            }
+            return this;
+        }
+
+        @Override
+        public com.rabbitmq.stream.ProducerBuilder filterValue(
+                java.util.function.Function<com.rabbitmq.stream.Message, String> extractor) {
+            return this;
+        }
+
+        @Override
+        public com.rabbitmq.stream.ProducerBuilder.RoutingConfiguration routing(
+                java.util.function.Function<com.rabbitmq.stream.Message, String> extractor) {
+            return new CapturingRoutingConfiguration(this);
+        }
+
+        @Override
+        public com.rabbitmq.stream.Producer build() {
+            return new NoopProducer();
+        }
+    }
+
+    private static final class CapturingRoutingConfiguration
+            implements com.rabbitmq.stream.ProducerBuilder.RoutingConfiguration {
+        private final CapturingProducerBuilder builder;
+        private static final com.rabbitmq.stream.codec.QpidProtonCodec CODEC =
+                new com.rabbitmq.stream.codec.QpidProtonCodec();
+
+        private CapturingRoutingConfiguration(CapturingProducerBuilder builder) {
+            this.builder = builder;
+        }
+
+        @Override
+        public com.rabbitmq.stream.ProducerBuilder.RoutingConfiguration hash() {
+            return this;
+        }
+
+        @Override
+        public com.rabbitmq.stream.ProducerBuilder.RoutingConfiguration hash(
+                java.util.function.ToIntFunction<String> hash) {
+            return this;
+        }
+
+        @Override
+        public com.rabbitmq.stream.ProducerBuilder.RoutingConfiguration key() {
+            return this;
+        }
+
+        @Override
+        public com.rabbitmq.stream.ProducerBuilder.RoutingConfiguration strategy(
+                com.rabbitmq.stream.RoutingStrategy routingStrategy) {
+            com.rabbitmq.stream.Message message = CODEC.messageBuilder().addData(new byte[0]).build();
+            routingStrategy.route(message, new RoutingMetadata(java.util.List.of("p1")));
+            return this;
+        }
+
+        @Override
+        public com.rabbitmq.stream.ProducerBuilder producerBuilder() {
+            return builder;
+        }
+    }
+
+    private static final class FakeStateListenerContext implements com.rabbitmq.stream.Resource.Context {
+        @Override
+        public com.rabbitmq.stream.Resource resource() {
+            return null;
+        }
+
+        private final com.rabbitmq.stream.Resource.State from;
+        private final com.rabbitmq.stream.Resource.State to;
+
+        private FakeStateListenerContext(com.rabbitmq.stream.Resource.State from,
+                                         com.rabbitmq.stream.Resource.State to) {
+            this.from = from;
+            this.to = to;
+        }
+
+        @Override
+        public com.rabbitmq.stream.Resource.State currentState() {
+            return to;
+        }
+
+        @Override
+        public com.rabbitmq.stream.Resource.State previousState() {
+            return from;
+        }
+
+    }
+
+    public static final class TestRoutingStrategy implements ConnectorRoutingStrategy {
+        static boolean invoked = false;
+
+        @Override
+        public java.util.List<String> route(String routingKey, java.util.List<String> partitions) {
+            invoked = true;
+            return java.util.List.of(partitions.get(0));
+        }
+    }
+
+    private static final class RoutingMetadata implements com.rabbitmq.stream.RoutingStrategy.Metadata {
+        private final java.util.List<String> partitions;
+
+        private RoutingMetadata(java.util.List<String> partitions) {
+            this.partitions = partitions;
+        }
+
+        @Override
+        public java.util.List<String> partitions() {
+            return partitions;
+        }
+
+        @Override
+        public java.util.List<String> route(String routingKey) {
+            return partitions;
         }
     }
 }
