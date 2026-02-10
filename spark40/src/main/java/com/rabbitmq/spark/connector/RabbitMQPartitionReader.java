@@ -199,14 +199,19 @@ final class RabbitMQPartitionReader implements PartitionReader<InternalRow> {
                                     new IOException("Queue full: timed out enqueuing message " +
                                             "at offset " + context.offset() +
                                             " on stream '" + stream + "'"));
+                        } else {
+                            // Notify flow strategy that this message was processed.
+                            // With creditWhenHalfMessagesProcessed, credits are only
+                            // granted after enough messages are enqueued, providing
+                            // natural backpressure when the queue is near capacity.
+                            context.processed();
                         }
                     } catch (InterruptedException e) {
                         Thread.currentThread().interrupt();
                     }
                 })
                 .flow()
-                .initialCredits(options.getInitialCredits())
-                .strategy(ConsumerFlowStrategy.creditOnChunkArrival(
+                .strategy(ConsumerFlowStrategy.creditWhenHalfMessagesProcessed(
                         options.getInitialCredits()))
                 .builder();
 
@@ -244,7 +249,7 @@ final class RabbitMQPartitionReader implements PartitionReader<InternalRow> {
     private OffsetSpecification resolveOffsetSpec() {
         return switch (options.getStartingOffsets()) {
             case EARLIEST -> OffsetSpecification.first();
-            case LATEST -> OffsetSpecification.offset(startOffset);
+            case LATEST -> OffsetSpecification.next();
             case OFFSET -> OffsetSpecification.offset(startOffset);
             case TIMESTAMP -> OffsetSpecification.timestamp(options.getStartingTimestamp());
         };

@@ -158,6 +158,30 @@ class RowToMessageConverterTest {
 
             assertThat(converter.getRoutingKey(row)).isNull();
         }
+
+        @Test
+        void routingKeyStoredInApplicationProperties() {
+            var converter = new RowToMessageConverter(schemaWithRoutingKey());
+            InternalRow row = new GenericInternalRow(new Object[]{
+                    "body".getBytes(),
+                    UTF8String.fromString("my-route")
+            });
+
+            Message msg = converter.convert(row, CODEC.messageBuilder());
+            assertThat(msg.getApplicationProperties()).isNotNull();
+            assertThat(msg.getApplicationProperties().get("routing_key")).isEqualTo("my-route");
+        }
+
+        @Test
+        void nullRoutingKeyNotStoredInApplicationProperties() {
+            var converter = new RowToMessageConverter(schemaWithRoutingKey());
+            InternalRow row = new GenericInternalRow(new Object[]{"body".getBytes(), null});
+
+            Message msg = converter.convert(row, CODEC.messageBuilder());
+            // routing_key is null, so no application properties entry
+            var appProps = msg.getApplicationProperties();
+            assertThat(appProps == null || !appProps.containsKey("routing_key")).isTrue();
+        }
     }
 
     // ========================================================================
@@ -267,6 +291,60 @@ class RowToMessageConverterTest {
             assertThat(msg.getProperties().getMessageIdAsString()).isEqualTo("id-only");
             assertThat(msg.getProperties().getTo()).isNull();
             assertThat(msg.getProperties().getContentType()).isNull();
+        }
+
+        @Test
+        void convertsPropertiesSubsetStruct() {
+            // Only message_id and content_type (not in default order)
+            StructType subsetStruct = new StructType(new StructField[]{
+                    new StructField("message_id", DataTypes.StringType, true, Metadata.empty()),
+                    new StructField("content_type", DataTypes.StringType, true, Metadata.empty()),
+            });
+            StructType schema = new StructType(new StructField[]{
+                    new StructField("value", DataTypes.BinaryType, false, Metadata.empty()),
+                    new StructField("properties", subsetStruct, true, Metadata.empty()),
+            });
+
+            var converter = new RowToMessageConverter(schema);
+            InternalRow propsRow = new GenericInternalRow(new Object[]{
+                    UTF8String.fromString("msg-123"),
+                    UTF8String.fromString("application/json"),
+            });
+            InternalRow row = new GenericInternalRow(new Object[]{"body".getBytes(), propsRow});
+
+            Message msg = converter.convert(row, CODEC.messageBuilder());
+            assertThat(msg.getProperties().getMessageIdAsString()).isEqualTo("msg-123");
+            assertThat(msg.getProperties().getContentType()).isEqualTo("application/json");
+            // Other fields should be unset
+            assertThat(msg.getProperties().getTo()).isNull();
+            assertThat(msg.getProperties().getSubject()).isNull();
+        }
+
+        @Test
+        void convertsPropertiesReorderedStruct() {
+            // Fields in reverse order: reply_to_group_id, content_type, message_id
+            StructType reorderedStruct = new StructType(new StructField[]{
+                    new StructField("reply_to_group_id", DataTypes.StringType, true, Metadata.empty()),
+                    new StructField("content_type", DataTypes.StringType, true, Metadata.empty()),
+                    new StructField("message_id", DataTypes.StringType, true, Metadata.empty()),
+            });
+            StructType schema = new StructType(new StructField[]{
+                    new StructField("value", DataTypes.BinaryType, false, Metadata.empty()),
+                    new StructField("properties", reorderedStruct, true, Metadata.empty()),
+            });
+
+            var converter = new RowToMessageConverter(schema);
+            InternalRow propsRow = new GenericInternalRow(new Object[]{
+                    UTF8String.fromString("rg-1"),       // reply_to_group_id at index 0
+                    UTF8String.fromString("text/xml"),    // content_type at index 1
+                    UTF8String.fromString("id-reord"),    // message_id at index 2
+            });
+            InternalRow row = new GenericInternalRow(new Object[]{"body".getBytes(), propsRow});
+
+            Message msg = converter.convert(row, CODEC.messageBuilder());
+            assertThat(msg.getProperties().getMessageIdAsString()).isEqualTo("id-reord");
+            assertThat(msg.getProperties().getContentType()).isEqualTo("text/xml");
+            assertThat(msg.getProperties().getReplyToGroupId()).isEqualTo("rg-1");
         }
     }
 

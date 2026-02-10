@@ -111,8 +111,15 @@ public final class SinkSchema {
     }
 
     private static void validateColumnType(String name, DataType actual, DataType expected) {
-        // For struct types, just check that it's a struct (allow schema evolution)
-        if (expected instanceof StructType && actual instanceof StructType) {
+        // For struct types (properties), validate field types individually
+        if (expected instanceof StructType expectedStruct) {
+            if (actual instanceof StructType actualStruct) {
+                validatePropertiesStruct(actualStruct, expectedStruct);
+            } else {
+                throw new IllegalArgumentException(
+                        "Column '" + name + "' has type " + actual.simpleString() +
+                                " but expected a struct");
+            }
             return;
         }
         // Use simpleString comparison to avoid Spark runtime initialization (SqlApiConf)
@@ -120,6 +127,32 @@ public final class SinkSchema {
             throw new IllegalArgumentException(
                     "Column '" + name + "' has type " + actual.simpleString() +
                             " but expected " + expected.simpleString());
+        }
+    }
+
+    /**
+     * Validate fields in a user-supplied properties struct against the expected struct.
+     * Each field present in the actual struct must exist in the expected struct with a matching type.
+     */
+    private static void validatePropertiesStruct(StructType actual, StructType expected) {
+        Map<String, DataType> expectedFields = new LinkedHashMap<>();
+        for (StructField field : expected.fields()) {
+            expectedFields.put(field.name().toLowerCase(), field.dataType());
+        }
+        for (StructField field : actual.fields()) {
+            String fieldName = field.name().toLowerCase();
+            DataType expectedType = expectedFields.get(fieldName);
+            if (expectedType == null) {
+                throw new IllegalArgumentException(
+                        "Properties struct contains unrecognized field '" + field.name() +
+                                "'. Valid fields are: " + String.join(", ", expectedFields.keySet()));
+            }
+            if (!field.dataType().simpleString().equals(expectedType.simpleString())) {
+                throw new IllegalArgumentException(
+                        "Properties field '" + field.name() + "' has type " +
+                                field.dataType().simpleString() + " but expected " +
+                                expectedType.simpleString());
+            }
         }
     }
 }

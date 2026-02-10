@@ -32,6 +32,30 @@ public final class RowToMessageConverter implements Serializable {
 
     private final int propertiesFieldCount;
 
+    // Indices of known AMQP property fields within the user-supplied properties struct.
+    // -1 means the field is absent from the struct.
+    private static final String[] PROPERTY_FIELD_NAMES = {
+            "message_id", "user_id", "to", "subject", "reply_to",
+            "correlation_id", "content_type", "content_encoding",
+            "absolute_expiry_time", "creation_time", "group_id",
+            "group_sequence", "reply_to_group_id"
+    };
+    private static final int PROP_MESSAGE_ID = 0;
+    private static final int PROP_USER_ID = 1;
+    private static final int PROP_TO = 2;
+    private static final int PROP_SUBJECT = 3;
+    private static final int PROP_REPLY_TO = 4;
+    private static final int PROP_CORRELATION_ID = 5;
+    private static final int PROP_CONTENT_TYPE = 6;
+    private static final int PROP_CONTENT_ENCODING = 7;
+    private static final int PROP_ABSOLUTE_EXPIRY_TIME = 8;
+    private static final int PROP_CREATION_TIME = 9;
+    private static final int PROP_GROUP_ID = 10;
+    private static final int PROP_GROUP_SEQUENCE = 11;
+    private static final int PROP_REPLY_TO_GROUP_ID = 12;
+
+    private final int[] propsFieldIndices;
+
     /**
      * Create a converter for the given input schema.
      *
@@ -49,8 +73,13 @@ public final class RowToMessageConverter implements Serializable {
         if (propertiesIndex >= 0) {
             StructType propsType = (StructType) schema.fields()[propertiesIndex].dataType();
             this.propertiesFieldCount = propsType.fields().length;
+            this.propsFieldIndices = new int[PROPERTY_FIELD_NAMES.length];
+            for (int i = 0; i < PROPERTY_FIELD_NAMES.length; i++) {
+                propsFieldIndices[i] = fieldIndex(propsType, PROPERTY_FIELD_NAMES[i]);
+            }
         } else {
             this.propertiesFieldCount = 0;
+            this.propsFieldIndices = null;
         }
     }
 
@@ -90,6 +119,16 @@ public final class RowToMessageConverter implements Serializable {
             applyApplicationProperties(row.getMap(appPropertiesIndex), builder);
         }
 
+        // Optional: routing_key → stored in application properties for routing
+        if (routingKeyIndex >= 0 && !row.isNullAt(routingKeyIndex)) {
+            UTF8String routingKeyUtf8 = row.getUTF8String(routingKeyIndex);
+            if (routingKeyUtf8 != null) {
+                builder.applicationProperties()
+                        .entry("routing_key", routingKeyUtf8.toString())
+                        .messageBuilder();
+            }
+        }
+
         // Optional: message_annotations
         if (msgAnnotationsIndex >= 0 && !row.isNullAt(msgAnnotationsIndex)) {
             applyMessageAnnotations(row.getMap(msgAnnotationsIndex), builder);
@@ -124,65 +163,67 @@ public final class RowToMessageConverter implements Serializable {
 
     /**
      * Apply AMQP properties from a struct row to the message builder.
+     * Uses name-based field lookup to handle subset and reordered properties structs.
      *
      * @return creation_time in millis if set, otherwise null
      */
     private Long applyProperties(InternalRow propsRow, MessageBuilder builder) {
         MessageBuilder.PropertiesBuilder pb = builder.properties();
         Long creationTimeMillis = null;
+        int idx;
 
-        // message_id (index 0, String)
-        if (!propsRow.isNullAt(0)) {
-            pb.messageId(propsRow.getUTF8String(0).toString());
+        idx = propsFieldIndices[PROP_MESSAGE_ID];
+        if (idx >= 0 && !propsRow.isNullAt(idx)) {
+            pb.messageId(propsRow.getUTF8String(idx).toString());
         }
-        // user_id (index 1, binary)
-        if (!propsRow.isNullAt(1)) {
-            pb.userId(propsRow.getBinary(1));
+        idx = propsFieldIndices[PROP_USER_ID];
+        if (idx >= 0 && !propsRow.isNullAt(idx)) {
+            pb.userId(propsRow.getBinary(idx));
         }
-        // to (index 2, String)
-        if (!propsRow.isNullAt(2)) {
-            pb.to(propsRow.getUTF8String(2).toString());
+        idx = propsFieldIndices[PROP_TO];
+        if (idx >= 0 && !propsRow.isNullAt(idx)) {
+            pb.to(propsRow.getUTF8String(idx).toString());
         }
-        // subject (index 3, String)
-        if (!propsRow.isNullAt(3)) {
-            pb.subject(propsRow.getUTF8String(3).toString());
+        idx = propsFieldIndices[PROP_SUBJECT];
+        if (idx >= 0 && !propsRow.isNullAt(idx)) {
+            pb.subject(propsRow.getUTF8String(idx).toString());
         }
-        // reply_to (index 4, String)
-        if (!propsRow.isNullAt(4)) {
-            pb.replyTo(propsRow.getUTF8String(4).toString());
+        idx = propsFieldIndices[PROP_REPLY_TO];
+        if (idx >= 0 && !propsRow.isNullAt(idx)) {
+            pb.replyTo(propsRow.getUTF8String(idx).toString());
         }
-        // correlation_id (index 5, String)
-        if (!propsRow.isNullAt(5)) {
-            pb.correlationId(propsRow.getUTF8String(5).toString());
+        idx = propsFieldIndices[PROP_CORRELATION_ID];
+        if (idx >= 0 && !propsRow.isNullAt(idx)) {
+            pb.correlationId(propsRow.getUTF8String(idx).toString());
         }
-        // content_type (index 6, String)
-        if (!propsRow.isNullAt(6)) {
-            pb.contentType(propsRow.getUTF8String(6).toString());
+        idx = propsFieldIndices[PROP_CONTENT_TYPE];
+        if (idx >= 0 && !propsRow.isNullAt(idx)) {
+            pb.contentType(propsRow.getUTF8String(idx).toString());
         }
-        // content_encoding (index 7, String)
-        if (!propsRow.isNullAt(7)) {
-            pb.contentEncoding(propsRow.getUTF8String(7).toString());
+        idx = propsFieldIndices[PROP_CONTENT_ENCODING];
+        if (idx >= 0 && !propsRow.isNullAt(idx)) {
+            pb.contentEncoding(propsRow.getUTF8String(idx).toString());
         }
-        // absolute_expiry_time (index 8, Timestamp → millis)
-        if (!propsRow.isNullAt(8)) {
-            pb.absoluteExpiryTime(microsToMillis(propsRow.getLong(8)));
+        idx = propsFieldIndices[PROP_ABSOLUTE_EXPIRY_TIME];
+        if (idx >= 0 && !propsRow.isNullAt(idx)) {
+            pb.absoluteExpiryTime(microsToMillis(propsRow.getLong(idx)));
         }
-        // creation_time (index 9, Timestamp → millis)
-        if (!propsRow.isNullAt(9)) {
-            creationTimeMillis = microsToMillis(propsRow.getLong(9));
+        idx = propsFieldIndices[PROP_CREATION_TIME];
+        if (idx >= 0 && !propsRow.isNullAt(idx)) {
+            creationTimeMillis = microsToMillis(propsRow.getLong(idx));
             pb.creationTime(creationTimeMillis);
         }
-        // group_id (index 10, String)
-        if (!propsRow.isNullAt(10)) {
-            pb.groupId(propsRow.getUTF8String(10).toString());
+        idx = propsFieldIndices[PROP_GROUP_ID];
+        if (idx >= 0 && !propsRow.isNullAt(idx)) {
+            pb.groupId(propsRow.getUTF8String(idx).toString());
         }
-        // group_sequence (index 11, Long)
-        if (!propsRow.isNullAt(11)) {
-            pb.groupSequence(propsRow.getLong(11));
+        idx = propsFieldIndices[PROP_GROUP_SEQUENCE];
+        if (idx >= 0 && !propsRow.isNullAt(idx)) {
+            pb.groupSequence(propsRow.getLong(idx));
         }
-        // reply_to_group_id (index 12, String)
-        if (!propsRow.isNullAt(12)) {
-            pb.replyToGroupId(propsRow.getUTF8String(12).toString());
+        idx = propsFieldIndices[PROP_REPLY_TO_GROUP_ID];
+        if (idx >= 0 && !propsRow.isNullAt(idx)) {
+            pb.replyToGroupId(propsRow.getUTF8String(idx).toString());
         }
 
         pb.messageBuilder();

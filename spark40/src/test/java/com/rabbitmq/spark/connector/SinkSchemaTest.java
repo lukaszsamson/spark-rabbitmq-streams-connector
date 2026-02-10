@@ -176,4 +176,48 @@ class SinkSchemaTest {
         assertThatCode(() -> SinkSchema.validate(schema, false))
                 .doesNotThrowAnyException();
     }
+
+    @Test
+    void rejectsPropertiesStructWithUnknownField() {
+        StructType badStruct = new StructType(new StructField[]{
+                new StructField("message_id", DataTypes.StringType, true, Metadata.empty()),
+                new StructField("bogus_field", DataTypes.StringType, true, Metadata.empty()),
+        });
+        StructType schema = new StructType(new StructField[]{
+                new StructField("value", DataTypes.BinaryType, false, Metadata.empty()),
+                new StructField("properties", badStruct, true, Metadata.empty()),
+        });
+        assertThatThrownBy(() -> SinkSchema.validate(schema, false))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("bogus_field")
+                .hasMessageContaining("unrecognized");
+    }
+
+    @Test
+    void rejectsPropertiesStructFieldWithWrongType() {
+        StructType badStruct = new StructType(new StructField[]{
+                new StructField("message_id", DataTypes.IntegerType, true, Metadata.empty()),
+        });
+        StructType schema = new StructType(new StructField[]{
+                new StructField("value", DataTypes.BinaryType, false, Metadata.empty()),
+                new StructField("properties", badStruct, true, Metadata.empty()),
+        });
+        assertThatThrownBy(() -> SinkSchema.validate(schema, false))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("message_id")
+                .hasMessageContaining("int")
+                .hasMessageContaining("string");
+    }
+
+    @Test
+    void rejectsPropertiesNotAStruct() {
+        StructType schema = new StructType(new StructField[]{
+                new StructField("value", DataTypes.BinaryType, false, Metadata.empty()),
+                new StructField("properties", DataTypes.StringType, true, Metadata.empty()),
+        });
+        assertThatThrownBy(() -> SinkSchema.validate(schema, false))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("properties")
+                .hasMessageContaining("struct");
+    }
 }

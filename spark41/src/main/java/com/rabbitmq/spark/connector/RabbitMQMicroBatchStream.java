@@ -177,7 +177,8 @@ final class RabbitMQMicroBatchStream
         RabbitMQStreamOffset startOffset = (RabbitMQStreamOffset) start;
         RabbitMQStreamOffset endOffset = (RabbitMQStreamOffset) end;
 
-        List<InputPartition> partitions = new ArrayList<>();
+        // Collect validated per-stream ranges
+        Map<String, long[]> validRanges = new LinkedHashMap<>();
         for (Map.Entry<String, Long> entry : endOffset.getStreamOffsets().entrySet()) {
             String stream = entry.getKey();
             long endOff = entry.getValue();
@@ -197,12 +198,92 @@ final class RabbitMQMicroBatchStream
                 continue;
             }
 
-            partitions.add(new RabbitMQInputPartition(stream, startOff, endOff, options));
+            validRanges.put(stream, new long[]{startOff, endOff});
+        }
+
+        // Apply minPartitions splitting if configured
+        List<InputPartition> partitions = new ArrayList<>();
+        Integer minPartitions = options.getMinPartitions();
+        if (minPartitions != null && minPartitions > validRanges.size() && !validRanges.isEmpty()) {
+            planWithSplitting(partitions, validRanges, minPartitions);
+        } else {
+            for (Map.Entry<String, long[]> entry : validRanges.entrySet()) {
+                partitions.add(new RabbitMQInputPartition(
+                        entry.getKey(), entry.getValue()[0], entry.getValue()[1], options));
+            }
         }
 
         LOG.info("Planned {} input partitions for micro-batch [{} → {}]",
                 partitions.size(), start, end);
         return partitions.toArray(new InputPartition[0]);
+    }
+
+    /**
+     * Split streams into more partitions when minPartitions > stream count.
+     * Each stream gets splits proportional to its share of total pending messages.
+     */
+    private void planWithSplitting(List<InputPartition> partitions,
+                                    Map<String, long[]> ranges, int minPartitions) {
+        long totalMessages = 0;
+        for (long[] range : ranges.values()) {
+            totalMessages += range[1] - range[0];
+        }
+        if (totalMessages == 0) {
+            return;
+        }
+
+        // Allocate splits per stream proportional to message count
+        Map<String, Integer> splitsPerStream = new LinkedHashMap<>();
+        Map<String, Double> fractional = new LinkedHashMap<>();
+        int allocated = 0;
+
+        for (Map.Entry<String, long[]> entry : ranges.entrySet()) {
+            String stream = entry.getKey();
+            long messages = entry.getValue()[1] - entry.getValue()[0];
+            double share = (double) messages / totalMessages * minPartitions;
+            int floor = Math.max(1, (int) share);
+            splitsPerStream.put(stream, floor);
+            fractional.put(stream, share - floor);
+            allocated += floor;
+        }
+
+        // Distribute remainder by largest fractional share
+        int remaining = minPartitions - allocated;
+        if (remaining > 0) {
+            fractional.entrySet().stream()
+                    .sorted(Map.Entry.<String, Double>comparingByValue().reversed())
+                    .limit(remaining)
+                    .forEach(e -> splitsPerStream.merge(e.getKey(), 1, Integer::sum));
+        }
+
+        // Create split partitions
+        for (Map.Entry<String, long[]> entry : ranges.entrySet()) {
+            String stream = entry.getKey();
+            long start = entry.getValue()[0];
+            long end = entry.getValue()[1];
+            int numSplits = splitsPerStream.getOrDefault(stream, 1);
+            long messages = end - start;
+
+            if (numSplits <= 1 || messages <= 1) {
+                partitions.add(new RabbitMQInputPartition(stream, start, end, options));
+                continue;
+            }
+
+            long chunkSize = messages / numSplits;
+            long rem = messages % numSplits;
+            long currentStart = start;
+            for (int i = 0; i < numSplits; i++) {
+                long splitSize = chunkSize + (i < rem ? 1 : 0);
+                if (splitSize == 0) break;
+                long splitEnd = currentStart + splitSize;
+                partitions.add(new RabbitMQInputPartition(
+                        stream, currentStart, splitEnd, options));
+                currentStart = splitEnd;
+            }
+        }
+
+        LOG.info("Applied minPartitions={} splitting: {} partitions from {} streams",
+                minPartitions, partitions.size(), ranges.size());
     }
 
     /**

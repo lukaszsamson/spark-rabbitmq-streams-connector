@@ -2,6 +2,7 @@ package com.rabbitmq.spark.connector;
 
 import com.rabbitmq.stream.Environment;
 import com.rabbitmq.stream.NoOffsetException;
+import com.rabbitmq.stream.StreamDoesNotExistException;
 import com.rabbitmq.stream.StreamStats;
 import org.apache.spark.sql.connector.metric.CustomMetric;
 import org.apache.spark.sql.connector.read.Batch;
@@ -121,6 +122,21 @@ final class RabbitMQScan implements Scan {
         StreamStats stats;
         try {
             stats = env.queryStreamStats(stream);
+        } catch (StreamDoesNotExistException e) {
+            // Single stream mode: always fail fast (configuration error)
+            if (options.isStreamMode()) {
+                throw new IllegalStateException(
+                        "Stream '" + stream + "' does not exist. " +
+                                "Verify the stream name is correct.", e);
+            }
+            // Superstream partition streams: respect failOnDataLoss
+            if (options.isFailOnDataLoss()) {
+                throw new IllegalStateException(
+                        "Partition stream '" + stream + "' does not exist. " +
+                                "Set failOnDataLoss=false to skip missing partition streams.", e);
+            }
+            LOG.warn("Partition stream '{}' does not exist, skipping (failOnDataLoss=false)", stream);
+            return null;
         } catch (Exception e) {
             if (options.isFailOnDataLoss()) {
                 throw new IllegalStateException(
