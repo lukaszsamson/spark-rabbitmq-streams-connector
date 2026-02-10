@@ -1,0 +1,213 @@
+package com.rabbitmq.spark.connector;
+
+import com.rabbitmq.stream.Address;
+import com.rabbitmq.stream.Consumer;
+import com.rabbitmq.stream.Environment;
+import com.rabbitmq.stream.Message;
+import com.rabbitmq.stream.OffsetSpecification;
+import com.rabbitmq.stream.Producer;
+import org.apache.spark.sql.SparkSession;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.testcontainers.containers.RabbitMQContainer;
+import org.testcontainers.junit.jupiter.Container;
+import org.testcontainers.junit.jupiter.Testcontainers;
+import org.testcontainers.utility.DockerImageName;
+
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.UUID;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+
+/**
+ * Base class for RabbitMQ Streams integration tests.
+ *
+ * <p>Provides a shared Testcontainer running RabbitMQ with the stream
+ * plugin enabled, a shared Spark session in local mode, and helper
+ * methods for stream management and message publishing/consuming.
+ */
+@Testcontainers(disabledWithoutDocker = true)
+abstract class AbstractRabbitMQIT {
+
+    private static final Logger LOG = LoggerFactory.getLogger(AbstractRabbitMQIT.class);
+
+    static final int STREAM_PORT = 5552;
+
+    /**
+     * Shared RabbitMQ container with stream plugin enabled.
+     * Static @Container: started once per test class, shared across test methods.
+     */
+    @Container
+    static final RabbitMQContainer RABBIT = new RabbitMQContainer(
+            DockerImageName.parse("rabbitmq:4.0-management"))
+            .withPluginsEnabled("rabbitmq_stream")
+            .withExposedPorts(STREAM_PORT);
+
+    /** Shared Spark session — local mode, reused across all IT classes. */
+    static SparkSession spark;
+
+    /** Unshaded RabbitMQ Environment for test setup/verification. */
+    static Environment testEnv;
+
+    @BeforeAll
+    static void setupShared() {
+        // Set system properties for the TestAddressResolver used by the connector
+        System.setProperty("rabbitmq.test.host", RABBIT.getHost());
+        System.setProperty("rabbitmq.test.port",
+                String.valueOf(RABBIT.getMappedPort(STREAM_PORT)));
+
+        if (spark == null) {
+            spark = SparkSession.builder()
+                    .master("local[4]")
+                    .appName("rabbitmq-streams-it")
+                    .config("spark.ui.enabled", "false")
+                    .config("spark.sql.shuffle.partitions", "4")
+                    .config("spark.sql.codegen.wholeStage", "false")
+                    .getOrCreate();
+        }
+
+        if (testEnv == null) {
+            String host = RABBIT.getHost();
+            int port = RABBIT.getMappedPort(STREAM_PORT);
+            testEnv = Environment.builder()
+                    .uri("rabbitmq-stream://guest:guest@" + host + ":" + port)
+                    .addressResolver(addr -> new Address(host, port))
+                    .build();
+        }
+    }
+
+    @AfterAll
+    static void teardownShared() {
+        if (testEnv != null) {
+            try {
+                testEnv.close();
+            } catch (Exception e) {
+                LOG.debug("Error closing test environment", e);
+            }
+            testEnv = null;
+        }
+    }
+
+    // ---- Stream management ----
+
+    /** The mapped stream endpoint for connector options. */
+    String streamEndpoint() {
+        return RABBIT.getHost() + ":" + RABBIT.getMappedPort(STREAM_PORT);
+    }
+
+    /** Generate a unique stream name for a test. */
+    String uniqueStreamName() {
+        return "test-stream-" + UUID.randomUUID().toString().substring(0, 8);
+    }
+
+    /** Create a stream on the broker. */
+    void createStream(String name) {
+        testEnv.streamCreator().stream(name).create();
+        LOG.info("Created stream '{}'", name);
+    }
+
+    /** Delete a stream from the broker (best-effort). */
+    void deleteStream(String name) {
+        try {
+            testEnv.deleteStream(name);
+            LOG.info("Deleted stream '{}'", name);
+        } catch (Exception e) {
+            LOG.debug("Failed to delete stream '{}': {}", name, e.getMessage());
+        }
+    }
+
+    /** Create a superstream with the given number of partitions via CLI. */
+    void createSuperStream(String name, int partitions) {
+        try {
+            var result = RABBIT.execInContainer(
+                    "rabbitmq-streams", "add_super_stream", name,
+                    "--partitions", String.valueOf(partitions));
+            if (result.getExitCode() != 0) {
+                throw new RuntimeException(
+                        "Failed to create superstream '" + name + "': " + result.getStderr());
+            }
+            LOG.info("Created superstream '{}' with {} partitions", name, partitions);
+        } catch (RuntimeException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to create superstream '" + name + "'", e);
+        }
+    }
+
+    /** Delete a superstream via CLI (best-effort). */
+    void deleteSuperStream(String name) {
+        try {
+            RABBIT.execInContainer(
+                    "rabbitmq-streams", "delete_super_stream", name);
+            LOG.info("Deleted superstream '{}'", name);
+        } catch (Exception e) {
+            LOG.debug("Failed to delete superstream '{}': {}", name, e.getMessage());
+        }
+    }
+
+    // ---- Publishing helpers ----
+
+    /** Publish N messages to a stream with body "msg-{i}". */
+    void publishMessages(String stream, int count) {
+        publishMessages(stream, count, "msg-");
+    }
+
+    /** Publish N messages to a stream with body "{prefix}{i}". */
+    void publishMessages(String stream, int count, String prefix) {
+        try (Producer producer = testEnv.producerBuilder().stream(stream).build()) {
+            CountDownLatch latch = new CountDownLatch(count);
+            for (int i = 0; i < count; i++) {
+                byte[] body = (prefix + i).getBytes(StandardCharsets.UTF_8);
+                producer.send(
+                        producer.messageBuilder().addData(body).build(),
+                        status -> latch.countDown());
+            }
+            if (!latch.await(30, TimeUnit.SECONDS)) {
+                throw new RuntimeException(
+                        "Timed out publishing " + count + " messages to '" + stream + "'");
+            }
+            LOG.info("Published {} messages to stream '{}'", count, stream);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException(e);
+        }
+    }
+
+    // ---- Consuming helpers ----
+
+    /** Consume up to {@code count} messages from a stream, starting at first. */
+    List<Message> consumeMessages(String stream, int count) {
+        return consumeMessages(stream, count, OffsetSpecification.first());
+    }
+
+    /** Consume up to {@code count} messages from a stream. */
+    List<Message> consumeMessages(String stream, int count,
+                                   OffsetSpecification offsetSpec) {
+        CopyOnWriteArrayList<Message> messages = new CopyOnWriteArrayList<>();
+        CountDownLatch latch = new CountDownLatch(count);
+
+        Consumer consumer = testEnv.consumerBuilder()
+                .stream(stream)
+                .offset(offsetSpec)
+                .messageHandler((ctx, msg) -> {
+                    messages.add(msg);
+                    latch.countDown();
+                })
+                .build();
+
+        try {
+            latch.await(30, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } finally {
+            consumer.close();
+        }
+
+        return new ArrayList<>(messages);
+    }
+}

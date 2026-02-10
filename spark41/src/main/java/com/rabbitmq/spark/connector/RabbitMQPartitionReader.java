@@ -78,6 +78,12 @@ final class RabbitMQPartitionReader implements PartitionReader<InternalRow> {
             return false;
         }
 
+        // Fast-path: if we already emitted the final in-range offset, stop immediately.
+        if (lastEmittedOffset >= 0 && lastEmittedOffset >= endOffset - 1) {
+            finished = true;
+            return false;
+        }
+
         // Lazy initialization: create consumer on first call
         if (consumer == null) {
             initConsumer();
