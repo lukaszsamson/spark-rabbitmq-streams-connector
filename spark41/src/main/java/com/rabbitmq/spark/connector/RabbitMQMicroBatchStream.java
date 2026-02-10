@@ -5,10 +5,7 @@ import com.rabbitmq.stream.NoOffsetException;
 import com.rabbitmq.stream.StreamStats;
 import org.apache.spark.sql.connector.read.InputPartition;
 import org.apache.spark.sql.connector.read.PartitionReaderFactory;
-import org.apache.spark.sql.connector.read.streaming.MicroBatchStream;
-import org.apache.spark.sql.connector.read.streaming.Offset;
-import org.apache.spark.sql.connector.read.streaming.ReadLimit;
-import org.apache.spark.sql.connector.read.streaming.SupportsAdmissionControl;
+import org.apache.spark.sql.connector.read.streaming.*;
 import org.apache.spark.sql.types.StructType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -18,20 +15,18 @@ import java.util.*;
 /**
  * Core micro-batch streaming source for RabbitMQ Streams.
  *
- * <p>Implements the {@link MicroBatchStream} lifecycle:
+ * <p>Implements the full streaming source lifecycle including:
  * <ul>
- *   <li>{@link #initialOffset()} – resolve starting offsets (broker lookup → fallback)</li>
- *   <li>{@link #latestOffset(Offset, ReadLimit)} – query broker for tail offsets</li>
- *   <li>{@link #planInputPartitions(Offset, Offset)} – create partitions for offset range</li>
- *   <li>{@link #commit(Offset)} – optional broker offset storage</li>
- *   <li>{@link #stop()} – release resources</li>
+ *   <li>{@link MicroBatchStream} – core offset-based micro-batch reads</li>
+ *   <li>{@link SupportsAdmissionControl} – rate limiting via
+ *       {@code maxRecordsPerTrigger} and {@code maxBytesPerTrigger}</li>
+ *   <li>{@link SupportsTriggerAvailableNow} – snapshot-based bounded processing</li>
+ *   <li>{@link ReportsSourceMetrics} – lag metrics for query progress</li>
  * </ul>
- *
- * <p>Also implements {@link SupportsAdmissionControl} with basic pass-through
- * behavior (all limits treated as {@code ReadAllAvailable} for M4).
- * Milestone 5 will add proper limit distribution.
  */
-final class RabbitMQMicroBatchStream implements MicroBatchStream, SupportsAdmissionControl {
+final class RabbitMQMicroBatchStream
+        implements MicroBatchStream, SupportsAdmissionControl,
+                   SupportsTriggerAvailableNow, ReportsSourceMetrics {
 
     private static final Logger LOG = LoggerFactory.getLogger(RabbitMQMicroBatchStream.class);
 
@@ -48,11 +43,21 @@ final class RabbitMQMicroBatchStream implements MicroBatchStream, SupportsAdmiss
     /** Cached latest offset for reportLatestOffset(). */
     private volatile RabbitMQStreamOffset cachedLatestOffset;
 
+    /**
+     * Snapshot of tail offsets captured by {@link #prepareForTriggerAvailableNow()}.
+     * When non-null, {@link #latestOffset(Offset, ReadLimit)} will not exceed these.
+     */
+    private volatile Map<String, Long> availableNowSnapshot;
+
+    /** Running average message size in bytes, for byte-based admission control. */
+    private int estimatedMessageSize;
+
     RabbitMQMicroBatchStream(ConnectorOptions options, StructType schema,
                               String checkpointLocation) {
         this.options = options;
         this.schema = schema;
         this.checkpointLocation = checkpointLocation;
+        this.estimatedMessageSize = options.getEstimatedMessageSizeBytes();
     }
 
     // ---- SparkDataStream lifecycle ----
@@ -184,7 +189,21 @@ final class RabbitMQMicroBatchStream implements MicroBatchStream, SupportsAdmiss
 
     @Override
     public ReadLimit getDefaultReadLimit() {
-        // TODO: M5 — return proper limits based on maxRecordsPerTrigger / maxBytesPerTrigger
+        Long maxRows = options.getMaxRecordsPerTrigger();
+        Long maxBytes = options.getMaxBytesPerTrigger();
+
+        if (maxRows != null && maxBytes != null) {
+            return ReadLimit.compositeLimit(new ReadLimit[]{
+                    ReadLimit.maxRows(maxRows),
+                    ReadLimit.maxBytes(maxBytes)
+            });
+        }
+        if (maxRows != null) {
+            return ReadLimit.maxRows(maxRows);
+        }
+        if (maxBytes != null) {
+            return ReadLimit.maxBytes(maxBytes);
+        }
         return ReadLimit.allAvailable();
     }
 
@@ -192,26 +211,38 @@ final class RabbitMQMicroBatchStream implements MicroBatchStream, SupportsAdmiss
     public Offset latestOffset(Offset startOffset, ReadLimit limit) {
         Map<String, Long> tailOffsets = queryTailOffsets();
 
-        if (startOffset != null) {
-            RabbitMQStreamOffset start = (RabbitMQStreamOffset) startOffset;
-            // Check if any stream has new data
-            boolean hasNewData = false;
-            for (Map.Entry<String, Long> entry : tailOffsets.entrySet()) {
-                long startOff = start.getStreamOffsets().getOrDefault(entry.getKey(), 0L);
-                if (entry.getValue() > startOff) {
-                    hasNewData = true;
-                    break;
-                }
-            }
-            if (!hasNewData) {
-                LOG.debug("No new data available, returning start offset");
-                return startOffset;
-            }
-
-            // TODO: M5 — apply ReadLimit budget distribution across streams
+        // Enforce Trigger.AvailableNow snapshot ceiling
+        if (availableNowSnapshot != null) {
+            tailOffsets = ReadLimitBudget.mostRestrictive(tailOffsets, availableNowSnapshot);
         }
 
-        RabbitMQStreamOffset latest = new RabbitMQStreamOffset(tailOffsets);
+        if (startOffset == null) {
+            RabbitMQStreamOffset latest = new RabbitMQStreamOffset(tailOffsets);
+            cachedLatestOffset = latest;
+            return latest;
+        }
+
+        RabbitMQStreamOffset start = (RabbitMQStreamOffset) startOffset;
+        Map<String, Long> startMap = start.getStreamOffsets();
+
+        // Check if any stream has new data
+        boolean hasNewData = false;
+        for (Map.Entry<String, Long> entry : tailOffsets.entrySet()) {
+            long startOff = startMap.getOrDefault(entry.getKey(), 0L);
+            if (entry.getValue() > startOff) {
+                hasNewData = true;
+                break;
+            }
+        }
+        if (!hasNewData) {
+            LOG.debug("No new data available, returning start offset");
+            return startOffset;
+        }
+
+        // Apply read limit budget
+        Map<String, Long> endOffsets = applyReadLimit(startMap, tailOffsets, limit);
+
+        RabbitMQStreamOffset latest = new RabbitMQStreamOffset(endOffsets);
         cachedLatestOffset = latest;
         return latest;
     }
@@ -219,6 +250,98 @@ final class RabbitMQMicroBatchStream implements MicroBatchStream, SupportsAdmiss
     @Override
     public Offset reportLatestOffset() {
         return cachedLatestOffset;
+    }
+
+    // ---- SupportsTriggerAvailableNow ----
+
+    @Override
+    public void prepareForTriggerAvailableNow() {
+        Map<String, Long> snapshot = queryTailOffsets();
+        this.availableNowSnapshot = snapshot;
+        LOG.info("Trigger.AvailableNow: snapshot tail offsets = {}", snapshot);
+    }
+
+    // ---- ReportsSourceMetrics ----
+
+    @Override
+    public Map<String, String> metrics(Optional<Offset> latestConsumedOffset) {
+        Map<String, String> metrics = new LinkedHashMap<>();
+        RabbitMQStreamOffset tail = cachedLatestOffset;
+
+        if (tail == null || latestConsumedOffset.isEmpty()) {
+            metrics.put("minOffsetsBehindLatest", "0");
+            metrics.put("maxOffsetsBehindLatest", "0");
+            metrics.put("avgOffsetsBehindLatest", "0.0");
+            return metrics;
+        }
+
+        RabbitMQStreamOffset consumed = (RabbitMQStreamOffset) latestConsumedOffset.get();
+        Map<String, Long> tailMap = tail.getStreamOffsets();
+        Map<String, Long> consumedMap = consumed.getStreamOffsets();
+
+        long minLag = Long.MAX_VALUE;
+        long maxLag = 0;
+        long totalLag = 0;
+        int count = 0;
+
+        for (Map.Entry<String, Long> entry : tailMap.entrySet()) {
+            String stream = entry.getKey();
+            long tailOff = entry.getValue();
+            long consumedOff = consumedMap.getOrDefault(stream, 0L);
+            long lag = Math.max(0, tailOff - consumedOff);
+            minLag = Math.min(minLag, lag);
+            maxLag = Math.max(maxLag, lag);
+            totalLag += lag;
+            count++;
+        }
+
+        if (count == 0) {
+            minLag = 0;
+        }
+
+        double avgLag = count > 0 ? (double) totalLag / count : 0.0;
+
+        metrics.put("minOffsetsBehindLatest", String.valueOf(minLag));
+        metrics.put("maxOffsetsBehindLatest", String.valueOf(maxLag));
+        metrics.put("avgOffsetsBehindLatest", String.format("%.1f", avgLag));
+        return metrics;
+    }
+
+    // ---- Read limit dispatch ----
+
+    private Map<String, Long> applyReadLimit(
+            Map<String, Long> startOffsets,
+            Map<String, Long> tailOffsets,
+            ReadLimit limit) {
+
+        if (limit instanceof ReadAllAvailable) {
+            return tailOffsets;
+        }
+
+        if (limit instanceof ReadMaxRows maxRows) {
+            return ReadLimitBudget.distributeRecordBudget(
+                    startOffsets, tailOffsets, maxRows.maxRows());
+        }
+
+        if (limit instanceof ReadMaxBytes maxBytes) {
+            return ReadLimitBudget.distributeByteBudget(
+                    startOffsets, tailOffsets, maxBytes.maxBytes(), estimatedMessageSize);
+        }
+
+        if (limit instanceof CompositeReadLimit composite) {
+            Map<String, Long> result = tailOffsets;
+            for (ReadLimit component : composite.getReadLimits()) {
+                Map<String, Long> componentEnd = applyReadLimit(
+                        startOffsets, tailOffsets, component);
+                result = ReadLimitBudget.mostRestrictive(result, componentEnd);
+            }
+            return result;
+        }
+
+        // Unknown limit type: treat as ReadAllAvailable
+        LOG.debug("Unknown ReadLimit type {}, treating as ReadAllAvailable",
+                limit.getClass().getName());
+        return tailOffsets;
     }
 
     // ---- Internal helpers ----

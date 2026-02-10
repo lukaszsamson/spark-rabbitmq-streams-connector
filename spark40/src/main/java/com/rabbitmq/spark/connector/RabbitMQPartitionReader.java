@@ -2,6 +2,7 @@ package com.rabbitmq.spark.connector;
 
 import com.rabbitmq.stream.*;
 import org.apache.spark.sql.catalyst.InternalRow;
+import org.apache.spark.sql.connector.metric.CustomTaskMetric;
 import org.apache.spark.sql.connector.read.PartitionReader;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -39,6 +40,10 @@ final class RabbitMQPartitionReader implements PartitionReader<InternalRow> {
     private InternalRow currentRow;
     private long lastEmittedOffset = -1;
     private boolean finished = false;
+
+    // Task-level metric counters
+    private long recordsRead = 0;
+    private long bytesRead = 0;
 
     /**
      * A message queued by the consumer callback for pull-based reading.
@@ -119,6 +124,11 @@ final class RabbitMQPartitionReader implements PartitionReader<InternalRow> {
             currentRow = converter.convert(
                     qm.message(), stream, qm.offset(), qm.chunkTimestampMillis());
             lastEmittedOffset = qm.offset();
+            recordsRead++;
+            byte[] body = qm.message().getBodyAsBinary();
+            if (body != null) {
+                bytesRead += body.length;
+            }
             return true;
         }
     }
@@ -145,6 +155,14 @@ final class RabbitMQPartitionReader implements PartitionReader<InternalRow> {
         } catch (Exception e) {
             LOG.warn("Error closing environment for stream '{}'", stream, e);
         }
+    }
+
+    @Override
+    public CustomTaskMetric[] currentMetricsValues() {
+        return new CustomTaskMetric[]{
+                RabbitMQSourceMetrics.taskMetric(RabbitMQSourceMetrics.RECORDS_READ, recordsRead),
+                RabbitMQSourceMetrics.taskMetric(RabbitMQSourceMetrics.BYTES_READ, bytesRead),
+        };
     }
 
     private void initConsumer() {

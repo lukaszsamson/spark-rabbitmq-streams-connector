@@ -1,25 +1,23 @@
 package com.rabbitmq.spark.connector;
 
+import org.apache.spark.sql.connector.metric.CustomMetric;
+import org.apache.spark.sql.connector.metric.CustomSumMetric;
 import org.apache.spark.sql.connector.read.InputPartition;
-import org.apache.spark.sql.connector.read.streaming.MicroBatchStream;
-import org.apache.spark.sql.connector.read.streaming.Offset;
-import org.apache.spark.sql.connector.read.streaming.ReadLimit;
-import org.apache.spark.sql.connector.read.streaming.SupportsAdmissionControl;
+import org.apache.spark.sql.connector.read.streaming.*;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
-import java.util.LinkedHashMap;
-import java.util.Map;
+import java.util.*;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * Unit tests for {@link RabbitMQMicroBatchStream}.
  *
- * <p>These tests exercise the MicroBatchStream contract and offset handling
- * without requiring a real RabbitMQ broker. Broker-dependent behaviors
- * (initialOffset with stored offsets, latestOffset, commit) are tested
- * in the it-tests module.
+ * <p>These tests exercise the MicroBatchStream contract, offset handling,
+ * admission control, trigger support, and metrics without requiring a real
+ * RabbitMQ broker. Broker-dependent behaviors (initialOffset with stored
+ * offsets, latestOffset, commit) are tested in the it-tests module.
  */
 class RabbitMQMicroBatchStreamTest {
 
@@ -48,6 +46,43 @@ class RabbitMQMicroBatchStreamTest {
 
             MicroBatchStream stream = scan.toMicroBatchStream("/tmp/checkpoint");
             assertThat(stream).isInstanceOf(SupportsAdmissionControl.class);
+        }
+
+        @Test
+        void microBatchStreamImplementsTriggerAvailableNow() {
+            ConnectorOptions opts = minimalOptions();
+            var schema = RabbitMQStreamTable.buildSourceSchema(opts.getMetadataFields());
+            var scan = new RabbitMQScan(opts, schema);
+
+            MicroBatchStream stream = scan.toMicroBatchStream("/tmp/checkpoint");
+            assertThat(stream).isInstanceOf(SupportsTriggerAvailableNow.class);
+        }
+
+        @Test
+        void microBatchStreamImplementsReportsSourceMetrics() {
+            ConnectorOptions opts = minimalOptions();
+            var schema = RabbitMQStreamTable.buildSourceSchema(opts.getMetadataFields());
+            var scan = new RabbitMQScan(opts, schema);
+
+            MicroBatchStream stream = scan.toMicroBatchStream("/tmp/checkpoint");
+            assertThat(stream).isInstanceOf(ReportsSourceMetrics.class);
+        }
+
+        @Test
+        void scanSupportedCustomMetricsIncludesRecordsAndBytes() {
+            ConnectorOptions opts = minimalOptions();
+            var schema = RabbitMQStreamTable.buildSourceSchema(opts.getMetadataFields());
+            var scan = new RabbitMQScan(opts, schema);
+
+            CustomMetric[] metrics = scan.supportedCustomMetrics();
+            assertThat(metrics).hasSize(2);
+
+            Set<String> names = new HashSet<>();
+            for (CustomMetric m : metrics) {
+                names.add(m.name());
+                assertThat(m).isInstanceOf(CustomSumMetric.class);
+            }
+            assertThat(names).containsExactlyInAnyOrder("recordsRead", "bytesRead");
         }
     }
 
@@ -203,15 +238,100 @@ class RabbitMQMicroBatchStreamTest {
     class AdmissionControl {
 
         @Test
-        void defaultReadLimitIsAllAvailable() {
+        void defaultReadLimitIsAllAvailableWhenNoLimitsSet() {
             RabbitMQMicroBatchStream stream = createStream(minimalOptions());
-            assertThat(stream.getDefaultReadLimit()).isNotNull();
+            ReadLimit limit = stream.getDefaultReadLimit();
+            assertThat(limit).isInstanceOf(ReadAllAvailable.class);
+        }
+
+        @Test
+        void defaultReadLimitIsMaxRowsWhenOnlyMaxRecordsSet() {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("maxRecordsPerTrigger", "1000");
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+
+            ReadLimit limit = stream.getDefaultReadLimit();
+            assertThat(limit).isInstanceOf(ReadMaxRows.class);
+            assertThat(((ReadMaxRows) limit).maxRows()).isEqualTo(1000L);
+        }
+
+        @Test
+        void defaultReadLimitIsMaxBytesWhenOnlyMaxBytesSet() {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("maxBytesPerTrigger", "1048576");
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+
+            ReadLimit limit = stream.getDefaultReadLimit();
+            assertThat(limit).isInstanceOf(ReadMaxBytes.class);
+            assertThat(((ReadMaxBytes) limit).maxBytes()).isEqualTo(1048576L);
+        }
+
+        @Test
+        void defaultReadLimitIsCompositeWhenBothLimitsSet() {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("maxRecordsPerTrigger", "500");
+            opts.put("maxBytesPerTrigger", "1048576");
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+
+            ReadLimit limit = stream.getDefaultReadLimit();
+            assertThat(limit).isInstanceOf(CompositeReadLimit.class);
+
+            CompositeReadLimit composite = (CompositeReadLimit) limit;
+            ReadLimit[] components = composite.getReadLimits();
+            assertThat(components).hasSize(2);
+
+            // Verify component types
+            boolean hasMaxRows = false;
+            boolean hasMaxBytes = false;
+            for (ReadLimit component : components) {
+                if (component instanceof ReadMaxRows) hasMaxRows = true;
+                if (component instanceof ReadMaxBytes) hasMaxBytes = true;
+            }
+            assertThat(hasMaxRows).isTrue();
+            assertThat(hasMaxBytes).isTrue();
         }
 
         @Test
         void reportLatestOffsetReturnsNullBeforeQuery() {
             RabbitMQMicroBatchStream stream = createStream(minimalOptions());
             assertThat(stream.reportLatestOffset()).isNull();
+        }
+    }
+
+    // ======================================================================
+    // Metrics (ReportsSourceMetrics)
+    // ======================================================================
+
+    @Nested
+    class Metrics {
+
+        @Test
+        void metricsReturnsZerosWhenNoLatestOffset() {
+            RabbitMQMicroBatchStream stream = createStream(minimalOptions());
+
+            Map<String, String> metrics = stream.metrics(Optional.empty());
+
+            assertThat(metrics).containsEntry("minOffsetsBehindLatest", "0");
+            assertThat(metrics).containsEntry("maxOffsetsBehindLatest", "0");
+            assertThat(metrics).containsEntry("avgOffsetsBehindLatest", "0.0");
+        }
+
+        @Test
+        void metricsContainsExpectedKeys() {
+            RabbitMQMicroBatchStream stream = createStream(minimalOptions());
+
+            Map<String, String> metrics = stream.metrics(Optional.empty());
+
+            assertThat(metrics).containsKeys(
+                    "minOffsetsBehindLatest",
+                    "maxOffsetsBehindLatest",
+                    "avgOffsetsBehindLatest");
         }
     }
 

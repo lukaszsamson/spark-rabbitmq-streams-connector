@@ -3,6 +3,7 @@ package com.rabbitmq.spark.connector;
 import com.rabbitmq.stream.Environment;
 import com.rabbitmq.stream.NoOffsetException;
 import com.rabbitmq.stream.StreamStats;
+import org.apache.spark.sql.connector.metric.CustomMetric;
 import org.apache.spark.sql.connector.read.Batch;
 import org.apache.spark.sql.connector.read.Scan;
 import org.apache.spark.sql.connector.read.streaming.MicroBatchStream;
@@ -54,6 +55,11 @@ final class RabbitMQScan implements Scan {
     @Override
     public MicroBatchStream toMicroBatchStream(String checkpointLocation) {
         return new RabbitMQMicroBatchStream(options, schema, checkpointLocation);
+    }
+
+    @Override
+    public CustomMetric[] supportedCustomMetrics() {
+        return RabbitMQSourceMetrics.SUPPORTED_METRICS;
     }
 
     /**
