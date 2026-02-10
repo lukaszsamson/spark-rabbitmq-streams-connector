@@ -70,8 +70,18 @@ final class RabbitMQMicroBatchStream
         // 1. Try broker stored offsets if consumerName is set
         if (consumerName != null && !consumerName.isEmpty()) {
             try {
-                Map<String, Long> stored = StoredOffsetLookup.lookup(
-                        getEnvironment(), consumerName, streams);
+                StoredOffsetLookup.LookupResult result =
+                        StoredOffsetLookup.lookupWithDetails(
+                                getEnvironment(), consumerName, streams);
+
+                Map<String, Long> stored = result.getOffsets();
+
+                if (result.hasFailures()) {
+                    // Non-fatal failures on some streams
+                    LOG.warn("Stored offset lookup had non-fatal failures on streams: {}",
+                            result.getFailedStreams());
+                }
+
                 if (!stored.isEmpty()) {
                     LOG.info("Recovered stored offsets from broker for consumer '{}': {}",
                             consumerName, stored);
@@ -84,6 +94,9 @@ final class RabbitMQMicroBatchStream
                 }
                 LOG.info("No stored offsets found for consumer '{}', falling back to startingOffsets",
                         consumerName);
+            } catch (IllegalStateException e) {
+                // Fatal error (auth, connection, stream does not exist) — fail fast
+                throw e;
             } catch (Exception e) {
                 LOG.warn("Failed to look up stored offsets for consumer '{}': {}. " +
                                 "Falling back to startingOffsets.",
@@ -170,14 +183,80 @@ final class RabbitMQMicroBatchStream
             long endOff = entry.getValue();
             long startOff = startOffset.getStreamOffsets().getOrDefault(stream, 0L);
 
-            if (endOff > startOff) {
-                partitions.add(new RabbitMQInputPartition(stream, startOff, endOff, options));
+            if (endOff <= startOff) {
+                continue;
             }
+
+            // Check for retention truncation: if requested start is below first available
+            startOff = validateStartOffset(stream, startOff, endOff);
+            if (startOff < 0) {
+                // Stream should be skipped (deleted or empty)
+                continue;
+            }
+            if (endOff <= startOff) {
+                continue;
+            }
+
+            partitions.add(new RabbitMQInputPartition(stream, startOff, endOff, options));
         }
 
         LOG.info("Planned {} input partitions for micro-batch [{} → {}]",
                 partitions.size(), start, end);
         return partitions.toArray(new InputPartition[0]);
+    }
+
+    /**
+     * Validate a partition's start offset against the broker's first available offset.
+     * Handles retention truncation and stream deletion per failOnDataLoss setting.
+     *
+     * @return the validated start offset, or -1 if the partition should be skipped
+     */
+    private long validateStartOffset(String stream, long startOff, long endOff) {
+        Environment env;
+        try {
+            env = getEnvironment();
+        } catch (Exception e) {
+            // Cannot connect to broker for validation — proceed without check
+            LOG.debug("Cannot validate offsets for stream '{}': {}", stream, e.getMessage());
+            return startOff;
+        }
+
+        try {
+            StreamStats stats = env.queryStreamStats(stream);
+            long firstAvailable = stats.firstOffset();
+            if (startOff < firstAvailable) {
+                if (options.isFailOnDataLoss()) {
+                    throw new IllegalStateException(
+                            "Requested start offset " + startOff +
+                                    " is before the first available offset " + firstAvailable +
+                                    " in stream '" + stream + "'. Data may have been lost due to " +
+                                    "retention policy. Set failOnDataLoss=false to advance.");
+                }
+                LOG.warn("Start offset {} is before first available {} in stream '{}', " +
+                                "advancing to first available (data loss detected)",
+                        startOff, firstAvailable, stream);
+                return firstAvailable;
+            }
+            return startOff;
+        } catch (NoOffsetException e) {
+            // Stream is empty
+            return -1;
+        } catch (com.rabbitmq.stream.StreamDoesNotExistException e) {
+            if (options.isFailOnDataLoss()) {
+                throw new IllegalStateException(
+                        "Stream '" + stream + "' no longer exists. " +
+                                "Set failOnDataLoss=false to skip.", e);
+            }
+            LOG.warn("Stream '{}' no longer exists, skipping partition (failOnDataLoss=false)",
+                    stream);
+            return -1;
+        } catch (IllegalStateException e) {
+            throw e;
+        } catch (Exception e) {
+            // Non-fatal: cannot validate, proceed without check
+            LOG.warn("Failed to validate stream '{}' offsets: {}", stream, e.getMessage());
+            return startOff;
+        }
     }
 
     @Override
@@ -400,6 +479,15 @@ final class RabbitMQMicroBatchStream
         StreamStats stats;
         try {
             stats = env.queryStreamStats(stream);
+        } catch (com.rabbitmq.stream.StreamDoesNotExistException e) {
+            // Stream deleted (topology change or manual deletion)
+            if (options.isFailOnDataLoss()) {
+                throw new IllegalStateException(
+                        "Stream '" + stream + "' does not exist. " +
+                                "It may have been deleted. Set failOnDataLoss=false to skip.", e);
+            }
+            LOG.warn("Stream '{}' does not exist, skipping (failOnDataLoss=false)", stream);
+            return 0;
         } catch (Exception e) {
             if (options.isFailOnDataLoss()) {
                 throw new IllegalStateException(
@@ -446,6 +534,13 @@ final class RabbitMQMicroBatchStream
             StreamStats stats = getEnvironment().queryStreamStats(stream);
             return stats.firstOffset();
         } catch (NoOffsetException e) {
+            return 0;
+        } catch (com.rabbitmq.stream.StreamDoesNotExistException e) {
+            if (options.isFailOnDataLoss()) {
+                throw new IllegalStateException(
+                        "Stream '" + stream + "' does not exist. Set failOnDataLoss=false to skip.", e);
+            }
+            LOG.warn("Stream '{}' does not exist, using offset 0 (failOnDataLoss=false)", stream);
             return 0;
         } catch (Exception e) {
             LOG.warn("Failed to query first offset for stream '{}': {}", stream, e.getMessage());

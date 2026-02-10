@@ -397,6 +397,133 @@ class ConnectorOptionsTest {
                     .hasMessageContaining("failOnDataLoss")
                     .hasMessageContaining("maybe");
         }
+
+        @Test
+        void rejectsInvalidEndingOffsets() {
+            var map = minimalStreamOptions();
+            map.put("endingOffsets", "bogus");
+            assertThatThrownBy(() -> new ConnectorOptions(map))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("endingOffsets")
+                    .hasMessageContaining("bogus");
+        }
+
+        @Test
+        void rejectsInvalidRoutingStrategy() {
+            var map = minimalStreamOptions();
+            map.put("routingStrategy", "invalid");
+            assertThatThrownBy(() -> new ConnectorOptions(map))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("routingStrategy")
+                    .hasMessageContaining("invalid");
+        }
+
+        @Test
+        void rejectsInvalidCompression() {
+            var map = minimalStreamOptions();
+            map.put("compression", "brotli");
+            assertThatThrownBy(() -> new ConnectorOptions(map))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("compression")
+                    .hasMessageContaining("brotli");
+        }
+
+        @Test
+        void rejectsInvalidIntegerMinPartitions() {
+            var map = minimalStreamOptions();
+            map.put("minPartitions", "abc");
+            assertThatThrownBy(() -> new ConnectorOptions(map))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("minPartitions")
+                    .hasMessageContaining("abc");
+        }
+
+        @Test
+        void rejectsInvalidIntegerMaxInFlight() {
+            var map = minimalStreamOptions();
+            map.put("maxInFlight", "xyz");
+            assertThatThrownBy(() -> new ConnectorOptions(map))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("maxInFlight")
+                    .hasMessageContaining("xyz");
+        }
+
+        @Test
+        void rejectsInvalidIntegerQueueCapacity() {
+            var map = minimalStreamOptions();
+            map.put("queueCapacity", "notanumber");
+            assertThatThrownBy(() -> new ConnectorOptions(map))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("queueCapacity")
+                    .hasMessageContaining("notanumber");
+        }
+
+        @Test
+        void rejectsInvalidIntegerInitialCredits() {
+            var map = minimalStreamOptions();
+            map.put("initialCredits", "1.5");
+            assertThatThrownBy(() -> new ConnectorOptions(map))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("initialCredits")
+                    .hasMessageContaining("1.5");
+        }
+
+        @Test
+        void rejectsInvalidIntegerBatchSize() {
+            var map = minimalStreamOptions();
+            map.put("batchSize", "big");
+            assertThatThrownBy(() -> new ConnectorOptions(map))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("batchSize")
+                    .hasMessageContaining("big");
+        }
+
+        @Test
+        void rejectsInvalidIntegerSubEntrySize() {
+            var map = minimalStreamOptions();
+            map.put("subEntrySize", "");
+            assertThatThrownBy(() -> new ConnectorOptions(map))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("subEntrySize");
+        }
+
+        @Test
+        void rejectsInvalidLongMaxRecordsPerTrigger() {
+            var map = minimalStreamOptions();
+            map.put("maxRecordsPerTrigger", "lots");
+            assertThatThrownBy(() -> new ConnectorOptions(map))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("maxRecordsPerTrigger")
+                    .hasMessageContaining("lots");
+        }
+
+        @Test
+        void rejectsInvalidLongMaxBytesPerTrigger() {
+            var map = minimalStreamOptions();
+            map.put("maxBytesPerTrigger", "many");
+            assertThatThrownBy(() -> new ConnectorOptions(map))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("maxBytesPerTrigger")
+                    .hasMessageContaining("many");
+        }
+
+        @Test
+        void rejectsInvalidLongPublisherConfirmTimeoutMs() {
+            var map = minimalStreamOptions();
+            map.put("publisherConfirmTimeoutMs", "slow");
+            assertThatThrownBy(() -> new ConnectorOptions(map))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("publisherConfirmTimeoutMs")
+                    .hasMessageContaining("slow");
+        }
+
+        @Test
+        void parsesFilterPostFilterClass() {
+            var map = minimalStreamOptions();
+            map.put("filterPostFilterClass", "com.example.MyFilter");
+            var opts = new ConnectorOptions(map);
+            assertThat(opts.getFilterPostFilterClass()).isEqualTo("com.example.MyFilter");
+        }
     }
 
     // ========================================================================
@@ -467,7 +594,7 @@ class ConnectorOptionsTest {
                 var map = minimalStreamOptions();
                 map.put("routingStrategy", name);
                 if ("custom".equals(name)) {
-                    map.put("partitionerClass", "com.example.MyPartitioner");
+                    map.put("partitionerClass", TestRoutingStrategy.class.getName());
                 }
                 var opts = new ConnectorOptions(map);
                 assertThat(opts.getRoutingStrategy())
@@ -501,6 +628,36 @@ class ConnectorOptionsTest {
         void ignoreUnknownColumnsDefaultsFalse() {
             var opts = new ConnectorOptions(minimalStreamOptions());
             assertThat(opts.isIgnoreUnknownColumns()).isFalse();
+        }
+    }
+
+    // ========================================================================
+    // Resource management parsing
+    // ========================================================================
+
+    @Nested
+    class ResourceManagementParsing {
+
+        @Test
+        void environmentIdleTimeoutDefault() {
+            var opts = new ConnectorOptions(minimalStreamOptions());
+            assertThat(opts.getEnvironmentIdleTimeoutMs()).isEqualTo(60_000L);
+        }
+
+        @Test
+        void parsesCustomEnvironmentIdleTimeout() {
+            var map = minimalStreamOptions();
+            map.put("environmentIdleTimeoutMs", "120000");
+            var opts = new ConnectorOptions(map);
+            assertThat(opts.getEnvironmentIdleTimeoutMs()).isEqualTo(120_000L);
+        }
+
+        @Test
+        void parsesZeroIdleTimeout() {
+            var map = minimalStreamOptions();
+            map.put("environmentIdleTimeoutMs", "0");
+            var opts = new ConnectorOptions(map);
+            assertThat(opts.getEnvironmentIdleTimeoutMs()).isEqualTo(0L);
         }
     }
 
@@ -596,6 +753,28 @@ class ConnectorOptionsTest {
             var opts = new ConnectorOptions(map);
             assertThatCode(opts::validateCommon).doesNotThrowAnyException();
             assertThat(opts.isSuperStreamMode()).isTrue();
+        }
+
+        @Test
+        void rejectsInvalidAddressResolverClassNotFound() {
+            var map = minimalStreamOptions();
+            map.put("addressResolverClass", "com.nonexistent.Resolver");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateCommon)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("addressResolverClass")
+                    .hasMessageContaining("not found");
+        }
+
+        @Test
+        void rejectsAddressResolverClassWrongType() {
+            var map = minimalStreamOptions();
+            map.put("addressResolverClass", "java.lang.String");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateCommon)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("addressResolverClass")
+                    .hasMessageContaining("does not implement");
         }
     }
 
@@ -779,6 +958,40 @@ class ConnectorOptionsTest {
                     .isInstanceOf(IllegalArgumentException.class)
                     .hasMessageContaining("endpoints");
         }
+
+        @Test
+        void rejectsInvalidFilterPostFilterClassNotFound() {
+            var map = minimalStreamOptions();
+            map.put("filterPostFilterClass", "com.nonexistent.Filter");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateForSource)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("filterPostFilterClass")
+                    .hasMessageContaining("not found");
+        }
+
+        @Test
+        void rejectsFilterPostFilterClassWrongType() {
+            var map = minimalStreamOptions();
+            map.put("filterPostFilterClass", "java.lang.String");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateForSource)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("filterPostFilterClass")
+                    .hasMessageContaining("does not implement");
+        }
+
+        @Test
+        void rejectsNegativeEndingOffset() {
+            var map = minimalStreamOptions();
+            map.put("endingOffsets", "offset");
+            map.put("endingOffset", "-5");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateForSource)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("endingOffset")
+                    .hasMessageContaining(">= 0");
+        }
     }
 
     // ========================================================================
@@ -841,7 +1054,7 @@ class ConnectorOptionsTest {
         void acceptsCustomRoutingWithPartitionerClass() {
             var map = minimalStreamOptions();
             map.put("routingStrategy", "custom");
-            map.put("partitionerClass", "com.example.MyPartitioner");
+            map.put("partitionerClass", TestRoutingStrategy.class.getName());
             var opts = new ConnectorOptions(map);
             assertThatCode(opts::validateForSink).doesNotThrowAnyException();
         }
@@ -905,6 +1118,40 @@ class ConnectorOptionsTest {
             assertThatThrownBy(opts::validateForSink)
                     .isInstanceOf(IllegalArgumentException.class)
                     .hasMessageContaining("endpoints");
+        }
+
+        @Test
+        void rejectsInvalidPartitionerClassNotFound() {
+            var map = minimalStreamOptions();
+            map.put("routingStrategy", "custom");
+            map.put("partitionerClass", "com.nonexistent.Router");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateForSink)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("partitionerClass")
+                    .hasMessageContaining("not found");
+        }
+
+        @Test
+        void rejectsPartitionerClassWrongType() {
+            var map = minimalStreamOptions();
+            map.put("routingStrategy", "custom");
+            map.put("partitionerClass", "java.lang.String");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateForSink)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("partitionerClass")
+                    .hasMessageContaining("does not implement");
+        }
+
+        @Test
+        void rejectsNonPositiveBatchPublishingDelay() {
+            var map = minimalStreamOptions();
+            map.put("batchPublishingDelayMs", "-10");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateForSink)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("batchPublishingDelayMs");
         }
     }
 

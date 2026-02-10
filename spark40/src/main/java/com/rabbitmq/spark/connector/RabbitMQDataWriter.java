@@ -39,6 +39,7 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
 
     private final RowToMessageConverter converter;
 
+    private boolean pooledEnvironment = false;
     private Environment environment;
     private Producer producer;
 
@@ -173,13 +174,18 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
         } catch (Exception e) {
             LOG.warn("Error closing producer for partition {}", partitionId, e);
         }
-        try {
-            if (environment != null) {
-                environment.close();
-                environment = null;
+        if (pooledEnvironment) {
+            EnvironmentPool.getInstance().release(options);
+            environment = null;
+        } else {
+            try {
+                if (environment != null) {
+                    environment.close();
+                    environment = null;
+                }
+            } catch (Exception e) {
+                LOG.warn("Error closing environment for partition {}", partitionId, e);
             }
-        } catch (Exception e) {
-            LOG.warn("Error closing environment for partition {}", partitionId, e);
         }
     }
 
@@ -194,7 +200,8 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
     // ---- Producer initialization ----
 
     private void initProducer() {
-        environment = EnvironmentBuilderHelper.buildEnvironment(options);
+        environment = EnvironmentPool.getInstance().acquire(options);
+        pooledEnvironment = true;
 
         ProducerBuilder builder;
         if (options.isSuperStreamMode()) {
@@ -233,6 +240,24 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
                     Duration.ofMillis(options.getPublisherConfirmTimeoutMs()));
         }
         builder.enqueueTimeout(Duration.ofMillis(options.getEnqueueTimeoutMs()));
+
+        // State listener for RECOVERING/CLOSED transitions
+        builder.listeners(context -> {
+            Resource.State from = context.previousState();
+            Resource.State to = context.currentState();
+            if (to == Resource.State.RECOVERING) {
+                LOG.warn("Producer for partition {} is recovering ({}->{})",
+                        partitionId, from, to);
+            } else if (to == Resource.State.CLOSED) {
+                LOG.warn("Producer for partition {} has closed ({}->{})",
+                        partitionId, from, to);
+                sendError.compareAndSet(null,
+                        new IOException("Producer closed unexpectedly on partition " + partitionId));
+            } else {
+                LOG.debug("Producer for partition {} state change: {}->{}",
+                        partitionId, from, to);
+            }
+        });
 
         // Filter value extraction
         if (options.getFilterValueColumn() != null && !options.getFilterValueColumn().isEmpty()) {

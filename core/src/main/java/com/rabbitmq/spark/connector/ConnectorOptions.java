@@ -70,6 +70,9 @@ public final class ConnectorOptions implements Serializable {
     public static final String FILTER_VALUE_COLUMN = "filterValueColumn";
     public static final String IGNORE_UNKNOWN_COLUMNS = "ignoreUnknownColumns";
 
+    // Resource management
+    public static final String ENVIRONMENT_IDLE_TIMEOUT_MS = "environmentIdleTimeoutMs";
+
     // ---- Default values ----
 
     public static final String DEFAULT_METADATA_FIELDS =
@@ -90,6 +93,7 @@ public final class ConnectorOptions implements Serializable {
     public static final CompressionType DEFAULT_COMPRESSION = CompressionType.NONE;
     public static final RoutingStrategyType DEFAULT_ROUTING_STRATEGY = RoutingStrategyType.HASH;
     public static final boolean DEFAULT_IGNORE_UNKNOWN_COLUMNS = false;
+    public static final long DEFAULT_ENVIRONMENT_IDLE_TIMEOUT_MS = 60_000L;
 
     // ---- Parsed fields ----
 
@@ -145,6 +149,9 @@ public final class ConnectorOptions implements Serializable {
     private final String partitionerClass;
     private final String filterValueColumn;
     private final boolean ignoreUnknownColumns;
+
+    // Resource management
+    private final long environmentIdleTimeoutMs;
 
     /**
      * Parse connector options from the raw option map.
@@ -214,6 +221,10 @@ public final class ConnectorOptions implements Serializable {
         this.filterValueColumn = getString(options, FILTER_VALUE_COLUMN);
         this.ignoreUnknownColumns = getBoolean(options, IGNORE_UNKNOWN_COLUMNS,
                 DEFAULT_IGNORE_UNKNOWN_COLUMNS);
+
+        // Resource management
+        this.environmentIdleTimeoutMs = getLongPrimitive(options, ENVIRONMENT_IDLE_TIMEOUT_MS,
+                DEFAULT_ENVIRONMENT_IDLE_TIMEOUT_MS);
     }
 
     // ---- Validation ----
@@ -251,6 +262,12 @@ public final class ConnectorOptions implements Serializable {
         if (tlsTrustAll && !tls) {
             throw new IllegalArgumentException(
                     "'" + TLS_TRUST_ALL + "' requires '" + TLS + "' to be true");
+        }
+
+        // Validate extension class: addressResolverClass
+        if (addressResolverClass != null && !addressResolverClass.isEmpty()) {
+            ExtensionLoader.load(addressResolverClass, ConnectorAddressResolver.class,
+                    ADDRESS_RESOLVER_CLASS);
         }
     }
 
@@ -328,6 +345,12 @@ public final class ConnectorOptions implements Serializable {
                     "'" + ESTIMATED_MESSAGE_SIZE_BYTES + "' must be > 0, got: " +
                             estimatedMessageSizeBytes);
         }
+
+        // Validate extension class: filterPostFilterClass
+        if (filterPostFilterClass != null && !filterPostFilterClass.isEmpty()) {
+            ExtensionLoader.load(filterPostFilterClass, ConnectorPostFilter.class,
+                    FILTER_POST_FILTER_CLASS);
+        }
     }
 
     /**
@@ -378,6 +401,17 @@ public final class ConnectorOptions implements Serializable {
             throw new IllegalArgumentException(
                     "'" + PUBLISHER_CONFIRM_TIMEOUT_MS + "' must be > 0, got: " +
                             publisherConfirmTimeoutMs);
+        }
+        if (batchPublishingDelayMs != null && batchPublishingDelayMs < 0) {
+            throw new IllegalArgumentException(
+                    "'" + BATCH_PUBLISHING_DELAY_MS + "' must be >= 0, got: " +
+                            batchPublishingDelayMs);
+        }
+
+        // Validate extension class: partitionerClass
+        if (partitionerClass != null && !partitionerClass.isEmpty()) {
+            ExtensionLoader.load(partitionerClass, ConnectorRoutingStrategy.class,
+                    PARTITIONER_CLASS);
         }
     }
 
@@ -461,6 +495,10 @@ public final class ConnectorOptions implements Serializable {
     public String getPartitionerClass() { return partitionerClass; }
     public String getFilterValueColumn() { return filterValueColumn; }
     public boolean isIgnoreUnknownColumns() { return ignoreUnknownColumns; }
+
+    // ---- Getters: Resource management ----
+
+    public long getEnvironmentIdleTimeoutMs() { return environmentIdleTimeoutMs; }
 
     // ---- Parsing helpers ----
 

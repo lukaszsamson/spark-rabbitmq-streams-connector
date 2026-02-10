@@ -12,6 +12,7 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Push-to-pull bridge that reads messages from a RabbitMQ stream consumer
@@ -34,7 +35,9 @@ final class RabbitMQPartitionReader implements PartitionReader<InternalRow> {
 
     private final BlockingQueue<QueuedMessage> queue;
     private final AtomicReference<Throwable> consumerError = new AtomicReference<>();
+    private final AtomicBoolean consumerClosed = new AtomicBoolean(false);
 
+    private boolean pooledEnvironment = false;
     private Environment environment;
     private Consumer consumer;
     private InternalRow currentRow;
@@ -144,16 +147,23 @@ final class RabbitMQPartitionReader implements PartitionReader<InternalRow> {
         try {
             if (consumer != null) {
                 consumer.close();
+                consumer = null;
             }
         } catch (Exception e) {
             LOG.warn("Error closing consumer for stream '{}'", stream, e);
         }
-        try {
-            if (environment != null) {
-                environment.close();
+        if (pooledEnvironment) {
+            EnvironmentPool.getInstance().release(options);
+            environment = null;
+        } else {
+            try {
+                if (environment != null) {
+                    environment.close();
+                    environment = null;
+                }
+            } catch (Exception e) {
+                LOG.warn("Error closing environment for stream '{}'", stream, e);
             }
-        } catch (Exception e) {
-            LOG.warn("Error closing environment for stream '{}'", stream, e);
         }
     }
 
@@ -166,7 +176,8 @@ final class RabbitMQPartitionReader implements PartitionReader<InternalRow> {
     }
 
     private void initConsumer() {
-        environment = EnvironmentBuilderHelper.buildEnvironment(options);
+        environment = EnvironmentPool.getInstance().acquire(options);
+        pooledEnvironment = true;
 
         OffsetSpecification offsetSpec = resolveOffsetSpec();
 
@@ -175,13 +186,20 @@ final class RabbitMQPartitionReader implements PartitionReader<InternalRow> {
                 .offset(offsetSpec)
                 .noTrackingStrategy()
                 .messageHandler((context, message) -> {
+                    // Fast exit if we've already reached end offset
+                    if (context.offset() >= endOffset) {
+                        return;
+                    }
                     try {
-                        // Fast exit if we've already reached end offset
-                        if (context.offset() >= endOffset) {
-                            return;
+                        // Use offer with timeout to avoid indefinitely blocking the Netty thread
+                        if (!queue.offer(new QueuedMessage(
+                                message, context.offset(), context.timestamp()),
+                                30, TimeUnit.SECONDS)) {
+                            consumerError.compareAndSet(null,
+                                    new IOException("Queue full: timed out enqueuing message " +
+                                            "at offset " + context.offset() +
+                                            " on stream '" + stream + "'"));
                         }
-                        queue.put(new QueuedMessage(
-                                message, context.offset(), context.timestamp()));
                     } catch (InterruptedException e) {
                         Thread.currentThread().interrupt();
                     }
@@ -191,6 +209,23 @@ final class RabbitMQPartitionReader implements PartitionReader<InternalRow> {
                 .strategy(ConsumerFlowStrategy.creditOnChunkArrival(
                         options.getInitialCredits()))
                 .builder();
+
+        // State listener for RECOVERING/CLOSED transitions
+        builder.listeners(context -> {
+            Resource.State from = context.previousState();
+            Resource.State to = context.currentState();
+            if (to == Resource.State.RECOVERING) {
+                LOG.warn("Consumer for stream '{}' is recovering ({}->{})",
+                        stream, from, to);
+            } else if (to == Resource.State.CLOSED) {
+                LOG.warn("Consumer for stream '{}' has closed ({}->{})",
+                        stream, from, to);
+                consumerClosed.set(true);
+            } else {
+                LOG.debug("Consumer for stream '{}' state change: {}->{}",
+                        stream, from, to);
+            }
+        });
 
         // Configure filtering if specified
         if (options.getFilterValues() != null && !options.getFilterValues().isEmpty()) {
