@@ -199,6 +199,7 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
         }
         if (pooledEnvironment) {
             EnvironmentPool.getInstance().release(options);
+            pooledEnvironment = false;
             environment = null;
         } else {
             try {

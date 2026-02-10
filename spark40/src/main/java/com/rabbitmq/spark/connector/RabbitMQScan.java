@@ -13,6 +13,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.*;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 
@@ -157,8 +160,8 @@ final class RabbitMQScan implements Scan {
             return null;
         }
 
-        long startOffset = resolveStartOffset(firstAvailable, stats);
-        long endOffset = resolveEndOffset(stats);
+        long startOffset = resolveStartOffset(env, stream, firstAvailable, stats);
+        long endOffset = resolveEndOffset(env, stream, stats);
 
         // Handle data loss: start offset before first available
         if (startOffset < firstAvailable) {
@@ -182,10 +185,10 @@ final class RabbitMQScan implements Scan {
         return new long[]{startOffset, endOffset};
     }
 
-    private long resolveStartOffset(long firstAvailable, StreamStats stats) {
+    private long resolveStartOffset(Environment env, String stream, long firstAvailable, StreamStats stats) {
         return switch (options.getStartingOffsets()) {
             case EARLIEST -> firstAvailable;
-            case LATEST -> resolveEndOffset(stats);
+            case LATEST -> resolveEndOffset(env, stream, stats);
             case OFFSET -> options.getStartingOffset();
             case TIMESTAMP -> {
                 // For timestamp mode, start from the beginning and let the broker seek.
@@ -196,17 +199,16 @@ final class RabbitMQScan implements Scan {
         };
     }
 
-    private long resolveEndOffset(StreamStats stats) {
+    private long resolveEndOffset(Environment env, String stream, StreamStats stats) {
         if (options.getEndingOffsets() == EndingOffsetsMode.OFFSET) {
             return options.getEndingOffset();
         }
 
-        // endingOffsets=latest: resolve from broker stats.
-        // committedChunkId() is the first offset of the last committed chunk (approximate).
-        // TODO: migrate to stats.committedOffset() (precise tail, RabbitMQ 4.3+) when
-        //  stream-client 1.5+ is released — it is present in the client source but not
-        //  yet in the 1.4.0 Maven artifact.
-        return resolveTailOffset(stats);
+        // endingOffsets=latest: combine stats-derived tail with a direct last-message probe
+        // to avoid underestimating on older broker/client combinations.
+        long statsTail = resolveTailOffset(stats);
+        long probedTail = probeTailOffsetFromLastMessage(env, stream);
+        return Math.max(statsTail, probedTail);
     }
 
     static long resolveTailOffset(StreamStats stats) {
@@ -232,6 +234,53 @@ final class RabbitMQScan implements Scan {
             return stats.committedChunkId() + 1;
         } catch (NoOffsetException e) {
             return 0;
+        }
+    }
+
+    private long probeTailOffsetFromLastMessage(Environment env, String stream) {
+        BlockingQueue<Long> observedOffsets = new LinkedBlockingQueue<>();
+        com.rabbitmq.stream.Consumer probe = null;
+        try {
+            probe = env.consumerBuilder()
+                    .stream(stream)
+                    .offset(com.rabbitmq.stream.OffsetSpecification.last())
+                    .noTrackingStrategy()
+                    .messageHandler((context, message) -> observedOffsets.offer(context.offset()))
+                    .build();
+
+            Long first = observedOffsets.poll(250, TimeUnit.MILLISECONDS);
+            if (first == null) {
+                return 0;
+            }
+
+            long maxSeen = first;
+            while (true) {
+                Long next = observedOffsets.poll(40, TimeUnit.MILLISECONDS);
+                if (next == null) {
+                    break;
+                }
+                if (next > maxSeen) {
+                    maxSeen = next;
+                }
+            }
+            return maxSeen + 1;
+        } catch (NoOffsetException e) {
+            return 0;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return 0;
+        } catch (Exception e) {
+            LOG.debug("Unable to probe last message tail offset for stream '{}': {}",
+                    stream, e.getMessage());
+            return 0;
+        } finally {
+            if (probe != null) {
+                try {
+                    probe.close();
+                } catch (Exception e) {
+                    LOG.debug("Error closing tail probe consumer for stream '{}'", stream, e);
+                }
+            }
         }
     }
 }
