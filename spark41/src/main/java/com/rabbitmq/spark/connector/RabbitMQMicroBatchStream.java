@@ -12,6 +12,8 @@ import org.slf4j.LoggerFactory;
 
 import java.util.*;
 import java.util.concurrent.*;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
 
 /**
  * Core micro-batch streaming source for RabbitMQ Streams.
@@ -672,14 +674,7 @@ final class RabbitMQMicroBatchStream
             return 0;
         }
 
-        // TODO: migrate to stats.committedOffset() (precise tail, RabbitMQ 4.3+) when
-        //  stream-client 1.5+ is released — it is present in the client source but not
-        //  yet in the 1.4.0 Maven artifact.
-        try {
-            return stats.committedChunkId() + 1;
-        } catch (NoOffsetException e) {
-            return 0;
-        }
+        return resolveTailOffset(stats);
     }
 
     /**
@@ -744,5 +739,35 @@ final class RabbitMQMicroBatchStream
             return null;
         }
         return "spark-rmq-" + Integer.toUnsignedString(checkpointLocation.hashCode(), 16);
+    }
+
+    static long resolveTailOffset(StreamStats stats) {
+        // Prefer committedOffset() (RabbitMQ 4.3+) via reflection so this can
+        // compile against older stream-client artifacts that don't expose it.
+        try {
+            Method committedOffset = stats.getClass().getMethod("committedOffset");
+            Object value = committedOffset.invoke(stats);
+            if (value instanceof Number n) {
+                return n.longValue() + 1;
+            }
+        } catch (NoSuchMethodException e) {
+            // Older client artifact; fall back to committedChunkId below.
+        } catch (InvocationTargetException e) {
+            if (!(e.getTargetException() instanceof NoOffsetException)) {
+                LOG.debug("committedOffset() lookup failed, falling back to committedChunkId(): {}",
+                        e.getTargetException().toString());
+            }
+            // no committed offset yet or transient issue: fall through to fallback.
+        } catch (IllegalAccessException e) {
+            LOG.debug("Unable to access committedOffset() via reflection, falling back: {}",
+                    e.toString());
+        }
+
+        // Fallback approximation for older broker/client combinations.
+        try {
+            return stats.committedChunkId() + 1;
+        } catch (NoOffsetException e) {
+            return 0;
+        }
     }
 }

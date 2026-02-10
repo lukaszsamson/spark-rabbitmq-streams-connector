@@ -136,6 +136,17 @@ class RabbitMQPartitionReaderTest {
             OffsetSpecification spec = resolveOffsetSpec(reader);
             assertThat(spec).isEqualTo(OffsetSpecification.timestamp(1700000000000L));
         }
+
+        @Test
+        void createsConfiguredPostFilter() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("filterPostFilterClass", AcceptAllPostFilter.class.getName());
+
+            ConnectorPostFilter postFilter = createPostFilter(new ConnectorOptions(opts));
+            assertThat(postFilter).isInstanceOf(AcceptAllPostFilter.class);
+        }
     }
 
     // ======================================================================
@@ -221,5 +232,20 @@ class RabbitMQPartitionReaderTest {
         Method method = RabbitMQPartitionReader.class.getDeclaredMethod("resolveOffsetSpec");
         method.setAccessible(true);
         return (OffsetSpecification) method.invoke(reader);
+    }
+
+    private static ConnectorPostFilter createPostFilter(ConnectorOptions options)
+            throws Exception {
+        Method method = RabbitMQPartitionReader.class.getDeclaredMethod(
+                "createPostFilter", ConnectorOptions.class);
+        method.setAccessible(true);
+        return (ConnectorPostFilter) method.invoke(null, options);
+    }
+
+    public static class AcceptAllPostFilter implements ConnectorPostFilter {
+        @Override
+        public boolean accept(byte[] messageBody, Map<String, String> applicationProperties) {
+            return true;
+        }
     }
 }

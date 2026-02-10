@@ -3,7 +3,15 @@ package com.rabbitmq.spark.connector;
 import com.rabbitmq.stream.Address;
 import com.rabbitmq.stream.Environment;
 import com.rabbitmq.stream.EnvironmentBuilder;
+import io.netty.handler.ssl.SslContext;
+import io.netty.handler.ssl.SslContextBuilder;
 
+import javax.net.ssl.KeyManagerFactory;
+import javax.net.ssl.TrustManagerFactory;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.security.GeneralSecurityException;
+import java.security.KeyStore;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -80,8 +88,13 @@ final class EnvironmentBuilderHelper {
         }
         if (options.isTlsTrustAll()) {
             builder.tls().trustEverything().environmentBuilder();
+            return;
+        }
+
+        SslContext sslContext = buildSslContext(options);
+        if (sslContext != null) {
+            builder.tls().sslContext(sslContext).environmentBuilder();
         } else {
-            // Basic TLS with system defaults; JKS truststore/keystore support is TODO (M7)
             builder.tls().environmentBuilder();
         }
     }
@@ -100,5 +113,51 @@ final class EnvironmentBuilderHelper {
                     new ConnectorAddressResolver.Address(address.host(), address.port()));
             return new Address(resolved.host(), resolved.port());
         });
+    }
+
+    private static SslContext buildSslContext(ConnectorOptions options) {
+        boolean hasTruststore = options.getTlsTruststore() != null && !options.getTlsTruststore().isEmpty();
+        boolean hasKeystore = options.getTlsKeystore() != null && !options.getTlsKeystore().isEmpty();
+        if (!hasTruststore && !hasKeystore) {
+            return null;
+        }
+
+        try {
+            SslContextBuilder sslBuilder = SslContextBuilder.forClient();
+
+            if (hasTruststore) {
+                KeyStore trustStore = loadJks(
+                        options.getTlsTruststore(), options.getTlsTruststorePassword());
+                TrustManagerFactory tmf = TrustManagerFactory.getInstance(
+                        TrustManagerFactory.getDefaultAlgorithm());
+                tmf.init(trustStore);
+                sslBuilder.trustManager(tmf);
+            }
+
+            if (hasKeystore) {
+                KeyStore keyStore = loadJks(options.getTlsKeystore(), options.getTlsKeystorePassword());
+                KeyManagerFactory kmf = KeyManagerFactory.getInstance(
+                        KeyManagerFactory.getDefaultAlgorithm());
+                kmf.init(keyStore, passwordChars(options.getTlsKeystorePassword()));
+                sslBuilder.keyManager(kmf);
+            }
+
+            return sslBuilder.build();
+        } catch (GeneralSecurityException | IOException e) {
+            throw new IllegalArgumentException("Failed to initialize TLS JKS configuration", e);
+        }
+    }
+
+    private static KeyStore loadJks(String path, String password)
+            throws GeneralSecurityException, IOException {
+        KeyStore keyStore = KeyStore.getInstance("JKS");
+        try (FileInputStream in = new FileInputStream(path)) {
+            keyStore.load(in, passwordChars(password));
+        }
+        return keyStore;
+    }
+
+    private static char[] passwordChars(String password) {
+        return password != null ? password.toCharArray() : new char[0];
     }
 }

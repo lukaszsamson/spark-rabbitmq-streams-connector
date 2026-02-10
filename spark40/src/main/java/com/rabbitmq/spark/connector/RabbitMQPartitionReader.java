@@ -8,6 +8,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
@@ -33,6 +35,7 @@ final class RabbitMQPartitionReader implements PartitionReader<InternalRow> {
     private final ConnectorOptions options;
     private final boolean useConfiguredStartingOffset;
     private final MessageToRowConverter converter;
+    private final ConnectorPostFilter postFilter;
 
     private final BlockingQueue<QueuedMessage> queue;
     private final AtomicReference<Throwable> consumerError = new AtomicReference<>();
@@ -65,6 +68,7 @@ final class RabbitMQPartitionReader implements PartitionReader<InternalRow> {
         this.options = options;
         this.useConfiguredStartingOffset = partition.isUseConfiguredStartingOffset();
         this.converter = new MessageToRowConverter(options.getMetadataFields());
+        this.postFilter = createPostFilter(options);
         this.queue = new LinkedBlockingQueue<>(options.getQueueCapacity());
     }
 
@@ -134,6 +138,15 @@ final class RabbitMQPartitionReader implements PartitionReader<InternalRow> {
 
             // De-dup on reconnection: skip already-emitted offsets
             if (qm.offset() <= lastEmittedOffset) {
+                continue;
+            }
+
+            if (postFilter != null && !postFilter.accept(
+                    qm.message().getBodyAsBinary(), coerceMapToStrings(qm.message().getApplicationProperties()))) {
+                if (options.isFilterWarningOnMismatch()) {
+                    LOG.warn("Post-filter dropped message at offset {} on stream '{}'",
+                            qm.offset(), stream);
+                }
                 continue;
             }
 
@@ -264,5 +277,25 @@ final class RabbitMQPartitionReader implements PartitionReader<InternalRow> {
             return OffsetSpecification.timestamp(options.getStartingTimestamp());
         }
         return OffsetSpecification.offset(startOffset);
+    }
+
+    private static ConnectorPostFilter createPostFilter(ConnectorOptions options) {
+        String className = options.getFilterPostFilterClass();
+        if (className == null || className.isEmpty()) {
+            return null;
+        }
+        return ExtensionLoader.load(className, ConnectorPostFilter.class,
+                ConnectorOptions.FILTER_POST_FILTER_CLASS);
+    }
+
+    private static Map<String, String> coerceMapToStrings(Map<String, Object> source) {
+        if (source == null || source.isEmpty()) {
+            return Map.of();
+        }
+        Map<String, String> out = new LinkedHashMap<>(source.size());
+        for (Map.Entry<String, Object> entry : source.entrySet()) {
+            out.put(entry.getKey(), entry.getValue() != null ? entry.getValue().toString() : null);
+        }
+        return out;
     }
 }
