@@ -163,6 +163,16 @@ final class RabbitMQScan implements Scan {
         long startOffset = resolveStartOffset(env, stream, firstAvailable, stats);
         long endOffset = resolveEndOffset(env, stream, stats);
 
+        // Validate explicit offset ranges (Kafka-compatible behavior).
+        if (options.getStartingOffsets() == StartingOffsetsMode.OFFSET
+                && options.getEndingOffsets() == EndingOffsetsMode.OFFSET
+                && startOffset > endOffset) {
+            throw new IllegalArgumentException(
+                    "Requested startingOffset " + startOffset
+                            + " is greater than endingOffset " + endOffset
+                            + " for stream '" + stream + "'.");
+        }
+
         // Handle data loss: start offset before first available
         if (startOffset < firstAvailable) {
             if (options.isFailOnDataLoss()) {

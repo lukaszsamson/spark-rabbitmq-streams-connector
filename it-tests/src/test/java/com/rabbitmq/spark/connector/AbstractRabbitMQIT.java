@@ -16,10 +16,14 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
+import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.StructType;
+
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -92,6 +96,13 @@ abstract class AbstractRabbitMQIT {
             testEnv = null;
         }
     }
+
+    /** Minimal output schema (fixed columns only, no metadata). */
+    static final StructType MINIMAL_OUTPUT_SCHEMA = new StructType()
+            .add("value", DataTypes.BinaryType)
+            .add("stream", DataTypes.StringType)
+            .add("offset", DataTypes.LongType)
+            .add("chunk_timestamp", DataTypes.TimestampType);
 
     // ---- Stream management ----
 
@@ -209,5 +220,67 @@ abstract class AbstractRabbitMQIT {
         }
 
         return new ArrayList<>(messages);
+    }
+
+    // ---- Retention and truncation helpers ----
+
+    /**
+     * Create a stream with small retention limits to allow testing truncation.
+     * Uses small segment and max-length to force early truncation.
+     */
+    void createStreamWithRetention(String name, long maxLengthBytes,
+                                    long maxSegmentSizeBytes) {
+        testEnv.streamCreator()
+                .stream(name)
+                .maxLengthBytes(
+                        com.rabbitmq.stream.ByteCapacity.B(maxLengthBytes))
+                .maxSegmentSizeBytes(
+                        com.rabbitmq.stream.ByteCapacity.B(maxSegmentSizeBytes))
+                .create();
+        LOG.info("Created stream '{}' with maxLengthBytes={}, maxSegmentSizeBytes={}",
+                name, maxLengthBytes, maxSegmentSizeBytes);
+    }
+
+    /**
+     * Wait until a stream's first offset is greater than 0 (truncation occurred).
+     * Returns the first available offset, or -1 if truncation didn't happen within timeout.
+     */
+    long waitForTruncation(String stream, long maxWaitMs) {
+        long deadline = System.currentTimeMillis() + maxWaitMs;
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                long firstOffset = testEnv.queryStreamStats(stream).firstOffset();
+                if (firstOffset > 0) {
+                    LOG.info("Stream '{}' truncated, firstOffset={}", stream, firstOffset);
+                    return firstOffset;
+                }
+            } catch (Exception e) {
+                LOG.debug("Error querying stats for '{}': {}", stream, e.getMessage());
+            }
+            try {
+                Thread.sleep(200);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+        LOG.warn("Stream '{}' was not truncated within {}ms", stream, maxWaitMs);
+        return -1;
+    }
+
+    /**
+     * Publish messages asynchronously after a delay (for concurrent publish tests).
+     * Returns a future that completes when all messages are published.
+     */
+    CompletableFuture<Void> publishMessagesAsync(String stream, int count,
+                                                  String prefix, long delayMs) {
+        return CompletableFuture.runAsync(() -> {
+            try {
+                Thread.sleep(delayMs);
+                publishMessages(stream, count, prefix);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        });
     }
 }

@@ -606,7 +606,7 @@ final class RabbitMQMicroBatchStream
         Map<String, Long> tailOffsets = new LinkedHashMap<>();
 
         for (String stream : streams) {
-            long tail = queryStreamTailOffset(env, stream);
+            long tail = queryStreamTailOffsetForLatest(env, stream);
             tailOffsets.put(stream, tail);
         }
         return tailOffsets;
@@ -617,9 +617,7 @@ final class RabbitMQMicroBatchStream
         Environment env = getEnvironment();
         Map<String, Long> tailOffsets = new LinkedHashMap<>();
         for (String stream : streams) {
-            long statsTail = queryStreamTailOffset(env, stream);
-            long probedTail = probeTailOffsetFromLastMessage(env, stream);
-            tailOffsets.put(stream, Math.max(statsTail, probedTail));
+            tailOffsets.put(stream, queryStreamTailOffsetForLatest(env, stream));
         }
         return tailOffsets;
     }
@@ -708,7 +706,7 @@ final class RabbitMQMicroBatchStream
     private long resolveStartingOffset(String stream) {
         return switch (options.getStartingOffsets()) {
             case EARLIEST -> resolveFirstAvailable(stream);
-            case LATEST -> queryStreamTailOffset(getEnvironment(), stream);
+            case LATEST -> queryStreamTailOffsetForLatest(getEnvironment(), stream);
             case OFFSET -> options.getStartingOffset();
             case TIMESTAMP -> {
                 // For timestamp mode, use firstAvailable as offset-planning lower bound.
@@ -716,6 +714,12 @@ final class RabbitMQMicroBatchStream
                 yield resolveFirstAvailable(stream);
             }
         };
+    }
+
+    private long queryStreamTailOffsetForLatest(Environment env, String stream) {
+        long statsTail = queryStreamTailOffset(env, stream);
+        long probedTail = probeTailOffsetFromLastMessage(env, stream);
+        return Math.max(statsTail, probedTail);
     }
 
     /**
