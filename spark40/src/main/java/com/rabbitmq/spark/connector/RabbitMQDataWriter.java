@@ -95,6 +95,19 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
         }
         Message message = converter.convert(record, builder);
 
+        // Validate routing key for superstream hash/key strategies
+        if (options.isSuperStreamMode()
+                && options.getRoutingStrategy() != RoutingStrategyType.CUSTOM) {
+            String rk = extractRoutingKey(message);
+            if (rk == null || rk.isEmpty()) {
+                throw new IOException(
+                        "Routing key is required for superstream with " +
+                                options.getRoutingStrategy() + " routing strategy. " +
+                                "Provide a 'routing_key' column, set 'routing_key' in " +
+                                "'application_properties', or set 'subject' in 'properties'.");
+            }
+        }
+
         // Track outstanding confirms
         outstandingConfirms.incrementAndGet();
 
@@ -347,6 +360,25 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
             return null;
         }
         return baseName + "-p" + partitionId + "-t" + taskId;
+    }
+
+    /**
+     * Extract routing key from a built message using the same lookup order
+     * as the superstream routing function: application_properties["routing_key"],
+     * then properties.subject.
+     */
+    private static String extractRoutingKey(Message message) {
+        var appProps = message.getApplicationProperties();
+        if (appProps != null) {
+            Object rk = appProps.get("routing_key");
+            if (rk != null) {
+                return rk.toString();
+            }
+        }
+        if (message.getProperties() != null && message.getProperties().getSubject() != null) {
+            return message.getProperties().getSubject();
+        }
+        return null;
     }
 
     private static Compression toStreamCompression(CompressionType type) {
