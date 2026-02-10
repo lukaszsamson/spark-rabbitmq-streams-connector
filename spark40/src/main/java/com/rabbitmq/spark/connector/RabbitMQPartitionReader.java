@@ -51,8 +51,11 @@ final class RabbitMQPartitionReader implements PartitionReader<InternalRow> {
 
     /**
      * A message queued by the consumer callback for pull-based reading.
+     * Includes the {@link MessageHandler.Context} so that {@code processed()}
+     * can be called on the pull side, tying credit grants to consumption rate.
      */
-    record QueuedMessage(Message message, long offset, long chunkTimestampMillis) {}
+    record QueuedMessage(Message message, long offset, long chunkTimestampMillis,
+                         MessageHandler.Context context) {}
 
     RabbitMQPartitionReader(RabbitMQInputPartition partition, ConnectorOptions options) {
         this.stream = partition.getStream();
@@ -110,6 +113,11 @@ final class RabbitMQPartitionReader implements PartitionReader<InternalRow> {
 
             // Reset wait timer on message receipt
             totalWaitMs = 0;
+
+            // Notify flow strategy that this message has been consumed (pull-side).
+            // This ties credit grants to consumption rate rather than enqueue rate,
+            // providing natural backpressure when the pull side is slow.
+            qm.context().processed();
 
             // Skip messages before start offset (can happen with timestamp-based starting)
             if (qm.offset() < startOffset) {
@@ -197,20 +205,17 @@ final class RabbitMQPartitionReader implements PartitionReader<InternalRow> {
                         return;
                     }
                     try {
-                        // Use offer with timeout to avoid indefinitely blocking the Netty thread
+                        // Enqueue with a short timeout. context.processed() is NOT called
+                        // here — it is deferred to the pull side (next()) so that credits
+                        // are granted based on consumption rate, providing natural
+                        // backpressure and avoiding blocking the Netty I/O thread.
                         if (!queue.offer(new QueuedMessage(
-                                message, context.offset(), context.timestamp()),
-                                30, TimeUnit.SECONDS)) {
+                                message, context.offset(), context.timestamp(), context),
+                                5, TimeUnit.SECONDS)) {
                             consumerError.compareAndSet(null,
                                     new IOException("Queue full: timed out enqueuing message " +
                                             "at offset " + context.offset() +
                                             " on stream '" + stream + "'"));
-                        } else {
-                            // Notify flow strategy that this message was processed.
-                            // With creditWhenHalfMessagesProcessed, credits are only
-                            // granted after enough messages are enqueued, providing
-                            // natural backpressure when the queue is near capacity.
-                            context.processed();
                         }
                     } catch (InterruptedException e) {
                         Thread.currentThread().interrupt();

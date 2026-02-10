@@ -87,7 +87,7 @@ class RabbitMQPartitionReaderTest {
         @Test
         void queuedMessageHoldsData() {
             Message msg = CODEC.messageBuilder().addData("hello".getBytes()).build();
-            var qm = new RabbitMQPartitionReader.QueuedMessage(msg, 42, 1700000000000L);
+            var qm = new RabbitMQPartitionReader.QueuedMessage(msg, 42, 1700000000000L, null);
 
             assertThat(qm.offset()).isEqualTo(42);
             assertThat(qm.chunkTimestampMillis()).isEqualTo(1700000000000L);
