@@ -31,6 +31,7 @@ final class RabbitMQPartitionReader implements PartitionReader<InternalRow> {
     private final long startOffset;
     private final long endOffset;
     private final ConnectorOptions options;
+    private final boolean useConfiguredStartingOffset;
     private final MessageToRowConverter converter;
 
     private final BlockingQueue<QueuedMessage> queue;
@@ -62,6 +63,7 @@ final class RabbitMQPartitionReader implements PartitionReader<InternalRow> {
         this.startOffset = partition.getStartOffset();
         this.endOffset = partition.getEndOffset();
         this.options = options;
+        this.useConfiguredStartingOffset = partition.isUseConfiguredStartingOffset();
         this.converter = new MessageToRowConverter(options.getMetadataFields());
         this.queue = new LinkedBlockingQueue<>(options.getQueueCapacity());
     }
@@ -258,11 +260,9 @@ final class RabbitMQPartitionReader implements PartitionReader<InternalRow> {
     }
 
     private OffsetSpecification resolveOffsetSpec() {
-        return switch (options.getStartingOffsets()) {
-            case EARLIEST -> OffsetSpecification.first();
-            case LATEST -> OffsetSpecification.next();
-            case OFFSET -> OffsetSpecification.offset(startOffset);
-            case TIMESTAMP -> OffsetSpecification.timestamp(options.getStartingTimestamp());
-        };
+        if (useConfiguredStartingOffset && options.getStartingOffsets() == StartingOffsetsMode.TIMESTAMP) {
+            return OffsetSpecification.timestamp(options.getStartingTimestamp());
+        }
+        return OffsetSpecification.offset(startOffset);
     }
 }

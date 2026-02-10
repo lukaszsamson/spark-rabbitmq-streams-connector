@@ -37,6 +37,8 @@ final class RabbitMQMicroBatchStream
     private final ConnectorOptions options;
     private final StructType schema;
     private final String checkpointLocation;
+    private final String effectiveConsumerName;
+    private final ExecutorService brokerCommitExecutor;
 
     /** Discovered streams (lazily initialized). */
     private List<String> streams;
@@ -55,13 +57,24 @@ final class RabbitMQMicroBatchStream
 
     /** Running average message size in bytes, for byte-based admission control. */
     private int estimatedMessageSize;
+    /** Initial offsets resolved for this stream instance (used for timestamp first batch seek). */
+    private volatile Map<String, Long> initialOffsets;
 
     RabbitMQMicroBatchStream(ConnectorOptions options, StructType schema,
                               String checkpointLocation) {
         this.options = options;
         this.schema = schema;
         this.checkpointLocation = checkpointLocation;
+        this.effectiveConsumerName = deriveConsumerName(options, checkpointLocation);
+        this.brokerCommitExecutor = Executors.newFixedThreadPool(
+                Math.max(1, Math.min(
+                        Runtime.getRuntime().availableProcessors(),
+                        StoredOffsetLookup.MAX_CONCURRENT_LOOKUPS)));
         this.estimatedMessageSize = options.getEstimatedMessageSizeBytes();
+        if (options.getConsumerName() == null && this.effectiveConsumerName != null) {
+            LOG.info("consumerName not set; derived stable name '{}' from checkpoint location",
+                    this.effectiveConsumerName);
+        }
     }
 
     // ---- SparkDataStream lifecycle ----
@@ -69,7 +82,7 @@ final class RabbitMQMicroBatchStream
     @Override
     public Offset initialOffset() {
         List<String> streams = discoverStreams();
-        String consumerName = options.getConsumerName();
+        String consumerName = effectiveConsumerName;
 
         // 1. Try broker stored offsets if consumerName is set
         if (consumerName != null && !consumerName.isEmpty()) {
@@ -98,6 +111,7 @@ final class RabbitMQMicroBatchStream
                     for (String stream : streams) {
                         merged.putIfAbsent(stream, resolveStartingOffset(stream));
                     }
+                    this.initialOffsets = new LinkedHashMap<>(merged);
                     return new RabbitMQStreamOffset(merged);
                 }
                 LOG.info("No stored offsets found for consumer '{}', falling back to startingOffsets",
@@ -118,6 +132,7 @@ final class RabbitMQMicroBatchStream
         for (String stream : streams) {
             offsets.put(stream, resolveStartingOffset(stream));
         }
+        this.initialOffsets = new LinkedHashMap<>(offsets);
         LOG.info("Initial offsets from startingOffsets={}: {}", options.getStartingOffsets(), offsets);
         return new RabbitMQStreamOffset(offsets);
     }
@@ -144,7 +159,7 @@ final class RabbitMQMicroBatchStream
             return;
         }
 
-        String consumerName = options.getConsumerName();
+        String consumerName = effectiveConsumerName;
         if (consumerName == null || consumerName.isEmpty()) {
             LOG.debug("No consumerName set, skipping broker offset commit");
             return;
@@ -164,14 +179,12 @@ final class RabbitMQMicroBatchStream
         // Dispatch storeOffset calls concurrently to avoid commit latency
         // amplification (each storeOffset may block up to ~10s for verification)
         Environment env = getEnvironment();
-        int poolSize = Math.min(toStore.size(), StoredOffsetLookup.MAX_CONCURRENT_LOOKUPS);
-        ExecutorService executor = Executors.newFixedThreadPool(poolSize);
         try {
             List<Future<?>> futures = new ArrayList<>();
             for (Map.Entry<String, Long> entry : toStore) {
                 String stream = entry.getKey();
                 long lastProcessed = entry.getValue() - 1;
-                futures.add(executor.submit(() -> {
+                futures.add(brokerCommitExecutor.submit(() -> {
                     try {
                         env.storeOffset(consumerName, stream, lastProcessed);
                         LOG.debug("Stored offset {} for consumer '{}' on stream '{}'",
@@ -208,13 +221,12 @@ final class RabbitMQMicroBatchStream
                     // Already logged inside the task
                 }
             }
-        } finally {
-            executor.shutdownNow();
         }
     }
 
     @Override
     public void stop() {
+        brokerCommitExecutor.shutdownNow();
         if (environment != null) {
             try {
                 environment.close();
@@ -268,8 +280,10 @@ final class RabbitMQMicroBatchStream
             planWithSplitting(partitions, validRanges, minPartitions);
         } else {
             for (Map.Entry<String, long[]> entry : validRanges.entrySet()) {
+                long rangeStart = entry.getValue()[0];
                 partitions.add(new RabbitMQInputPartition(
-                        entry.getKey(), entry.getValue()[0], entry.getValue()[1], options));
+                        entry.getKey(), rangeStart, entry.getValue()[1], options,
+                        useConfiguredStartingOffset(entry.getKey(), rangeStart)));
             }
         }
 
@@ -325,7 +339,9 @@ final class RabbitMQMicroBatchStream
             long messages = end - start;
 
             if (numSplits <= 1 || messages <= 1) {
-                partitions.add(new RabbitMQInputPartition(stream, start, end, options));
+                partitions.add(new RabbitMQInputPartition(
+                        stream, start, end, options,
+                        useConfiguredStartingOffset(stream, start)));
                 continue;
             }
 
@@ -337,7 +353,8 @@ final class RabbitMQMicroBatchStream
                 if (splitSize == 0) break;
                 long splitEnd = currentStart + splitSize;
                 partitions.add(new RabbitMQInputPartition(
-                        stream, currentStart, splitEnd, options));
+                        stream, currentStart, splitEnd, options,
+                        useConfiguredStartingOffset(stream, currentStart)));
                 currentStart = splitEnd;
             }
         }
@@ -704,5 +721,28 @@ final class RabbitMQMicroBatchStream
             LOG.warn("Failed to query first offset for stream '{}': {}", stream, e.getMessage());
             return 0;
         }
+    }
+
+    private boolean useConfiguredStartingOffset(String stream, long startOffset) {
+        if (options.getStartingOffsets() != StartingOffsetsMode.TIMESTAMP) {
+            return false;
+        }
+        Map<String, Long> initial = this.initialOffsets;
+        if (initial == null) {
+            return false;
+        }
+        Long initialOffset = initial.get(stream);
+        return initialOffset != null && initialOffset == startOffset;
+    }
+
+    private static String deriveConsumerName(ConnectorOptions options, String checkpointLocation) {
+        String configured = options.getConsumerName();
+        if (configured != null && !configured.isBlank()) {
+            return configured;
+        }
+        if (checkpointLocation == null || checkpointLocation.isBlank()) {
+            return null;
+        }
+        return "spark-rmq-" + Integer.toUnsignedString(checkpointLocation.hashCode(), 16);
     }
 }

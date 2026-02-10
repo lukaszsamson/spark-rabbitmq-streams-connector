@@ -7,6 +7,8 @@ import org.apache.spark.sql.connector.read.streaming.*;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.util.*;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -214,6 +216,30 @@ class RabbitMQMicroBatchStreamTest {
 
             assertThat(partitions).hasSize(2);
         }
+
+        @Test
+        void marksConfiguredStartingOffsetOnlyForInitialTimestampBatch() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("startingOffsets", "timestamp");
+            opts.put("startingTimestamp", "1700000000000");
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+
+            setPrivateField(stream, "initialOffsets", Map.of("test-stream", 10L));
+
+            InputPartition[] first = stream.planInputPartitions(
+                    new RabbitMQStreamOffset(Map.of("test-stream", 10L)),
+                    new RabbitMQStreamOffset(Map.of("test-stream", 20L)));
+            assertThat(first).hasSize(1);
+            assertThat(((RabbitMQInputPartition) first[0]).isUseConfiguredStartingOffset()).isTrue();
+
+            InputPartition[] next = stream.planInputPartitions(
+                    new RabbitMQStreamOffset(Map.of("test-stream", 11L)),
+                    new RabbitMQStreamOffset(Map.of("test-stream", 20L)));
+            assertThat(next).hasSize(1);
+            assertThat(((RabbitMQInputPartition) next[0]).isUseConfiguredStartingOffset()).isFalse();
+        }
     }
 
     // ======================================================================
@@ -352,6 +378,33 @@ class RabbitMQMicroBatchStreamTest {
         }
     }
 
+    @Nested
+    class ConsumerNameDerivation {
+        @Test
+        void derivesStableConsumerNameFromCheckpointWhenMissing() throws Exception {
+            ConnectorOptions opts = minimalOptions();
+            String derived = (String) invokeStatic(
+                    "deriveConsumerName",
+                    new Class<?>[]{ConnectorOptions.class, String.class},
+                    opts, "/tmp/checkpoint/path");
+            assertThat(derived).startsWith("spark-rmq-");
+        }
+
+        @Test
+        void usesConfiguredConsumerNameWhenProvided() throws Exception {
+            Map<String, String> optsMap = new LinkedHashMap<>();
+            optsMap.put("endpoints", "localhost:5552");
+            optsMap.put("stream", "test-stream");
+            optsMap.put("consumerName", "explicit-consumer");
+            ConnectorOptions opts = new ConnectorOptions(optsMap);
+            String derived = (String) invokeStatic(
+                    "deriveConsumerName",
+                    new Class<?>[]{ConnectorOptions.class, String.class},
+                    opts, "/tmp/checkpoint/path");
+            assertThat(derived).isEqualTo("explicit-consumer");
+        }
+    }
+
     // ---- Helpers ----
 
     private static ConnectorOptions minimalOptions() {
@@ -364,5 +417,19 @@ class RabbitMQMicroBatchStreamTest {
     private static RabbitMQMicroBatchStream createStream(ConnectorOptions opts) {
         var schema = RabbitMQStreamTable.buildSourceSchema(opts.getMetadataFields());
         return new RabbitMQMicroBatchStream(opts, schema, "/tmp/checkpoint");
+    }
+
+    private static void setPrivateField(Object target, String fieldName, Object value)
+            throws Exception {
+        Field field = target.getClass().getDeclaredField(fieldName);
+        field.setAccessible(true);
+        field.set(target, value);
+    }
+
+    private static Object invokeStatic(String methodName, Class<?>[] parameterTypes, Object... args)
+            throws Exception {
+        Method method = RabbitMQMicroBatchStream.class.getDeclaredMethod(methodName, parameterTypes);
+        method.setAccessible(true);
+        return method.invoke(null, args);
     }
 }

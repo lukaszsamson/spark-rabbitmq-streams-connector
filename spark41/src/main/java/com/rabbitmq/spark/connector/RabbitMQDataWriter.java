@@ -12,7 +12,6 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.time.Duration;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
@@ -46,7 +45,7 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
     // Confirm tracking
     private final AtomicReference<Throwable> sendError = new AtomicReference<>();
     private final AtomicLong outstandingConfirms = new AtomicLong(0);
-    private volatile CountDownLatch confirmLatch = new CountDownLatch(0);
+    private final Object confirmMonitor = new Object();
 
     // Deduplication: monotonic publishing ID
     private long nextPublishingId = -1;
@@ -112,17 +111,24 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
         outstandingConfirms.incrementAndGet();
 
         // Send with confirmation handler
-        producer.send(message, confirmationStatus -> {
-            if (!confirmationStatus.isConfirmed()) {
-                sendError.compareAndSet(null,
-                        new IOException("Message confirmation failed with code " +
-                                confirmationStatus.getCode() +
-                                " on partition " + partitionId));
-            }
-            if (outstandingConfirms.decrementAndGet() == 0) {
-                confirmLatch.countDown();
-            }
-        });
+        try {
+            producer.send(message, confirmationStatus -> {
+                if (!confirmationStatus.isConfirmed()) {
+                    sendError.compareAndSet(null,
+                            new IOException("Message confirmation failed with code " +
+                                    confirmationStatus.getCode() +
+                                    " on partition " + partitionId));
+                }
+                synchronized (confirmMonitor) {
+                    if (outstandingConfirms.decrementAndGet() == 0) {
+                        confirmMonitor.notifyAll();
+                    }
+                }
+            });
+        } catch (Exception e) {
+            outstandingConfirms.decrementAndGet();
+            throw new IOException("Failed to send message on partition " + partitionId, e);
+        }
 
         // Track metrics
         recordsWritten++;
@@ -136,21 +142,25 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
     public WriterCommitMessage commit() throws IOException {
         // Wait for all outstanding confirms
         if (outstandingConfirms.get() > 0) {
-            confirmLatch = new CountDownLatch(1);
-            if (outstandingConfirms.get() > 0) {
-                long timeoutMs = options.getPublisherConfirmTimeoutMs() != null
-                        ? options.getPublisherConfirmTimeoutMs()
-                        : 30_000L;
-                try {
-                    if (!confirmLatch.await(timeoutMs, TimeUnit.MILLISECONDS)) {
+            long timeoutMs = options.getPublisherConfirmTimeoutMs() != null
+                    ? options.getPublisherConfirmTimeoutMs()
+                    : 30_000L;
+            long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
+            synchronized (confirmMonitor) {
+                while (outstandingConfirms.get() > 0) {
+                    long remainingNanos = deadlineNanos - System.nanoTime();
+                    if (remainingNanos <= 0) {
                         throw new IOException(
                                 "Timed out waiting for publisher confirms on partition " +
                                         partitionId + ". Outstanding: " + outstandingConfirms.get() +
                                         ", timeout: " + timeoutMs + "ms");
                     }
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    throw new IOException("Interrupted waiting for publisher confirms", e);
+                    try {
+                        TimeUnit.NANOSECONDS.timedWait(confirmMonitor, remainingNanos);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        throw new IOException("Interrupted waiting for publisher confirms", e);
+                    }
                 }
             }
         }

@@ -15,6 +15,7 @@ public final class RabbitMQInputPartition implements InputPartition {
     private final long startOffset;
     private final long endOffset;
     private final ConnectorOptions options;
+    private final boolean useConfiguredStartingOffset;
 
     /**
      * @param stream the RabbitMQ stream name (or partition stream name for superstreams)
@@ -24,10 +25,24 @@ public final class RabbitMQInputPartition implements InputPartition {
      */
     public RabbitMQInputPartition(String stream, long startOffset, long endOffset,
                                    ConnectorOptions options) {
+        this(stream, startOffset, endOffset, options, false);
+    }
+
+    /**
+     * @param stream the RabbitMQ stream name (or partition stream name for superstreams)
+     * @param startOffset inclusive start offset
+     * @param endOffset exclusive end offset
+     * @param options the connector options (serializable)
+     * @param useConfiguredStartingOffset whether reader initialization should honor
+     *                                    configured starting mode semantics
+     */
+    public RabbitMQInputPartition(String stream, long startOffset, long endOffset,
+                                  ConnectorOptions options, boolean useConfiguredStartingOffset) {
         this.stream = stream;
         this.startOffset = startOffset;
         this.endOffset = endOffset;
         this.options = options;
+        this.useConfiguredStartingOffset = useConfiguredStartingOffset;
     }
 
     public String getStream() {
@@ -44,6 +59,10 @@ public final class RabbitMQInputPartition implements InputPartition {
 
     public ConnectorOptions getOptions() {
         return options;
+    }
+
+    public boolean isUseConfiguredStartingOffset() {
+        return useConfiguredStartingOffset;
     }
 
     @Override

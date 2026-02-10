@@ -1,12 +1,14 @@
 package com.rabbitmq.spark.connector;
 
 import com.rabbitmq.stream.Message;
+import com.rabbitmq.stream.OffsetSpecification;
 import com.rabbitmq.stream.codec.QpidProtonCodec;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.lang.reflect.Method;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.BlockingQueue;
@@ -43,6 +45,16 @@ class RabbitMQPartitionReaderTest {
             assertThat(partition.getStartOffset()).isEqualTo(10);
             assertThat(partition.getEndOffset()).isEqualTo(100);
             assertThat(partition.getOptions()).isSameAs(opts);
+            assertThat(partition.isUseConfiguredStartingOffset()).isFalse();
+        }
+
+        @Test
+        void partitionCanMarkConfiguredStartingOffset() {
+            ConnectorOptions opts = minimalOptions();
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 10, 100, opts, true);
+
+            assertThat(partition.isUseConfiguredStartingOffset()).isTrue();
         }
 
         @Test
@@ -92,6 +104,37 @@ class RabbitMQPartitionReaderTest {
             assertThat(qm.offset()).isEqualTo(42);
             assertThat(qm.chunkTimestampMillis()).isEqualTo(1700000000000L);
             assertThat(qm.message().getBodyAsBinary()).isEqualTo("hello".getBytes());
+        }
+
+        @Test
+        void resolveOffsetSpecUsesExplicitOffsetForCheckpointedBatch() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("startingOffsets", "earliest");
+
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 42, 100, new ConnectorOptions(opts), false);
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
+
+            OffsetSpecification spec = resolveOffsetSpec(reader);
+            assertThat(spec).isEqualTo(OffsetSpecification.offset(42));
+        }
+
+        @Test
+        void resolveOffsetSpecUsesTimestampForInitialTimestampBatch() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("startingOffsets", "timestamp");
+            opts.put("startingTimestamp", "1700000000000");
+
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 0, 100, new ConnectorOptions(opts), true);
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
+
+            OffsetSpecification spec = resolveOffsetSpec(reader);
+            assertThat(spec).isEqualTo(OffsetSpecification.timestamp(1700000000000L));
         }
     }
 
@@ -171,5 +214,12 @@ class RabbitMQPartitionReaderTest {
         opts.put("endpoints", "localhost:5552");
         opts.put("stream", "test-stream");
         return new ConnectorOptions(opts);
+    }
+
+    private static OffsetSpecification resolveOffsetSpec(RabbitMQPartitionReader reader)
+            throws Exception {
+        Method method = RabbitMQPartitionReader.class.getDeclaredMethod("resolveOffsetSpec");
+        method.setAccessible(true);
+        return (OffsetSpecification) method.invoke(reader);
     }
 }
