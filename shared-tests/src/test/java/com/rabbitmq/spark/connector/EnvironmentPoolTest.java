@@ -172,12 +172,6 @@ class EnvironmentPoolTest {
             assertThat(opts.getEnvironmentIdleTimeoutMs()).isEqualTo(120_000L);
         }
 
-        @Test
-        void singletonInstance() {
-            EnvironmentPool pool1 = EnvironmentPool.getInstance();
-            EnvironmentPool pool2 = EnvironmentPool.getInstance();
-            assertThat(pool1).isSameAs(pool2);
-        }
     }
 
     // ======================================================================

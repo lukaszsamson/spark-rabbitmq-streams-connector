@@ -14,6 +14,19 @@ Unit tests live in `core`, `spark40`, and `spark41` modules. They use mocks and 
 mvn verify -pl core,spark40,spark41 -am
 ```
 
+## Mutation Testing (PIT)
+
+Mutation testing is configured in the `spark40-tests` and `spark41-tests` modules
+to exercise the shared unit test suite against each Spark version.
+
+```bash
+mvn -pl spark40-tests -am org.pitest:pitest-maven:mutationCoverage
+```
+
+```bash
+mvn -pl spark41-tests -am org.pitest:pitest-maven:mutationCoverage
+```
+
 ## Integration Tests
 
 Integration tests live in the `it-tests` module. They use [Testcontainers](https://java.testcontainers.org/) to run RabbitMQ in Docker with the stream plugin enabled.

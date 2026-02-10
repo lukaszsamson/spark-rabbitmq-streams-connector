@@ -53,33 +53,65 @@ class RabbitMQMicroBatchStreamTest {
         }
 
         @Test
-        void microBatchStreamImplementsAdmissionControl() {
+        void microBatchStreamSupportsAdmissionControlAndLimitsRespectRequested() throws Exception {
             ConnectorOptions opts = minimalOptions();
             var schema = RabbitMQStreamTable.buildSourceSchema(opts.getMetadataFields());
             var scan = new RabbitMQScan(opts, schema);
 
             MicroBatchStream stream = scan.toMicroBatchStream("/tmp/checkpoint");
             assertThat(stream).isInstanceOf(SupportsAdmissionControl.class);
+
+            setPrivateField(stream, "availableNowSnapshot", Map.of("s1", 10L));
+            setPrivateField(stream, "cachedTailOffset", new RabbitMQStreamOffset(Map.of("s1", 10L)));
+            var last = new RabbitMQStreamOffset(Map.of("s1", 0L));
+            Offset limited = ((SupportsAdmissionControl) stream)
+                    .latestOffset(last, ReadLimit.maxRows(3));
+
+            assertThat(((RabbitMQStreamOffset) limited).getStreamOffsets())
+                    .containsEntry("s1", 3L);
         }
 
         @Test
-        void microBatchStreamImplementsTriggerAvailableNow() {
+        void microBatchStreamSupportsTriggerAvailableNowAndSnapshotsTail() throws Exception {
             ConnectorOptions opts = minimalOptions();
             var schema = RabbitMQStreamTable.buildSourceSchema(opts.getMetadataFields());
             var scan = new RabbitMQScan(opts, schema);
 
             MicroBatchStream stream = scan.toMicroBatchStream("/tmp/checkpoint");
             assertThat(stream).isInstanceOf(SupportsTriggerAvailableNow.class);
+
+            setPrivateField(stream, "cachedTailOffset", new RabbitMQStreamOffset(Map.of("s1", 5L)));
+            setPrivateField(stream, "environment", new CountingEnvironment());
+            ((SupportsTriggerAvailableNow) stream).prepareForTriggerAvailableNow();
+
+            setPrivateField(stream, "cachedTailOffset", new RabbitMQStreamOffset(Map.of("s1", 9L)));
+            setPrivateField(stream, "availableNowSnapshot", Map.of("s1", 5L));
+            Offset bounded = ((SupportsAdmissionControl) stream)
+                    .latestOffset(new RabbitMQStreamOffset(Map.of("s1", 0L)),
+                            ReadLimit.allAvailable());
+
+            assertThat(((RabbitMQStreamOffset) bounded).getStreamOffsets())
+                    .containsEntry("s1", 5L);
         }
 
         @Test
-        void microBatchStreamImplementsReportsSourceMetrics() {
+        void microBatchStreamSupportsReportsSourceMetricsAndNamesPresent() {
             ConnectorOptions opts = minimalOptions();
             var schema = RabbitMQStreamTable.buildSourceSchema(opts.getMetadataFields());
             var scan = new RabbitMQScan(opts, schema);
 
             MicroBatchStream stream = scan.toMicroBatchStream("/tmp/checkpoint");
             assertThat(stream).isInstanceOf(ReportsSourceMetrics.class);
+
+            CustomMetric[] metrics = scan.supportedCustomMetrics();
+            assertThat(metrics).hasSize(3);
+            Set<String> names = new HashSet<>();
+            for (CustomMetric m : metrics) {
+                names.add(m.name());
+                assertThat(m).isInstanceOf(CustomSumMetric.class);
+            }
+            assertThat(names).containsExactlyInAnyOrder(
+                    "recordsRead", "bytesRead", "readLatencyMs");
         }
 
         @Test

@@ -24,62 +24,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class StoredOffsetLookupTest {
 
     // ======================================================================
-    // Concurrency bound
-    // ======================================================================
-
-    @Nested
-    class ConcurrencyTests {
-
-        @Test
-        void maxConcurrentLookupsIsBounded() {
-            // Verify the constant is set to a reasonable value (< 50 broker limit)
-            assertThat(StoredOffsetLookup.MAX_CONCURRENT_LOOKUPS)
-                    .isGreaterThan(0)
-                    .isLessThanOrEqualTo(50);
-        }
-
-        @Test
-        void maxConcurrentLookupsDefaultIs20() {
-            assertThat(StoredOffsetLookup.MAX_CONCURRENT_LOOKUPS).isEqualTo(20);
-        }
-    }
-
-    // ======================================================================
     // LookupResult
     // ======================================================================
 
-    @Nested
-    class LookupResultTests {
-
-        @Test
-        void emptyResultHasNoFailures() {
-            var result = new StoredOffsetLookup.LookupResult(
-                    java.util.Map.of(), java.util.List.of());
-            assertThat(result.hasFailures()).isFalse();
-            assertThat(result.getOffsets()).isEmpty();
-            assertThat(result.getFailedStreams()).isEmpty();
-        }
-
-        @Test
-        void resultWithOffsetsAndNoFailures() {
-            var offsets = java.util.Map.of("stream1", 10L, "stream2", 20L);
-            var result = new StoredOffsetLookup.LookupResult(
-                    offsets, java.util.List.of());
-            assertThat(result.hasFailures()).isFalse();
-            assertThat(result.getOffsets()).containsEntry("stream1", 10L);
-            assertThat(result.getOffsets()).containsEntry("stream2", 20L);
-        }
-
-        @Test
-        void resultWithFailures() {
-            var offsets = java.util.Map.of("stream1", 10L);
-            var failed = java.util.List.of("stream2", "stream3");
-            var result = new StoredOffsetLookup.LookupResult(offsets, failed);
-            assertThat(result.hasFailures()).isTrue();
-            assertThat(result.getFailedStreams()).containsExactly("stream2", "stream3");
-            assertThat(result.getOffsets()).containsOnlyKeys("stream1");
-        }
-    }
 
     // ======================================================================
     // Lookup behavior

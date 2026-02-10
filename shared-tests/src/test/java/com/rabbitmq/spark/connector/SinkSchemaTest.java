@@ -46,14 +46,12 @@ class SinkSchemaTest {
         StructType schema = new StructType(new StructField[]{
                 new StructField("value", DataTypes.BinaryType, false, Metadata.empty()),
         });
-        assertThatCode(() -> SinkSchema.validate(schema, false))
-                .doesNotThrowAnyException();
+        assertThatNoException().isThrownBy(() -> SinkSchema.validate(schema, false));
     }
 
     @Test
     void acceptsFullSinkSchema() {
-        assertThatCode(() -> SinkSchema.validate(SinkSchema.fullSchema(), false))
-                .doesNotThrowAnyException();
+        assertThatNoException().isThrownBy(() -> SinkSchema.validate(SinkSchema.fullSchema(), false));
     }
 
     @Test
@@ -62,8 +60,7 @@ class SinkSchemaTest {
                 new StructField("value", DataTypes.BinaryType, false, Metadata.empty()),
                 new StructField("routing_key", DataTypes.StringType, true, Metadata.empty()),
         });
-        assertThatCode(() -> SinkSchema.validate(schema, false))
-                .doesNotThrowAnyException();
+        assertThatNoException().isThrownBy(() -> SinkSchema.validate(schema, false));
     }
 
     // ---- validate: missing value ----
@@ -113,8 +110,7 @@ class SinkSchemaTest {
                 new StructField("value", DataTypes.BinaryType, false, Metadata.empty()),
                 new StructField("extra_col", DataTypes.StringType, true, Metadata.empty()),
         });
-        assertThatCode(() -> SinkSchema.validate(schema, true))
-                .doesNotThrowAnyException();
+        assertThatNoException().isThrownBy(() -> SinkSchema.validate(schema, true));
     }
 
     // ---- validate: type mismatches ----
@@ -162,8 +158,7 @@ class SinkSchemaTest {
                 new StructField("properties", RabbitMQStreamTable.PROPERTIES_STRUCT,
                         true, Metadata.empty()),
         });
-        assertThatCode(() -> SinkSchema.validate(schema, false))
-                .doesNotThrowAnyException();
+        assertThatNoException().isThrownBy(() -> SinkSchema.validate(schema, false));
     }
 
     @Test
@@ -177,8 +172,7 @@ class SinkSchemaTest {
                 new StructField("value", DataTypes.BinaryType, false, Metadata.empty()),
                 new StructField("properties", subsetStruct, true, Metadata.empty()),
         });
-        assertThatCode(() -> SinkSchema.validate(schema, false))
-                .doesNotThrowAnyException();
+        assertThatNoException().isThrownBy(() -> SinkSchema.validate(schema, false));
     }
 
     @Test

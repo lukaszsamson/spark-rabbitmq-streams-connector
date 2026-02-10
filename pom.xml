@@ -47,6 +47,8 @@
         <maven-surefire-plugin.version>3.5.2</maven-surefire-plugin.version>
         <maven-failsafe-plugin.version>3.5.2</maven-failsafe-plugin.version>
         <maven-jar-plugin.version>3.4.2</maven-jar-plugin.version>
+        <pitest.version>1.16.1</pitest.version>
+        <pitest.junit5.version>1.2.1</pitest.junit5.version>
 
         <!-- Shading relocation prefix -->
         <shading.prefix>com.rabbitmq.spark.shaded</shading.prefix>

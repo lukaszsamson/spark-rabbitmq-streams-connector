@@ -229,6 +229,7 @@ class RowToMessageConverterTest {
 
             Message msg = converter.convert(row, CODEC.messageBuilder());
             assertThat(msg.getProperties()).isNull();
+            assertThat(msg.getBodyAsBinary()).isEqualTo("body".getBytes());
         }
     }
 
@@ -291,6 +292,8 @@ class RowToMessageConverterTest {
             // Message should have body but no properties
             assertThat(msg.getBodyAsBinary()).isEqualTo("body".getBytes());
             assertThat(msg.getProperties()).isNull();
+            assertThat(msg.getApplicationProperties()).isNull();
+            assertThat(msg.getMessageAnnotations()).isNull();
         }
 
         @Test

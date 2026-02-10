@@ -340,8 +340,7 @@ class RabbitMQWriteTest {
             // createWriter returns a DataWriter; it won't connect until write() is called
             var writer = factory.createWriter(0, 1);
             assertThat(writer).isInstanceOf(RabbitMQDataWriter.class);
-            // Clean up
-            assertThatCode(writer::close).doesNotThrowAnyException();
+            assertThat(writer.currentMetricsValues()).hasSize(2);
         }
 
         @Test
@@ -350,7 +349,7 @@ class RabbitMQWriteTest {
                     minimalSinkOptions(), minimalSinkSchema());
             var writer = factory.createWriter(0, 1, 0L);
             assertThat(writer).isInstanceOf(RabbitMQDataWriter.class);
-            assertThatCode(writer::close).doesNotThrowAnyException();
+            assertThat(writer.currentMetricsValues()).hasSize(2);
         }
     }
 
@@ -397,19 +396,27 @@ class RabbitMQWriteTest {
     class DataWriterLifecycleTests {
 
         @Test
-        void closeIsIdempotentWithoutInit() {
+        void closeIsIdempotentWithoutInit() throws Exception {
             RabbitMQDataWriter writer = new RabbitMQDataWriter(
                     minimalSinkOptions(), minimalSinkSchema(), 0, 1, -1);
             // close() without any write() should not throw
-            assertThatCode(writer::close).doesNotThrowAnyException();
-            assertThatCode(writer::close).doesNotThrowAnyException();
+            writer.close();
+            writer.close();
+
+            assertThat(getPrivateField(writer, "producer")).isNull();
+            assertThat(getPrivateField(writer, "environment")).isNull();
+            assertThat(getPrivateField(writer, "pooledEnvironment")).isEqualTo(false);
         }
 
         @Test
-        void abortWithoutInitDoesNotThrow() {
+        void abortWithoutInitDoesNotThrow() throws Exception {
             RabbitMQDataWriter writer = new RabbitMQDataWriter(
                     minimalSinkOptions(), minimalSinkSchema(), 0, 1, -1);
-            assertThatCode(writer::abort).doesNotThrowAnyException();
+            writer.abort();
+
+            assertThat(getPrivateField(writer, "producer")).isNull();
+            assertThat(getPrivateField(writer, "environment")).isNull();
+            assertThat(getPrivateField(writer, "pooledEnvironment")).isEqualTo(false);
         }
 
         @Test
@@ -491,10 +498,12 @@ class RabbitMQWriteTest {
             RabbitMQDataWriter writer = new RabbitMQDataWriter(
                     options, minimalSinkSchema(), 0, 1, -1);
             setPrivateField(writer, "producer", new NoopProducer());
+            setPrivateField(writer, "nextPublishingId", -1L);
 
             InternalRow row = new GenericInternalRow(new Object[]{"body".getBytes()});
 
-            assertThatCode(() -> writer.write(row)).doesNotThrowAnyException();
+            writer.write(row);
+            assertThat(TestRoutingStrategy.invoked).isFalse();
         }
 
         @Test
@@ -572,7 +581,7 @@ class RabbitMQWriteTest {
             CloseTrackingEnvironment env = new CloseTrackingEnvironment();
             setPrivateField(writer, "environment", env);
 
-            assertThatCode(writer::abort).doesNotThrowAnyException();
+            writer.abort();
             assertThat(env.closed).isTrue();
         }
 
@@ -671,8 +680,27 @@ class RabbitMQWriteTest {
 
             Write write = wb.build();
             assertThat(write).isInstanceOf(RabbitMQWrite.class);
+            assertThat(write.description()).contains("stream=test-stream");
             assertThat(write.toBatch()).isInstanceOf(RabbitMQBatchWrite.class);
             assertThat(write.toStreaming()).isInstanceOf(RabbitMQStreamingWrite.class);
+        }
+
+        @Test
+        void newWriteBuilderRejectsInvalidSchema() {
+            Map<String, String> map = minimalSinkMap();
+            ConnectorOptions opts = new ConnectorOptions(map);
+            opts.validateCommon();
+            RabbitMQStreamTable table = new RabbitMQStreamTable(opts);
+
+            StructType badSchema = new StructType(new StructField[]{
+                    new StructField("value", DataTypes.StringType, false, Metadata.empty()),
+            });
+
+            assertThatThrownBy(() -> table.newWriteBuilder(
+                    new TestLogicalWriteInfo(badSchema, "test-q")))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("value")
+                    .hasMessageContaining("binary");
         }
     }
 
