@@ -11,6 +11,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.*;
+import java.util.concurrent.*;
 
 /**
  * Core micro-batch streaming source for RabbitMQ Streams.
@@ -29,6 +30,9 @@ final class RabbitMQMicroBatchStream
                    SupportsTriggerAvailableNow, ReportsSourceMetrics {
 
     private static final Logger LOG = LoggerFactory.getLogger(RabbitMQMicroBatchStream.class);
+
+    /** Timeout for broker offset commit (best-effort, Spark checkpoint is source of truth). */
+    private static final int COMMIT_TIMEOUT_SECONDS = 30;
 
     private final ConnectorOptions options;
     private final StructType schema;
@@ -77,9 +81,13 @@ final class RabbitMQMicroBatchStream
                 Map<String, Long> stored = result.getOffsets();
 
                 if (result.hasFailures()) {
-                    // Non-fatal failures on some streams
-                    LOG.warn("Stored offset lookup had non-fatal failures on streams: {}",
-                            result.getFailedStreams());
+                    // consumerName is explicitly configured → fail fast on non-fatal
+                    // lookup failures (e.g. tracking-consumer limits)
+                    throw new IllegalStateException(
+                            "Stored offset lookup failed for consumer '" + consumerName +
+                                    "' on streams: " + result.getFailedStreams() +
+                                    ". Since consumerName is explicitly configured, " +
+                                    "non-fatal lookup failures are treated as fatal.");
                 }
 
                 if (!stored.isEmpty()) {
@@ -98,9 +106,10 @@ final class RabbitMQMicroBatchStream
                 // Fatal error (auth, connection, stream does not exist) — fail fast
                 throw e;
             } catch (Exception e) {
-                LOG.warn("Failed to look up stored offsets for consumer '{}': {}. " +
-                                "Falling back to startingOffsets.",
-                        consumerName, e.getMessage());
+                // consumerName is explicitly configured → fail fast on any error
+                throw new IllegalStateException(
+                        "Failed to look up stored offsets for consumer '" +
+                                consumerName + "'", e);
             }
         }
 
@@ -133,23 +142,66 @@ final class RabbitMQMicroBatchStream
             return;
         }
 
-        Environment env = getEnvironment();
+        // Collect entries that need storing
+        List<Map.Entry<String, Long>> toStore = new ArrayList<>();
         for (Map.Entry<String, Long> entry : endOffset.getStreamOffsets().entrySet()) {
-            String stream = entry.getKey();
-            long nextOffset = entry.getValue();
-            if (nextOffset <= 0) {
-                continue;
+            if (entry.getValue() > 0) {
+                toStore.add(entry);
             }
-            long lastProcessed = nextOffset - 1;
-            try {
-                env.storeOffset(consumerName, stream, lastProcessed);
-                LOG.debug("Stored offset {} for consumer '{}' on stream '{}'",
-                        lastProcessed, consumerName, stream);
-            } catch (Exception e) {
-                // Best-effort: Spark checkpoint is the source of truth
-                LOG.warn("Failed to store offset {} for consumer '{}' on stream '{}': {}",
-                        lastProcessed, consumerName, stream, e.getMessage());
+        }
+        if (toStore.isEmpty()) {
+            return;
+        }
+
+        // Dispatch storeOffset calls concurrently to avoid commit latency
+        // amplification (each storeOffset may block up to ~10s for verification)
+        Environment env = getEnvironment();
+        int poolSize = Math.min(toStore.size(), StoredOffsetLookup.MAX_CONCURRENT_LOOKUPS);
+        ExecutorService executor = Executors.newFixedThreadPool(poolSize);
+        try {
+            List<Future<?>> futures = new ArrayList<>();
+            for (Map.Entry<String, Long> entry : toStore) {
+                String stream = entry.getKey();
+                long lastProcessed = entry.getValue() - 1;
+                futures.add(executor.submit(() -> {
+                    try {
+                        env.storeOffset(consumerName, stream, lastProcessed);
+                        LOG.debug("Stored offset {} for consumer '{}' on stream '{}'",
+                                lastProcessed, consumerName, stream);
+                    } catch (Exception e) {
+                        LOG.warn("Failed to store offset {} for consumer '{}' on stream '{}': {}",
+                                lastProcessed, consumerName, stream, e.getMessage());
+                    }
+                }));
             }
+
+            // Wait with deadline — best-effort, Spark checkpoint is the source of truth
+            long deadline = System.nanoTime() +
+                    TimeUnit.SECONDS.toNanos(COMMIT_TIMEOUT_SECONDS);
+            for (Future<?> f : futures) {
+                long remaining = deadline - System.nanoTime();
+                if (remaining <= 0) {
+                    LOG.warn("Broker offset commit timed out after {}s " +
+                                    "(best-effort, Spark checkpoint is source of truth)",
+                            COMMIT_TIMEOUT_SECONDS);
+                    break;
+                }
+                try {
+                    f.get(remaining, TimeUnit.NANOSECONDS);
+                } catch (TimeoutException e) {
+                    LOG.warn("Broker offset commit timed out after {}s " +
+                                    "(best-effort, Spark checkpoint is source of truth)",
+                            COMMIT_TIMEOUT_SECONDS);
+                    break;
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                } catch (ExecutionException e) {
+                    // Already logged inside the task
+                }
+            }
+        } finally {
+            executor.shutdownNow();
         }
     }
 
@@ -371,6 +423,12 @@ final class RabbitMQMicroBatchStream
     public Offset latestOffset(Offset startOffset, ReadLimit limit) {
         Map<String, Long> tailOffsets = queryTailOffsets();
 
+        // Guard: if tailOffsets is empty, no streams could be queried
+        if (tailOffsets.isEmpty()) {
+            LOG.debug("Tail offsets query returned empty map");
+            return startOffset != null ? startOffset : new RabbitMQStreamOffset(Map.of());
+        }
+
         // Enforce Trigger.AvailableNow snapshot ceiling
         if (availableNowSnapshot != null) {
             tailOffsets = ReadLimitBudget.mostRestrictive(tailOffsets, availableNowSnapshot);
@@ -384,6 +442,17 @@ final class RabbitMQMicroBatchStream
 
         RabbitMQStreamOffset start = (RabbitMQStreamOffset) startOffset;
         Map<String, Long> startMap = start.getStreamOffsets();
+
+        // Ensure tail offsets never go backwards due to failed per-stream queries
+        // (queryStreamTailOffset returns 0 on failure which may be less than start)
+        Map<String, Long> safeTail = new LinkedHashMap<>(tailOffsets);
+        for (Map.Entry<String, Long> entry : safeTail.entrySet()) {
+            long startOff = startMap.getOrDefault(entry.getKey(), 0L);
+            if (entry.getValue() < startOff) {
+                entry.setValue(startOff);
+            }
+        }
+        tailOffsets = safeTail;
 
         // Check if any stream has new data
         boolean hasNewData = false;

@@ -10,7 +10,10 @@ import org.slf4j.LoggerFactory;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.Semaphore;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 /**
  * Looks up stored consumer offsets from the RabbitMQ broker.
@@ -83,28 +86,55 @@ final class StoredOffsetLookup {
                                            List<String> streams) {
         Map<String, Long> offsets = new LinkedHashMap<>();
         List<String> failed = new java.util.ArrayList<>();
-        Semaphore semaphore = new Semaphore(MAX_CONCURRENT_LOOKUPS);
 
-        for (String stream : streams) {
-            try {
-                semaphore.acquire();
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throw new IllegalStateException(
-                        "Interrupted during stored offset lookup", e);
+        if (streams.isEmpty()) {
+            return new LookupResult(offsets, failed);
+        }
+
+        // Bounded thread pool for concurrent lookups — avoids exceeding
+        // the broker's tracking consumer limit (~50 per connection)
+        int poolSize = Math.min(streams.size(), MAX_CONCURRENT_LOOKUPS);
+        ExecutorService executor = Executors.newFixedThreadPool(poolSize);
+        try {
+            // Submit all lookups concurrently
+            Map<String, Future<Long>> futures = new LinkedHashMap<>();
+            for (String stream : streams) {
+                futures.put(stream, executor.submit(
+                        () -> lookupStream(env, consumerName, stream)));
             }
-            try {
-                Long nextOffset = lookupStream(env, consumerName, stream);
-                if (nextOffset != null) {
-                    offsets.put(stream, nextOffset);
+
+            // Collect results, preserving insertion order
+            for (Map.Entry<String, Future<Long>> entry : futures.entrySet()) {
+                String stream = entry.getKey();
+                try {
+                    Long nextOffset = entry.getValue().get();
+                    if (nextOffset != null) {
+                        offsets.put(stream, nextOffset);
+                    }
+                } catch (ExecutionException e) {
+                    Throwable cause = e.getCause();
+                    if (cause instanceof IllegalStateException) {
+                        // Fatal error — propagate immediately
+                        throw (IllegalStateException) cause;
+                    }
+                    if (cause instanceof NonFatalLookupException) {
+                        LOG.warn("Non-fatal lookup failure for consumer '{}' on stream '{}': {}",
+                                consumerName, stream, cause.getMessage());
+                        failed.add(stream);
+                    } else {
+                        LOG.warn("Unexpected lookup failure for consumer '{}' on stream '{}': {}",
+                                consumerName, stream,
+                                cause != null ? cause.getMessage() : e.getMessage());
+                        failed.add(stream);
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(
+                            "Interrupted during stored offset lookup", e);
                 }
-            } catch (NonFatalLookupException e) {
-                LOG.warn("Non-fatal lookup failure for consumer '{}' on stream '{}': {}",
-                        consumerName, stream, e.getMessage());
-                failed.add(stream);
-            } finally {
-                semaphore.release();
             }
+        } finally {
+            executor.shutdownNow();
         }
         return new LookupResult(offsets, failed);
     }
