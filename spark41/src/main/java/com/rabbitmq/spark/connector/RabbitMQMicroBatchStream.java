@@ -50,6 +50,8 @@ final class RabbitMQMicroBatchStream
 
     /** Cached latest offset for reportLatestOffset(). */
     private volatile RabbitMQStreamOffset cachedLatestOffset;
+    /** Cached true tail offset (before ReadLimit application). */
+    private volatile RabbitMQStreamOffset cachedTailOffset;
 
     /**
      * Snapshot of tail offsets captured by {@link #prepareForTriggerAvailableNow()}.
@@ -463,6 +465,7 @@ final class RabbitMQMicroBatchStream
 
         if (startOffset == null) {
             RabbitMQStreamOffset latest = new RabbitMQStreamOffset(tailOffsets);
+            cachedTailOffset = latest;
             cachedLatestOffset = latest;
             return latest;
         }
@@ -480,6 +483,7 @@ final class RabbitMQMicroBatchStream
             }
         }
         tailOffsets = safeTail;
+        cachedTailOffset = new RabbitMQStreamOffset(tailOffsets);
 
         // Check if any stream has new data
         boolean hasNewData = false;
@@ -505,7 +509,7 @@ final class RabbitMQMicroBatchStream
 
     @Override
     public Offset reportLatestOffset() {
-        return cachedLatestOffset;
+        return cachedTailOffset != null ? cachedTailOffset : cachedLatestOffset;
     }
 
     // ---- SupportsTriggerAvailableNow ----
@@ -522,7 +526,7 @@ final class RabbitMQMicroBatchStream
     @Override
     public Map<String, String> metrics(Optional<Offset> latestConsumedOffset) {
         Map<String, String> metrics = new LinkedHashMap<>();
-        RabbitMQStreamOffset tail = cachedLatestOffset;
+        RabbitMQStreamOffset tail = cachedTailOffset != null ? cachedTailOffset : cachedLatestOffset;
 
         if (tail == null || latestConsumedOffset.isEmpty()) {
             metrics.put("minOffsetsBehindLatest", "0");

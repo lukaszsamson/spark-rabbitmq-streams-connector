@@ -132,7 +132,7 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
 
         // Track metrics
         recordsWritten++;
-        byte[] body = record.getBinary(0); // value is always index 0 in sink schema
+        byte[] body = converter.getValue(record);
         if (body != null) {
             bytesWritten += body.length;
         }

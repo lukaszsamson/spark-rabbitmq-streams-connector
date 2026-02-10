@@ -206,5 +206,18 @@ class ReadLimitBudgetTest {
             assertThat(result.get("s1") + result.get("s2")).isLessThanOrEqualTo(10L);
             assertThat(result.get("s1")).isGreaterThan(result.get("s2"));
         }
+
+        @Test
+        void neverExceedsBudgetWhenBudgetBelowNonEmptyStreams() {
+            Map<String, Long> pending = new LinkedHashMap<>();
+            pending.put("s1", 100L);
+            pending.put("s2", 100L);
+            pending.put("s3", 100L);
+
+            Map<String, Long> result = ReadLimitBudget.allocateProportionally(pending, 2);
+            long total = result.values().stream().mapToLong(Long::longValue).sum();
+            assertThat(total).isEqualTo(2L);
+            assertThat(result.values().stream().filter(v -> v == 1L).count()).isEqualTo(2L);
+        }
     }
 }

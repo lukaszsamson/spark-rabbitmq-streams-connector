@@ -159,6 +159,13 @@ public final class RowToMessageConverter implements Serializable {
         return utf8 != null ? utf8.toString() : null;
     }
 
+    /**
+     * Extract the message body value from the row.
+     */
+    public byte[] getValue(InternalRow row) {
+        return row.getBinary(valueIndex);
+    }
+
     // ---- Properties struct → PropertiesBuilder ----
 
     /**

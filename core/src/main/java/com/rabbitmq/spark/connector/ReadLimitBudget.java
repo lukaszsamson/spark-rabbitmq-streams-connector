@@ -133,6 +133,19 @@ public final class ReadLimitBudget {
             return allocation;
         }
 
+        long nonEmptyCount = pending.values().stream().filter(p -> p > 0).count();
+        if (budget <= nonEmptyCount) {
+            for (String stream : pending.keySet()) {
+                allocation.put(stream, 0L);
+            }
+            pending.entrySet().stream()
+                    .filter(e -> e.getValue() > 0)
+                    .sorted(Map.Entry.<String, Long>comparingByValue().reversed())
+                    .limit(budget)
+                    .forEach(e -> allocation.put(e.getKey(), 1L));
+            return allocation;
+        }
+
         for (Map.Entry<String, Long> entry : pending.entrySet()) {
             String stream = entry.getKey();
             long p = entry.getValue();

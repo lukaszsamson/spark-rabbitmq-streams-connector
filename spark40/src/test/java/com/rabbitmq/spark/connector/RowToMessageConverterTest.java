@@ -182,6 +182,21 @@ class RowToMessageConverterTest {
             var appProps = msg.getApplicationProperties();
             assertThat(appProps == null || !appProps.containsKey("routing_key")).isTrue();
         }
+
+        @Test
+        void extractsValueByNameWhenSchemaIsReordered() {
+            StructType schema = new StructType(new StructField[]{
+                    new StructField("stream", DataTypes.StringType, true, Metadata.empty()),
+                    new StructField("value", DataTypes.BinaryType, false, Metadata.empty()),
+            });
+            var converter = new RowToMessageConverter(schema);
+            InternalRow row = new GenericInternalRow(new Object[]{
+                    UTF8String.fromString("s1"),
+                    "body".getBytes()
+            });
+
+            assertThat(converter.getValue(row)).isEqualTo("body".getBytes());
+        }
     }
 
     // ========================================================================

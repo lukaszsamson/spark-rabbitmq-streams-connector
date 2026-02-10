@@ -329,6 +329,17 @@ class RabbitMQMicroBatchStreamTest {
             RabbitMQMicroBatchStream stream = createStream(minimalOptions());
             assertThat(stream.reportLatestOffset()).isNull();
         }
+
+        @Test
+        void reportLatestOffsetPrefersTailOverLimitedEndOffset() throws Exception {
+            RabbitMQMicroBatchStream stream = createStream(minimalOptions());
+            RabbitMQStreamOffset limited = new RabbitMQStreamOffset(Map.of("test-stream", 10L));
+            RabbitMQStreamOffset tail = new RabbitMQStreamOffset(Map.of("test-stream", 100L));
+            setPrivateField(stream, "cachedLatestOffset", limited);
+            setPrivateField(stream, "cachedTailOffset", tail);
+
+            assertThat(stream.reportLatestOffset()).isEqualTo(tail);
+        }
     }
 
     // ======================================================================
@@ -359,6 +370,22 @@ class RabbitMQMicroBatchStreamTest {
                     "minOffsetsBehindLatest",
                     "maxOffsetsBehindLatest",
                     "avgOffsetsBehindLatest");
+        }
+
+        @Test
+        void metricsUseTailOffsetsWhenAvailable() throws Exception {
+            RabbitMQMicroBatchStream stream = createStream(minimalOptions());
+            setPrivateField(stream, "cachedLatestOffset",
+                    new RabbitMQStreamOffset(Map.of("test-stream", 10L)));
+            setPrivateField(stream, "cachedTailOffset",
+                    new RabbitMQStreamOffset(Map.of("test-stream", 20L)));
+
+            Map<String, String> metrics = stream.metrics(Optional.of(
+                    new RabbitMQStreamOffset(Map.of("test-stream", 5L))));
+
+            assertThat(metrics).containsEntry("minOffsetsBehindLatest", "15");
+            assertThat(metrics).containsEntry("maxOffsetsBehindLatest", "15");
+            assertThat(metrics).containsEntry("avgOffsetsBehindLatest", "15.0");
         }
     }
 
