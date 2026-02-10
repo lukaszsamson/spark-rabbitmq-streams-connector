@@ -221,6 +221,18 @@ final class RabbitMQScan implements Scan {
         return Math.max(statsTail, probedTail);
     }
 
+    long[] resolveStreamOffsetRangeForTests(Environment env, String stream) {
+        return resolveStreamOffsetRange(env, stream);
+    }
+
+    long resolveStartOffsetForTests(Environment env, String stream, long firstAvailable, StreamStats stats) {
+        return resolveStartOffset(env, stream, firstAvailable, stats);
+    }
+
+    long resolveEndOffsetForTests(Environment env, String stream, StreamStats stats) {
+        return resolveEndOffset(env, stream, stats);
+    }
+
     static long resolveTailOffset(StreamStats stats) {
         try {
             Method committedOffset = stats.getClass().getMethod("committedOffset");

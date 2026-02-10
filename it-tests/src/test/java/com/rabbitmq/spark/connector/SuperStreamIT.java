@@ -509,7 +509,7 @@ class SuperStreamIT extends AbstractRabbitMQIT {
 
         assertThatThrownBy(() -> query.awaitTermination(120_000))
                 .satisfies(ex -> assertThat(ex.getMessage())
-                        .containsAnyOf("does not exist", "Failed to look up stored offset"));
+                        .containsAnyOf("does not exist", "no longer exists"));
     }
 
     @Test

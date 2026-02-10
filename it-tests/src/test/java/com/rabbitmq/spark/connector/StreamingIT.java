@@ -66,7 +66,7 @@ class StreamingIT extends AbstractRabbitMQIT {
                 .add("value", DataTypes.BinaryType)
                 .add("stream", DataTypes.StringType)
                 .add("offset", DataTypes.LongType)
-                .add("chunk_timestamp", DataTypes.LongType);
+                .add("chunk_timestamp", DataTypes.TimestampType);
 
         StreamingQuery query = spark.readStream()
                 .format("rabbitmq_streams")
@@ -126,7 +126,7 @@ class StreamingIT extends AbstractRabbitMQIT {
                 .add("value", DataTypes.BinaryType)
                 .add("stream", DataTypes.StringType)
                 .add("offset", DataTypes.LongType)
-                .add("chunk_timestamp", DataTypes.LongType);
+                .add("chunk_timestamp", DataTypes.TimestampType);
 
         Dataset<Row> result = spark.read().schema(outputSchema).parquet(outputDir.toString());
         assertThat(result.count()).isEqualTo(50);
@@ -211,7 +211,7 @@ class StreamingIT extends AbstractRabbitMQIT {
                 .add("value", DataTypes.BinaryType)
                 .add("stream", DataTypes.StringType)
                 .add("offset", DataTypes.LongType)
-                .add("chunk_timestamp", DataTypes.LongType);
+                .add("chunk_timestamp", DataTypes.TimestampType);
 
         long count1 = spark.read().schema(outputSchema).parquet(outputDir.toString()).count();
         assertThat(count1).isEqualTo(30);
@@ -276,7 +276,7 @@ class StreamingIT extends AbstractRabbitMQIT {
                 .add("value", DataTypes.BinaryType)
                 .add("stream", DataTypes.StringType)
                 .add("offset", DataTypes.LongType)
-                .add("chunk_timestamp", DataTypes.LongType);
+                .add("chunk_timestamp", DataTypes.TimestampType);
 
         long count = spark.read().schema(outputSchema).parquet(outputDir.toString()).count();
         assertThat(count).isEqualTo(50);
@@ -319,7 +319,7 @@ class StreamingIT extends AbstractRabbitMQIT {
                 .add("value", DataTypes.BinaryType)
                 .add("stream", DataTypes.StringType)
                 .add("offset", DataTypes.LongType)
-                .add("chunk_timestamp", DataTypes.LongType);
+                .add("chunk_timestamp", DataTypes.TimestampType);
 
         long count = spark.read().schema(outputSchema).parquet(outputDir.toString()).count();
         assertThat(count).isEqualTo(30);
@@ -361,7 +361,7 @@ class StreamingIT extends AbstractRabbitMQIT {
                 .add("value", DataTypes.BinaryType)
                 .add("stream", DataTypes.StringType)
                 .add("offset", DataTypes.LongType)
-                .add("chunk_timestamp", DataTypes.LongType);
+                .add("chunk_timestamp", DataTypes.TimestampType);
 
         assertThat(spark.read().schema(outputSchema)
                 .parquet(outputDir1.toString()).count()).isEqualTo(40);
@@ -434,7 +434,7 @@ class StreamingIT extends AbstractRabbitMQIT {
                 .add("value", DataTypes.BinaryType)
                 .add("stream", DataTypes.StringType)
                 .add("offset", DataTypes.LongType)
-                .add("chunk_timestamp", DataTypes.LongType);
+                .add("chunk_timestamp", DataTypes.TimestampType);
 
         long count = spark.read().schema(outputSchema).parquet(outputDir.toString()).count();
         assertThat(count).isEqualTo(60);
@@ -682,7 +682,7 @@ class StreamingIT extends AbstractRabbitMQIT {
                     .load();
 
             assertThatThrownBy(df::collectAsList)
-                    .isInstanceOf(Exception.class);
+                    .hasMessageContaining("before the first available offset");
         } finally {
             deleteStream(truncStream);
         }

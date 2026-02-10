@@ -164,7 +164,7 @@ class BatchReadIT extends AbstractRabbitMQIT {
     }
 
     @Test
-    void batchReadOffsetsAreMonotonic() {
+    void batchReadOffsetsAreUniqueAndGapFree() {
         publishMessages(stream, 100);
 
         Dataset<Row> df = spark.read()
@@ -177,16 +177,16 @@ class BatchReadIT extends AbstractRabbitMQIT {
                         "com.rabbitmq.spark.connector.TestAddressResolver")
                 .load();
 
-        List<Long> offsets = df.collectAsList().stream()
+        Set<Long> offsets = df.collectAsList().stream()
                 .map(row -> (Long) row.getAs("offset"))
-                .sorted()
-                .toList();
+                .collect(Collectors.toSet());
 
         assertThat(offsets).hasSize(100);
-        // Verify monotonic: offsets[i+1] > offsets[i]
-        for (int i = 1; i < offsets.size(); i++) {
-            assertThat(offsets.get(i)).isGreaterThan(offsets.get(i - 1));
-        }
+        long minOffset = offsets.stream().mapToLong(Long::longValue).min().orElse(-1);
+        long maxOffset = offsets.stream().mapToLong(Long::longValue).max().orElse(-1);
+        assertThat(minOffset).isEqualTo(0L);
+        assertThat(maxOffset).isEqualTo(99L);
+        assertThat(offsets).isEqualTo(LongStream.rangeClosed(0, 99).boxed().collect(Collectors.toSet()));
     }
 
     @Test
@@ -415,16 +415,17 @@ class BatchReadIT extends AbstractRabbitMQIT {
     // ---- IT-OFFSET-004: endingOffsets=latest fixed snapshot ----
 
     @Test
-    void batchReadEndingOffsetsLatestReflectsTailAtPlanTime() {
+    void batchReadEndingOffsetsLatestReflectsTailAtReadTime() {
         // Publish initial messages
         publishMessages(stream, 50, "initial-");
 
-        // First read: should get exactly 50
+        // First read with endingOffsets=latest should capture current tail (50)
         Dataset<Row> df1 = spark.read()
                 .format("rabbitmq_streams")
                 .option("endpoints", streamEndpoint())
                 .option("stream", stream)
                 .option("startingOffsets", "earliest")
+                .option("endingOffsets", "latest")
                 .option("metadataFields", "")
                 .option("addressResolverClass",
                         "com.rabbitmq.spark.connector.TestAddressResolver")
@@ -436,12 +437,13 @@ class BatchReadIT extends AbstractRabbitMQIT {
         // Publish more messages
         publishMessages(stream, 50, "additional-");
 
-        // Second read (new DataFrame) should see all 100
+        // Second read is a fresh DataFrame with endingOffsets=latest, so it should see all 100
         Dataset<Row> df2 = spark.read()
                 .format("rabbitmq_streams")
                 .option("endpoints", streamEndpoint())
                 .option("stream", stream)
                 .option("startingOffsets", "earliest")
+                .option("endingOffsets", "latest")
                 .option("metadataFields", "")
                 .option("addressResolverClass",
                         "com.rabbitmq.spark.connector.TestAddressResolver")
