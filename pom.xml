@@ -24,7 +24,7 @@
         <maven.compiler.release>17</maven.compiler.release>
 
         <!-- Dependency versions -->
-        <rabbitmq.stream.client.version>1.3.0</rabbitmq.stream.client.version>
+        <rabbitmq.stream.client.version>1.4.0</rabbitmq.stream.client.version>
         <spark40.version>4.0.2</spark40.version>
         <spark41.version>4.1.1</spark41.version>
         <scala.binary.version>2.13</scala.binary.version>

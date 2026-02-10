@@ -60,8 +60,7 @@ public class RabbitMQStreamTable implements Table, SupportsRead, SupportsWrite {
 
     @Override
     public ScanBuilder newScanBuilder(CaseInsensitiveStringMap sparkOptions) {
-        // TODO: Milestone 3 – implement ScanBuilder
-        throw new UnsupportedOperationException("Source reads not yet implemented");
+        return new RabbitMQScanBuilder(options, schema);
     }
 
     @Override
