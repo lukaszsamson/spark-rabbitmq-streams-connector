@@ -1,0 +1,364 @@
+package com.rabbitmq.spark.connector;
+
+import com.rabbitmq.stream.Message;
+import com.rabbitmq.stream.MessageBuilder;
+import com.rabbitmq.stream.codec.QpidProtonCodec;
+import org.apache.spark.sql.catalyst.InternalRow;
+import org.apache.spark.sql.catalyst.expressions.GenericInternalRow;
+import org.apache.spark.sql.catalyst.util.ArrayBasedMapData;
+import org.apache.spark.sql.catalyst.util.GenericArrayData;
+import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.Metadata;
+import org.apache.spark.sql.types.StructField;
+import org.apache.spark.sql.types.StructType;
+import org.apache.spark.unsafe.types.UTF8String;
+import org.junit.jupiter.api.Nested;
+import org.junit.jupiter.api.Test;
+
+import java.util.Map;
+
+import static org.assertj.core.api.Assertions.*;
+
+class RowToMessageConverterTest {
+
+    private static final QpidProtonCodec CODEC = new QpidProtonCodec();
+
+    // ---- Schema helpers ----
+
+    private static StructType valueOnlySchema() {
+        return new StructType(new StructField[]{
+                new StructField("value", DataTypes.BinaryType, false, Metadata.empty()),
+        });
+    }
+
+    private static StructType schemaWithStream() {
+        return new StructType(new StructField[]{
+                new StructField("value", DataTypes.BinaryType, false, Metadata.empty()),
+                new StructField("stream", DataTypes.StringType, true, Metadata.empty()),
+        });
+    }
+
+    private static StructType schemaWithRoutingKey() {
+        return new StructType(new StructField[]{
+                new StructField("value", DataTypes.BinaryType, false, Metadata.empty()),
+                new StructField("routing_key", DataTypes.StringType, true, Metadata.empty()),
+        });
+    }
+
+    private static StructType schemaWithCreationTime() {
+        return new StructType(new StructField[]{
+                new StructField("value", DataTypes.BinaryType, false, Metadata.empty()),
+                new StructField("creation_time", DataTypes.TimestampType, true, Metadata.empty()),
+        });
+    }
+
+    private static StructType schemaWithProperties() {
+        return new StructType(new StructField[]{
+                new StructField("value", DataTypes.BinaryType, false, Metadata.empty()),
+                new StructField("properties", RabbitMQStreamTable.PROPERTIES_STRUCT,
+                        true, Metadata.empty()),
+        });
+    }
+
+    private static StructType schemaWithAppProperties() {
+        return new StructType(new StructField[]{
+                new StructField("value", DataTypes.BinaryType, false, Metadata.empty()),
+                new StructField("application_properties",
+                        DataTypes.createMapType(DataTypes.StringType, DataTypes.StringType),
+                        true, Metadata.empty()),
+        });
+    }
+
+    private static StructType schemaWithMsgAnnotations() {
+        return new StructType(new StructField[]{
+                new StructField("value", DataTypes.BinaryType, false, Metadata.empty()),
+                new StructField("message_annotations",
+                        DataTypes.createMapType(DataTypes.StringType, DataTypes.StringType),
+                        true, Metadata.empty()),
+        });
+    }
+
+    // ========================================================================
+    // Basic value conversion
+    // ========================================================================
+
+    @Nested
+    class BasicConversion {
+
+        @Test
+        void convertsValueOnly() {
+            var converter = new RowToMessageConverter(valueOnlySchema());
+            InternalRow row = new GenericInternalRow(new Object[]{
+                    "hello".getBytes()
+            });
+
+            Message msg = converter.convert(row, CODEC.messageBuilder());
+            assertThat(msg.getBodyAsBinary()).isEqualTo("hello".getBytes());
+        }
+
+        @Test
+        void emptyBody() {
+            var converter = new RowToMessageConverter(valueOnlySchema());
+            InternalRow row = new GenericInternalRow(new Object[]{new byte[0]});
+
+            Message msg = converter.convert(row, CODEC.messageBuilder());
+            assertThat(msg.getBodyAsBinary()).isEqualTo(new byte[0]);
+        }
+    }
+
+    // ========================================================================
+    // Stream and routing key extraction
+    // ========================================================================
+
+    @Nested
+    class StreamAndRoutingKey {
+
+        @Test
+        void extractsStreamName() {
+            var converter = new RowToMessageConverter(schemaWithStream());
+            InternalRow row = new GenericInternalRow(new Object[]{
+                    "body".getBytes(),
+                    UTF8String.fromString("target-stream")
+            });
+
+            assertThat(converter.getStream(row)).isEqualTo("target-stream");
+        }
+
+        @Test
+        void streamNullWhenAbsent() {
+            var converter = new RowToMessageConverter(valueOnlySchema());
+            InternalRow row = new GenericInternalRow(new Object[]{"body".getBytes()});
+
+            assertThat(converter.getStream(row)).isNull();
+        }
+
+        @Test
+        void streamNullWhenNull() {
+            var converter = new RowToMessageConverter(schemaWithStream());
+            InternalRow row = new GenericInternalRow(new Object[]{"body".getBytes(), null});
+
+            assertThat(converter.getStream(row)).isNull();
+        }
+
+        @Test
+        void extractsRoutingKey() {
+            var converter = new RowToMessageConverter(schemaWithRoutingKey());
+            InternalRow row = new GenericInternalRow(new Object[]{
+                    "body".getBytes(),
+                    UTF8String.fromString("my-key")
+            });
+
+            assertThat(converter.getRoutingKey(row)).isEqualTo("my-key");
+        }
+
+        @Test
+        void routingKeyNullWhenAbsent() {
+            var converter = new RowToMessageConverter(valueOnlySchema());
+            InternalRow row = new GenericInternalRow(new Object[]{"body".getBytes()});
+
+            assertThat(converter.getRoutingKey(row)).isNull();
+        }
+    }
+
+    // ========================================================================
+    // Creation time
+    // ========================================================================
+
+    @Nested
+    class CreationTime {
+
+        @Test
+        void setsCreationTimeWithMicrosToMillisConversion() {
+            var converter = new RowToMessageConverter(schemaWithCreationTime());
+            long micros = 1700000000000L * 1000L; // micros
+            InternalRow row = new GenericInternalRow(new Object[]{
+                    "body".getBytes(), micros
+            });
+
+            Message msg = converter.convert(row, CODEC.messageBuilder());
+            assertThat(msg.getProperties().getCreationTime()).isEqualTo(1700000000000L);
+        }
+
+        @Test
+        void nullCreationTimeSkipsProperty() {
+            var converter = new RowToMessageConverter(schemaWithCreationTime());
+            InternalRow row = new GenericInternalRow(new Object[]{"body".getBytes(), null});
+
+            Message msg = converter.convert(row, CODEC.messageBuilder());
+            // Properties may be null or have creation_time=0 when not set
+            if (msg.getProperties() != null) {
+                assertThat(msg.getProperties().getCreationTime()).isEqualTo(0L);
+            }
+        }
+    }
+
+    // ========================================================================
+    // Properties struct
+    // ========================================================================
+
+    @Nested
+    class PropertiesConversion {
+
+        @Test
+        void convertsPropertiesStruct() {
+            var converter = new RowToMessageConverter(schemaWithProperties());
+            long expiryMicros = 1700000100000L * 1000L;
+            long creationMicros = 1700000000000L * 1000L;
+
+            InternalRow propsRow = new GenericInternalRow(new Object[]{
+                    UTF8String.fromString("msg-id"),    // message_id
+                    "uid".getBytes(),                    // user_id
+                    UTF8String.fromString("to-addr"),    // to
+                    UTF8String.fromString("subj"),       // subject
+                    UTF8String.fromString("reply-to"),   // reply_to
+                    UTF8String.fromString("corr-id"),    // correlation_id
+                    UTF8String.fromString("text/plain"), // content_type
+                    UTF8String.fromString("gzip"),       // content_encoding
+                    expiryMicros,                        // absolute_expiry_time
+                    creationMicros,                       // creation_time
+                    UTF8String.fromString("g1"),         // group_id
+                    7L,                                   // group_sequence
+                    UTF8String.fromString("rg1"),        // reply_to_group_id
+            });
+
+            InternalRow row = new GenericInternalRow(new Object[]{
+                    "body".getBytes(), propsRow
+            });
+
+            Message msg = converter.convert(row, CODEC.messageBuilder());
+            var p = msg.getProperties();
+            assertThat(p.getMessageIdAsString()).isEqualTo("msg-id");
+            assertThat(p.getUserId()).isEqualTo("uid".getBytes());
+            assertThat(p.getTo()).isEqualTo("to-addr");
+            assertThat(p.getSubject()).isEqualTo("subj");
+            assertThat(p.getReplyTo()).isEqualTo("reply-to");
+            assertThat(p.getCorrelationIdAsString()).isEqualTo("corr-id");
+            assertThat(p.getContentType()).isEqualTo("text/plain");
+            assertThat(p.getContentEncoding()).isEqualTo("gzip");
+            assertThat(p.getAbsoluteExpiryTime()).isEqualTo(1700000100000L);
+            assertThat(p.getCreationTime()).isEqualTo(1700000000000L);
+            assertThat(p.getGroupId()).isEqualTo("g1");
+            assertThat(p.getGroupSequence()).isEqualTo(7L);
+            assertThat(p.getReplyToGroupId()).isEqualTo("rg1");
+        }
+
+        @Test
+        void nullPropertiesSkipsAll() {
+            var converter = new RowToMessageConverter(schemaWithProperties());
+            InternalRow row = new GenericInternalRow(new Object[]{"body".getBytes(), null});
+
+            Message msg = converter.convert(row, CODEC.messageBuilder());
+            // Message should have body but no properties
+            assertThat(msg.getBodyAsBinary()).isEqualTo("body".getBytes());
+        }
+
+        @Test
+        void propertiesWithNullFields() {
+            var converter = new RowToMessageConverter(schemaWithProperties());
+            // All nulls except message_id
+            InternalRow propsRow = new GenericInternalRow(new Object[]{
+                    UTF8String.fromString("id-only"),
+                    null, null, null, null, null, null, null, null, null, null, null, null
+            });
+
+            InternalRow row = new GenericInternalRow(new Object[]{"body".getBytes(), propsRow});
+            Message msg = converter.convert(row, CODEC.messageBuilder());
+
+            assertThat(msg.getProperties().getMessageIdAsString()).isEqualTo("id-only");
+            assertThat(msg.getProperties().getTo()).isNull();
+            assertThat(msg.getProperties().getContentType()).isNull();
+        }
+    }
+
+    // ========================================================================
+    // Application properties and message annotations
+    // ========================================================================
+
+    @Nested
+    class MapConversion {
+
+        @Test
+        void convertsApplicationProperties() {
+            var converter = new RowToMessageConverter(schemaWithAppProperties());
+            var mapData = createStringMap("k1", "v1", "k2", "v2");
+            InternalRow row = new GenericInternalRow(new Object[]{
+                    "body".getBytes(), mapData
+            });
+
+            Message msg = converter.convert(row, CODEC.messageBuilder());
+            Map<String, Object> appProps = msg.getApplicationProperties();
+            assertThat(appProps).hasSize(2);
+            assertThat(appProps.get("k1")).isEqualTo("v1");
+            assertThat(appProps.get("k2")).isEqualTo("v2");
+        }
+
+        @Test
+        void convertsMessageAnnotations() {
+            var converter = new RowToMessageConverter(schemaWithMsgAnnotations());
+            var mapData = createStringMap("ann1", "val1");
+            InternalRow row = new GenericInternalRow(new Object[]{
+                    "body".getBytes(), mapData
+            });
+
+            Message msg = converter.convert(row, CODEC.messageBuilder());
+            Map<String, Object> annotations = msg.getMessageAnnotations();
+            assertThat(annotations).hasSize(1);
+            assertThat(annotations.get("ann1")).hasToString("val1");
+        }
+
+        @Test
+        void nullMapSkips() {
+            var converter = new RowToMessageConverter(schemaWithAppProperties());
+            InternalRow row = new GenericInternalRow(new Object[]{"body".getBytes(), null});
+
+            Message msg = converter.convert(row, CODEC.messageBuilder());
+            // null or empty application properties
+            var appProps = msg.getApplicationProperties();
+            assertThat(appProps == null || appProps.isEmpty()).isTrue();
+        }
+    }
+
+    // ========================================================================
+    // Round-trip: Row → Message → Row
+    // ========================================================================
+
+    @Nested
+    class RoundTrip {
+
+        @Test
+        void roundTripBasicMessage() {
+            // Create a row with a value and convert to message
+            var sinkConverter = new RowToMessageConverter(schemaWithCreationTime());
+            long micros = 1700000000000L * 1000L;
+            InternalRow sinkRow = new GenericInternalRow(new Object[]{
+                    "round-trip".getBytes(), micros
+            });
+            Message msg = sinkConverter.convert(sinkRow, CODEC.messageBuilder());
+
+            // Convert message back to row
+            var sourceConverter = new MessageToRowConverter(
+                    java.util.EnumSet.of(MetadataField.CREATION_TIME));
+            InternalRow sourceRow = sourceConverter.convert(msg, "s", 42L, 9999L);
+
+            assertThat(sourceRow.getBinary(0)).isEqualTo("round-trip".getBytes());
+            assertThat(sourceRow.getLong(2)).isEqualTo(42L);
+            // creation_time should survive the round trip
+            assertThat(sourceRow.getLong(4)).isEqualTo(micros);
+        }
+    }
+
+    // ---- Helpers ----
+
+    private static ArrayBasedMapData createStringMap(String... kvPairs) {
+        int size = kvPairs.length / 2;
+        UTF8String[] keys = new UTF8String[size];
+        UTF8String[] values = new UTF8String[size];
+        for (int i = 0; i < size; i++) {
+            keys[i] = UTF8String.fromString(kvPairs[i * 2]);
+            values[i] = UTF8String.fromString(kvPairs[i * 2 + 1]);
+        }
+        return new ArrayBasedMapData(
+                new GenericArrayData(keys),
+                new GenericArrayData(values));
+    }
+}
