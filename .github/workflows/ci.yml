@@ -23,17 +23,29 @@ jobs:
           distribution: temurin
           cache: maven
 
+      - name: Verify packaging (spec acceptance criterion)
+        run: mvn -q -DskipTests package
+
       - name: Build and run unit tests
         run: mvn -B verify -pl '!it-tests'
 
-      - name: Verify shaded jar contains relocated packages
+      - name: Verify spark40 shaded jar contains relocated packages
+        run: |
+          jar tf spark40/target/sparkling-rabbit-spark40-*.jar | grep -q 'com/rabbitmq/spark/shaded/com/rabbitmq/stream' \
+            && echo "spark40: RabbitMQ stream classes relocated" \
+            || (echo "ERROR: spark40 shaded RabbitMQ classes not found" && exit 1)
+          jar tf spark40/target/sparkling-rabbit-spark40-*.jar | grep -q 'com/rabbitmq/spark/shaded/io/netty' \
+            && echo "spark40: Netty classes relocated" \
+            || (echo "ERROR: spark40 shaded Netty classes not found" && exit 1)
+
+      - name: Verify spark41 shaded jar contains relocated packages
         run: |
           jar tf spark41/target/sparkling-rabbit-spark41-*.jar | grep -q 'com/rabbitmq/spark/shaded/com/rabbitmq/stream' \
-            && echo "Shading verified: RabbitMQ stream classes relocated" \
-            || (echo "ERROR: Shaded classes not found" && exit 1)
+            && echo "spark41: RabbitMQ stream classes relocated" \
+            || (echo "ERROR: spark41 shaded RabbitMQ classes not found" && exit 1)
           jar tf spark41/target/sparkling-rabbit-spark41-*.jar | grep -q 'com/rabbitmq/spark/shaded/io/netty' \
-            && echo "Shading verified: Netty classes relocated" \
-            || (echo "ERROR: Shaded Netty classes not found" && exit 1)
+            && echo "spark41: Netty classes relocated" \
+            || (echo "ERROR: spark41 shaded Netty classes not found" && exit 1)
 
   integration-tests:
     name: Integration Tests (Java ${{ matrix.java }})
