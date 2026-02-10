@@ -18,12 +18,14 @@ final class RabbitMQSourceMetrics {
 
     static final String RECORDS_READ = "recordsRead";
     static final String BYTES_READ = "bytesRead";
+    static final String READ_LATENCY_MS = "readLatencyMs";
 
     // ---- CustomMetric definitions (registered on Scan) ----
 
     static final CustomMetric[] SUPPORTED_METRICS = {
             new RecordsReadMetric(),
             new BytesReadMetric(),
+            new ReadLatencyMsMetric(),
     };
 
     static final class RecordsReadMetric extends CustomSumMetric {
@@ -47,6 +49,18 @@ final class RabbitMQSourceMetrics {
         @Override
         public String description() {
             return "Total bytes read from RabbitMQ streams";
+        }
+    }
+
+    static final class ReadLatencyMsMetric extends CustomSumMetric {
+        @Override
+        public String name() {
+            return READ_LATENCY_MS;
+        }
+
+        @Override
+        public String description() {
+            return "Total read latency in milliseconds (time spent waiting for messages)";
         }
     }
 

@@ -129,6 +129,14 @@ final class RabbitMQMicroBatchStream
 
     @Override
     public void commit(Offset end) {
+        // Update running average message size from completed batch readers
+        int updatedSize = MessageSizeTracker.drainAverage(estimatedMessageSize);
+        if (updatedSize != estimatedMessageSize) {
+            LOG.debug("Updated estimated message size: {} -> {} bytes",
+                    estimatedMessageSize, updatedSize);
+            estimatedMessageSize = updatedSize;
+        }
+
         RabbitMQStreamOffset endOffset = (RabbitMQStreamOffset) end;
 
         if (!options.isServerSideOffsetTracking(true)) {

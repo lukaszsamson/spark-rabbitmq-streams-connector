@@ -47,6 +47,7 @@ final class RabbitMQPartitionReader implements PartitionReader<InternalRow> {
     // Task-level metric counters
     private long recordsRead = 0;
     private long bytesRead = 0;
+    private long readLatencyMs = 0;
 
     /**
      * A message queued by the consumer callback for pull-based reading.
@@ -86,7 +87,9 @@ final class RabbitMQPartitionReader implements PartitionReader<InternalRow> {
 
             QueuedMessage qm;
             try {
+                long pollStart = System.nanoTime();
                 qm = queue.poll(pollTimeoutMs, TimeUnit.MILLISECONDS);
+                readLatencyMs += TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - pollStart);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 throw new IOException("Interrupted while reading from stream '" + stream + "'", e);
@@ -144,6 +147,8 @@ final class RabbitMQPartitionReader implements PartitionReader<InternalRow> {
     @Override
     public void close() throws IOException {
         finished = true;
+        // Report actual message sizes for running average estimation
+        MessageSizeTracker.record(bytesRead, recordsRead);
         try {
             if (consumer != null) {
                 consumer.close();
@@ -172,6 +177,7 @@ final class RabbitMQPartitionReader implements PartitionReader<InternalRow> {
         return new CustomTaskMetric[]{
                 RabbitMQSourceMetrics.taskMetric(RabbitMQSourceMetrics.RECORDS_READ, recordsRead),
                 RabbitMQSourceMetrics.taskMetric(RabbitMQSourceMetrics.BYTES_READ, bytesRead),
+                RabbitMQSourceMetrics.taskMetric(RabbitMQSourceMetrics.READ_LATENCY_MS, readLatencyMs),
         };
     }
 

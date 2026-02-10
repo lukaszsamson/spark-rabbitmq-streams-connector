@@ -121,6 +121,18 @@ public final class ReadLimitBudget {
         Map<String, Double> fractional = new LinkedHashMap<>();
         long allocated = 0;
 
+        // Pre-compute total pending once (O(n) instead of O(n^2))
+        long totalPending = 0;
+        for (long p : pending.values()) {
+            totalPending += Math.max(0, p);
+        }
+        if (totalPending == 0) {
+            for (String stream : pending.keySet()) {
+                allocation.put(stream, 0L);
+            }
+            return allocation;
+        }
+
         for (Map.Entry<String, Long> entry : pending.entrySet()) {
             String stream = entry.getKey();
             long p = entry.getValue();
@@ -129,8 +141,6 @@ public final class ReadLimitBudget {
                 continue;
             }
 
-            long totalPending = pending.values().stream()
-                    .mapToLong(Long::longValue).sum();
             double share = (double) p / totalPending * budget;
             long floor = Math.max(1, (long) share);
             allocation.put(stream, floor);

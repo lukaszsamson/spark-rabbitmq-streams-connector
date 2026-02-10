@@ -75,14 +75,15 @@ class RabbitMQMicroBatchStreamTest {
             var scan = new RabbitMQScan(opts, schema);
 
             CustomMetric[] metrics = scan.supportedCustomMetrics();
-            assertThat(metrics).hasSize(2);
+            assertThat(metrics).hasSize(3);
 
             Set<String> names = new HashSet<>();
             for (CustomMetric m : metrics) {
                 names.add(m.name());
                 assertThat(m).isInstanceOf(CustomSumMetric.class);
             }
-            assertThat(names).containsExactlyInAnyOrder("recordsRead", "bytesRead");
+            assertThat(names).containsExactlyInAnyOrder(
+                    "recordsRead", "bytesRead", "readLatencyMs");
         }
     }
 
