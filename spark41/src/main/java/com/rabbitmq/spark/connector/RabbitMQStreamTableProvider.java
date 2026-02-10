@@ -13,6 +13,7 @@ import java.util.Map;
  * Spark DataSource V2 {@link TableProvider} for RabbitMQ Streams.
  *
  * <p>Registered as {@code rabbitmq_streams} via {@link DataSourceRegister}.
+ * Parses and validates connector options, then returns a {@link RabbitMQStreamTable}.
  */
 public class RabbitMQStreamTableProvider implements TableProvider, DataSourceRegister {
 
@@ -23,13 +24,15 @@ public class RabbitMQStreamTableProvider implements TableProvider, DataSourceReg
 
     @Override
     public StructType inferSchema(CaseInsensitiveStringMap options) {
-        // TODO: Milestone 1 – return fixed source schema
-        throw new UnsupportedOperationException("Not yet implemented");
+        ConnectorOptions parsed = new ConnectorOptions(options);
+        return RabbitMQStreamTable.buildSourceSchema(parsed.getMetadataFields());
     }
 
     @Override
-    public Table getTable(StructType schema, Transform[] partitioning, Map<String, String> properties) {
-        // TODO: Milestone 1 – parse options, validate, return Table
-        throw new UnsupportedOperationException("Not yet implemented");
+    public Table getTable(StructType schema, Transform[] partitioning,
+                          Map<String, String> properties) {
+        ConnectorOptions options = new ConnectorOptions(properties);
+        options.validateCommon();
+        return new RabbitMQStreamTable(options);
     }
 }

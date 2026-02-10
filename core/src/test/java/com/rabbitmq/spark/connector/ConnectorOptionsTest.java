@@ -1,0 +1,935 @@
+package com.rabbitmq.spark.connector;
+
+import org.junit.jupiter.api.Nested;
+import org.junit.jupiter.api.Test;
+
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Set;
+
+import static org.assertj.core.api.Assertions.*;
+
+class ConnectorOptionsTest {
+
+    // ---- Helper ----
+
+    /** Minimal valid options for a single-stream configuration. */
+    private static Map<String, String> minimalStreamOptions() {
+        Map<String, String> opts = new HashMap<>();
+        opts.put("stream", "my-stream");
+        opts.put("endpoints", "localhost:5552");
+        return opts;
+    }
+
+    /** Minimal valid options for a superstream configuration. */
+    private static Map<String, String> minimalSuperStreamOptions() {
+        Map<String, String> opts = new HashMap<>();
+        opts.put("superstream", "my-super-stream");
+        opts.put("endpoints", "localhost:5552");
+        return opts;
+    }
+
+    // ========================================================================
+    // Common option parsing
+    // ========================================================================
+
+    @Nested
+    class CommonParsing {
+
+        @Test
+        void parsesEndpoints() {
+            var opts = new ConnectorOptions(minimalStreamOptions());
+            assertThat(opts.getEndpoints()).isEqualTo("localhost:5552");
+        }
+
+        @Test
+        void parsesUris() {
+            var map = minimalStreamOptions();
+            map.put("uris", "rabbitmq-stream://host1:5552,rabbitmq-stream://host2:5552");
+            var opts = new ConnectorOptions(map);
+            assertThat(opts.getUris()).isEqualTo(
+                    "rabbitmq-stream://host1:5552,rabbitmq-stream://host2:5552");
+        }
+
+        @Test
+        void parsesAuthOptions() {
+            var map = minimalStreamOptions();
+            map.put("username", "user1");
+            map.put("password", "secret");
+            map.put("vhost", "/my-vhost");
+            var opts = new ConnectorOptions(map);
+            assertThat(opts.getUsername()).isEqualTo("user1");
+            assertThat(opts.getPassword()).isEqualTo("secret");
+            assertThat(opts.getVhost()).isEqualTo("/my-vhost");
+        }
+
+        @Test
+        void nullAuthOptionsByDefault() {
+            var opts = new ConnectorOptions(minimalStreamOptions());
+            assertThat(opts.getUsername()).isNull();
+            assertThat(opts.getPassword()).isNull();
+            assertThat(opts.getVhost()).isNull();
+        }
+
+        @Test
+        void parsesTlsOptions() {
+            var map = minimalStreamOptions();
+            map.put("tls", "true");
+            map.put("tls.truststore", "/path/to/ts.jks");
+            map.put("tls.truststorePassword", "ts-pass");
+            map.put("tls.keystore", "/path/to/ks.jks");
+            map.put("tls.keystorePassword", "ks-pass");
+            map.put("tls.trustAll", "true");
+            var opts = new ConnectorOptions(map);
+            assertThat(opts.isTls()).isTrue();
+            assertThat(opts.getTlsTruststore()).isEqualTo("/path/to/ts.jks");
+            assertThat(opts.getTlsTruststorePassword()).isEqualTo("ts-pass");
+            assertThat(opts.getTlsKeystore()).isEqualTo("/path/to/ks.jks");
+            assertThat(opts.getTlsKeystorePassword()).isEqualTo("ks-pass");
+            assertThat(opts.isTlsTrustAll()).isTrue();
+        }
+
+        @Test
+        void tlsDefaultsToFalse() {
+            var opts = new ConnectorOptions(minimalStreamOptions());
+            assertThat(opts.isTls()).isFalse();
+            assertThat(opts.isTlsTrustAll()).isFalse();
+        }
+
+        @Test
+        void parsesStreamMode() {
+            var opts = new ConnectorOptions(minimalStreamOptions());
+            assertThat(opts.isStreamMode()).isTrue();
+            assertThat(opts.isSuperStreamMode()).isFalse();
+            assertThat(opts.getStream()).isEqualTo("my-stream");
+        }
+
+        @Test
+        void parsesSuperStreamMode() {
+            var opts = new ConnectorOptions(minimalSuperStreamOptions());
+            assertThat(opts.isStreamMode()).isFalse();
+            assertThat(opts.isSuperStreamMode()).isTrue();
+            assertThat(opts.getSuperStream()).isEqualTo("my-super-stream");
+        }
+
+        @Test
+        void parsesConsumerName() {
+            var map = minimalStreamOptions();
+            map.put("consumerName", "my-consumer");
+            var opts = new ConnectorOptions(map);
+            assertThat(opts.getConsumerName()).isEqualTo("my-consumer");
+        }
+
+        @Test
+        void consumerNameNullByDefault() {
+            var opts = new ConnectorOptions(minimalStreamOptions());
+            assertThat(opts.getConsumerName()).isNull();
+        }
+
+        @Test
+        void parsesFailOnDataLoss() {
+            var map = minimalStreamOptions();
+            map.put("failOnDataLoss", "false");
+            var opts = new ConnectorOptions(map);
+            assertThat(opts.isFailOnDataLoss()).isFalse();
+        }
+
+        @Test
+        void failOnDataLossDefaultsToTrue() {
+            var opts = new ConnectorOptions(minimalStreamOptions());
+            assertThat(opts.isFailOnDataLoss()).isTrue();
+        }
+
+        @Test
+        void parsesAddressResolverClass() {
+            var map = minimalStreamOptions();
+            map.put("addressResolverClass", "com.example.MyResolver");
+            var opts = new ConnectorOptions(map);
+            assertThat(opts.getAddressResolverClass()).isEqualTo("com.example.MyResolver");
+        }
+    }
+
+    // ========================================================================
+    // Metadata fields parsing
+    // ========================================================================
+
+    @Nested
+    class MetadataFieldsParsing {
+
+        @Test
+        void allFieldsByDefault() {
+            var opts = new ConnectorOptions(minimalStreamOptions());
+            assertThat(opts.getMetadataFields()).isEqualTo(MetadataField.ALL);
+        }
+
+        @Test
+        void parsesSubset() {
+            var map = minimalStreamOptions();
+            map.put("metadataFields", "properties,creation_time");
+            var opts = new ConnectorOptions(map);
+            assertThat(opts.getMetadataFields()).containsExactlyInAnyOrder(
+                    MetadataField.PROPERTIES, MetadataField.CREATION_TIME);
+        }
+
+        @Test
+        void parsesEmptyString() {
+            var map = minimalStreamOptions();
+            map.put("metadataFields", "");
+            var opts = new ConnectorOptions(map);
+            assertThat(opts.getMetadataFields()).isEmpty();
+        }
+
+        @Test
+        void toleratesWhitespace() {
+            var map = minimalStreamOptions();
+            map.put("metadataFields", " properties , routing_key ");
+            var opts = new ConnectorOptions(map);
+            assertThat(opts.getMetadataFields()).containsExactlyInAnyOrder(
+                    MetadataField.PROPERTIES, MetadataField.ROUTING_KEY);
+        }
+
+        @Test
+        void rejectsUnknownField() {
+            var map = minimalStreamOptions();
+            map.put("metadataFields", "properties,bogus");
+            assertThatThrownBy(() -> new ConnectorOptions(map))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("bogus");
+        }
+    }
+
+    // ========================================================================
+    // Source option parsing
+    // ========================================================================
+
+    @Nested
+    class SourceParsing {
+
+        @Test
+        void startingOffsetsDefaultsToEarliest() {
+            var opts = new ConnectorOptions(minimalStreamOptions());
+            assertThat(opts.getStartingOffsets()).isEqualTo(StartingOffsetsMode.EARLIEST);
+        }
+
+        @Test
+        void parsesStartingOffsetsLatest() {
+            var map = minimalStreamOptions();
+            map.put("startingOffsets", "latest");
+            var opts = new ConnectorOptions(map);
+            assertThat(opts.getStartingOffsets()).isEqualTo(StartingOffsetsMode.LATEST);
+        }
+
+        @Test
+        void parsesStartingOffsetsOffset() {
+            var map = minimalStreamOptions();
+            map.put("startingOffsets", "offset");
+            map.put("startingOffset", "42");
+            var opts = new ConnectorOptions(map);
+            assertThat(opts.getStartingOffsets()).isEqualTo(StartingOffsetsMode.OFFSET);
+            assertThat(opts.getStartingOffset()).isEqualTo(42L);
+        }
+
+        @Test
+        void parsesStartingOffsetsTimestamp() {
+            var map = minimalStreamOptions();
+            map.put("startingOffsets", "timestamp");
+            map.put("startingTimestamp", "1700000000000");
+            var opts = new ConnectorOptions(map);
+            assertThat(opts.getStartingOffsets()).isEqualTo(StartingOffsetsMode.TIMESTAMP);
+            assertThat(opts.getStartingTimestamp()).isEqualTo(1700000000000L);
+        }
+
+        @Test
+        void startingOffsetsCaseInsensitive() {
+            var map = minimalStreamOptions();
+            map.put("startingOffsets", "LATEST");
+            var opts = new ConnectorOptions(map);
+            assertThat(opts.getStartingOffsets()).isEqualTo(StartingOffsetsMode.LATEST);
+        }
+
+        @Test
+        void rejectsInvalidStartingOffsets() {
+            var map = minimalStreamOptions();
+            map.put("startingOffsets", "bogus");
+            assertThatThrownBy(() -> new ConnectorOptions(map))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("startingOffsets")
+                    .hasMessageContaining("bogus");
+        }
+
+        @Test
+        void endingOffsetsDefaultsToLatest() {
+            var opts = new ConnectorOptions(minimalStreamOptions());
+            assertThat(opts.getEndingOffsets()).isEqualTo(EndingOffsetsMode.LATEST);
+        }
+
+        @Test
+        void parsesEndingOffsetsOffset() {
+            var map = minimalStreamOptions();
+            map.put("endingOffsets", "offset");
+            map.put("endingOffset", "999");
+            var opts = new ConnectorOptions(map);
+            assertThat(opts.getEndingOffsets()).isEqualTo(EndingOffsetsMode.OFFSET);
+            assertThat(opts.getEndingOffset()).isEqualTo(999L);
+        }
+
+        @Test
+        void parsesMaxRecordsPerTrigger() {
+            var map = minimalStreamOptions();
+            map.put("maxRecordsPerTrigger", "5000");
+            var opts = new ConnectorOptions(map);
+            assertThat(opts.getMaxRecordsPerTrigger()).isEqualTo(5000L);
+        }
+
+        @Test
+        void maxRecordsPerTriggerNullByDefault() {
+            var opts = new ConnectorOptions(minimalStreamOptions());
+            assertThat(opts.getMaxRecordsPerTrigger()).isNull();
+        }
+
+        @Test
+        void parsesMaxBytesPerTrigger() {
+            var map = minimalStreamOptions();
+            map.put("maxBytesPerTrigger", "1048576");
+            var opts = new ConnectorOptions(map);
+            assertThat(opts.getMaxBytesPerTrigger()).isEqualTo(1048576L);
+        }
+
+        @Test
+        void parsesMinPartitions() {
+            var map = minimalStreamOptions();
+            map.put("minPartitions", "8");
+            var opts = new ConnectorOptions(map);
+            assertThat(opts.getMinPartitions()).isEqualTo(8);
+        }
+
+        @Test
+        void parsesServerSideOffsetTracking() {
+            var map = minimalStreamOptions();
+            map.put("serverSideOffsetTracking", "false");
+            var opts = new ConnectorOptions(map);
+            assertThat(opts.getServerSideOffsetTracking()).isFalse();
+            assertThat(opts.isServerSideOffsetTracking(true)).isFalse();
+            assertThat(opts.isServerSideOffsetTracking(false)).isFalse();
+        }
+
+        @Test
+        void serverSideOffsetTrackingDefaultsBasedOnMode() {
+            var opts = new ConnectorOptions(minimalStreamOptions());
+            assertThat(opts.getServerSideOffsetTracking()).isNull();
+            assertThat(opts.isServerSideOffsetTracking(true)).isTrue();
+            assertThat(opts.isServerSideOffsetTracking(false)).isFalse();
+        }
+
+        @Test
+        void parsesFilterValues() {
+            var map = minimalStreamOptions();
+            map.put("filterValues", "foo,bar,baz");
+            var opts = new ConnectorOptions(map);
+            assertThat(opts.getFilterValues()).containsExactly("foo", "bar", "baz");
+        }
+
+        @Test
+        void filterValuesEmptyByDefault() {
+            var opts = new ConnectorOptions(minimalStreamOptions());
+            assertThat(opts.getFilterValues()).isEmpty();
+        }
+
+        @Test
+        void parsesFilterBooleans() {
+            var map = minimalStreamOptions();
+            map.put("filterMatchUnfiltered", "true");
+            map.put("filterWarningOnMismatch", "false");
+            var opts = new ConnectorOptions(map);
+            assertThat(opts.isFilterMatchUnfiltered()).isTrue();
+            assertThat(opts.isFilterWarningOnMismatch()).isFalse();
+        }
+
+        @Test
+        void filterBooleansDefaults() {
+            var opts = new ConnectorOptions(minimalStreamOptions());
+            assertThat(opts.isFilterMatchUnfiltered()).isFalse();
+            assertThat(opts.isFilterWarningOnMismatch()).isTrue();
+        }
+
+        @Test
+        void parsesReaderTuningOptions() {
+            var map = minimalStreamOptions();
+            map.put("pollTimeoutMs", "5000");
+            map.put("maxWaitMs", "60000");
+            map.put("initialCredits", "3");
+            map.put("queueCapacity", "20000");
+            map.put("estimatedMessageSizeBytes", "2048");
+            var opts = new ConnectorOptions(map);
+            assertThat(opts.getPollTimeoutMs()).isEqualTo(5000L);
+            assertThat(opts.getMaxWaitMs()).isEqualTo(60000L);
+            assertThat(opts.getInitialCredits()).isEqualTo(3);
+            assertThat(opts.getQueueCapacity()).isEqualTo(20000);
+            assertThat(opts.getEstimatedMessageSizeBytes()).isEqualTo(2048);
+        }
+
+        @Test
+        void readerTuningDefaults() {
+            var opts = new ConnectorOptions(minimalStreamOptions());
+            assertThat(opts.getPollTimeoutMs()).isEqualTo(30_000L);
+            assertThat(opts.getMaxWaitMs()).isEqualTo(300_000L);
+            assertThat(opts.getInitialCredits()).isEqualTo(1);
+            assertThat(opts.getQueueCapacity()).isEqualTo(10_000);
+            assertThat(opts.getEstimatedMessageSizeBytes()).isEqualTo(1024);
+        }
+
+        @Test
+        void rejectsInvalidLong() {
+            var map = minimalStreamOptions();
+            map.put("startingOffset", "not-a-number");
+            assertThatThrownBy(() -> new ConnectorOptions(map))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("startingOffset")
+                    .hasMessageContaining("not-a-number");
+        }
+
+        @Test
+        void rejectsInvalidBoolean() {
+            var map = minimalStreamOptions();
+            map.put("failOnDataLoss", "maybe");
+            assertThatThrownBy(() -> new ConnectorOptions(map))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("failOnDataLoss")
+                    .hasMessageContaining("maybe");
+        }
+    }
+
+    // ========================================================================
+    // Sink option parsing
+    // ========================================================================
+
+    @Nested
+    class SinkParsing {
+
+        @Test
+        void parsesProducerName() {
+            var map = minimalStreamOptions();
+            map.put("producerName", "my-producer");
+            var opts = new ConnectorOptions(map);
+            assertThat(opts.getProducerName()).isEqualTo("my-producer");
+        }
+
+        @Test
+        void parsesConfirmOptions() {
+            var map = minimalStreamOptions();
+            map.put("publisherConfirmTimeoutMs", "5000");
+            map.put("maxInFlight", "100");
+            map.put("enqueueTimeoutMs", "3000");
+            var opts = new ConnectorOptions(map);
+            assertThat(opts.getPublisherConfirmTimeoutMs()).isEqualTo(5000L);
+            assertThat(opts.getMaxInFlight()).isEqualTo(100);
+            assertThat(opts.getEnqueueTimeoutMs()).isEqualTo(3000L);
+        }
+
+        @Test
+        void enqueueTimeoutDefault() {
+            var opts = new ConnectorOptions(minimalStreamOptions());
+            assertThat(opts.getEnqueueTimeoutMs()).isEqualTo(10_000L);
+        }
+
+        @Test
+        void parsesBatchingOptions() {
+            var map = minimalStreamOptions();
+            map.put("batchSize", "50");
+            map.put("batchPublishingDelayMs", "200");
+            map.put("subEntrySize", "10");
+            var opts = new ConnectorOptions(map);
+            assertThat(opts.getBatchSize()).isEqualTo(50);
+            assertThat(opts.getBatchPublishingDelayMs()).isEqualTo(200L);
+            assertThat(opts.getSubEntrySize()).isEqualTo(10);
+        }
+
+        @Test
+        void parsesCompression() {
+            for (String name : new String[]{"gzip", "snappy", "lz4", "zstd", "none"}) {
+                var map = minimalStreamOptions();
+                map.put("compression", name);
+                var opts = new ConnectorOptions(map);
+                assertThat(opts.getCompression())
+                        .isEqualTo(CompressionType.fromString(name));
+            }
+        }
+
+        @Test
+        void compressionDefaultsToNone() {
+            var opts = new ConnectorOptions(minimalStreamOptions());
+            assertThat(opts.getCompression()).isEqualTo(CompressionType.NONE);
+        }
+
+        @Test
+        void parsesRoutingStrategy() {
+            for (String name : new String[]{"hash", "key", "custom"}) {
+                var map = minimalStreamOptions();
+                map.put("routingStrategy", name);
+                if ("custom".equals(name)) {
+                    map.put("partitionerClass", "com.example.MyPartitioner");
+                }
+                var opts = new ConnectorOptions(map);
+                assertThat(opts.getRoutingStrategy())
+                        .isEqualTo(RoutingStrategyType.fromString(name));
+            }
+        }
+
+        @Test
+        void routingStrategyDefaultsToHash() {
+            var opts = new ConnectorOptions(minimalStreamOptions());
+            assertThat(opts.getRoutingStrategy()).isEqualTo(RoutingStrategyType.HASH);
+        }
+
+        @Test
+        void parsesFilterValueColumn() {
+            var map = minimalStreamOptions();
+            map.put("filterValueColumn", "region");
+            var opts = new ConnectorOptions(map);
+            assertThat(opts.getFilterValueColumn()).isEqualTo("region");
+        }
+
+        @Test
+        void parsesIgnoreUnknownColumns() {
+            var map = minimalStreamOptions();
+            map.put("ignoreUnknownColumns", "true");
+            var opts = new ConnectorOptions(map);
+            assertThat(opts.isIgnoreUnknownColumns()).isTrue();
+        }
+
+        @Test
+        void ignoreUnknownColumnsDefaultsFalse() {
+            var opts = new ConnectorOptions(minimalStreamOptions());
+            assertThat(opts.isIgnoreUnknownColumns()).isFalse();
+        }
+    }
+
+    // ========================================================================
+    // Common validation
+    // ========================================================================
+
+    @Nested
+    class CommonValidation {
+
+        @Test
+        void validMinimalStreamConfig() {
+            var opts = new ConnectorOptions(minimalStreamOptions());
+            assertThatCode(opts::validateCommon).doesNotThrowAnyException();
+        }
+
+        @Test
+        void validMinimalSuperStreamConfig() {
+            var opts = new ConnectorOptions(minimalSuperStreamOptions());
+            assertThatCode(opts::validateCommon).doesNotThrowAnyException();
+        }
+
+        @Test
+        void validWithUrisInsteadOfEndpoints() {
+            var map = new HashMap<String, String>();
+            map.put("stream", "my-stream");
+            map.put("uris", "rabbitmq-stream://localhost:5552");
+            var opts = new ConnectorOptions(map);
+            assertThatCode(opts::validateCommon).doesNotThrowAnyException();
+        }
+
+        @Test
+        void rejectsBothStreamAndSuperStream() {
+            var map = minimalStreamOptions();
+            map.put("superstream", "my-super-stream");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateCommon)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("stream")
+                    .hasMessageContaining("superstream")
+                    .hasMessageContaining("both");
+        }
+
+        @Test
+        void rejectsNeitherStreamNorSuperStream() {
+            var map = new HashMap<String, String>();
+            map.put("endpoints", "localhost:5552");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateCommon)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("stream")
+                    .hasMessageContaining("superstream")
+                    .hasMessageContaining("neither");
+        }
+
+        @Test
+        void rejectsNoEndpointsOrUris() {
+            var map = new HashMap<String, String>();
+            map.put("stream", "my-stream");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateCommon)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("endpoints")
+                    .hasMessageContaining("uris");
+        }
+
+        @Test
+        void rejectsTrustAllWithoutTls() {
+            var map = minimalStreamOptions();
+            map.put("tls.trustAll", "true");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateCommon)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("tls.trustAll")
+                    .hasMessageContaining("tls");
+        }
+
+        @Test
+        void allowsTrustAllWithTls() {
+            var map = minimalStreamOptions();
+            map.put("tls", "true");
+            map.put("tls.trustAll", "true");
+            var opts = new ConnectorOptions(map);
+            assertThatCode(opts::validateCommon).doesNotThrowAnyException();
+        }
+
+        @Test
+        void treatsEmptyStreamAsAbsent() {
+            var map = new HashMap<String, String>();
+            map.put("stream", "");
+            map.put("superstream", "my-super-stream");
+            map.put("endpoints", "localhost:5552");
+            var opts = new ConnectorOptions(map);
+            assertThatCode(opts::validateCommon).doesNotThrowAnyException();
+            assertThat(opts.isSuperStreamMode()).isTrue();
+        }
+    }
+
+    // ========================================================================
+    // Source validation
+    // ========================================================================
+
+    @Nested
+    class SourceValidation {
+
+        @Test
+        void validSourceConfig() {
+            var opts = new ConnectorOptions(minimalStreamOptions());
+            assertThatCode(opts::validateForSource).doesNotThrowAnyException();
+        }
+
+        @Test
+        void rejectsOffsetModeWithoutStartingOffset() {
+            var map = minimalStreamOptions();
+            map.put("startingOffsets", "offset");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateForSource)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("startingOffset")
+                    .hasMessageContaining("required");
+        }
+
+        @Test
+        void rejectsTimestampModeWithoutStartingTimestamp() {
+            var map = minimalStreamOptions();
+            map.put("startingOffsets", "timestamp");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateForSource)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("startingTimestamp")
+                    .hasMessageContaining("required");
+        }
+
+        @Test
+        void rejectsEndingOffsetModeWithoutEndingOffset() {
+            var map = minimalStreamOptions();
+            map.put("endingOffsets", "offset");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateForSource)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("endingOffset")
+                    .hasMessageContaining("required");
+        }
+
+        @Test
+        void rejectsNegativeStartingOffset() {
+            var map = minimalStreamOptions();
+            map.put("startingOffsets", "offset");
+            map.put("startingOffset", "-1");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateForSource)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("startingOffset")
+                    .hasMessageContaining(">= 0");
+        }
+
+        @Test
+        void rejectsNonPositiveStartingTimestamp() {
+            var map = minimalStreamOptions();
+            map.put("startingOffsets", "timestamp");
+            map.put("startingTimestamp", "0");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateForSource)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("startingTimestamp")
+                    .hasMessageContaining("> 0");
+        }
+
+        @Test
+        void rejectsNonPositiveMaxRecordsPerTrigger() {
+            var map = minimalStreamOptions();
+            map.put("maxRecordsPerTrigger", "0");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateForSource)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("maxRecordsPerTrigger");
+        }
+
+        @Test
+        void rejectsNonPositiveMaxBytesPerTrigger() {
+            var map = minimalStreamOptions();
+            map.put("maxBytesPerTrigger", "-100");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateForSource)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("maxBytesPerTrigger");
+        }
+
+        @Test
+        void rejectsNonPositiveMinPartitions() {
+            var map = minimalStreamOptions();
+            map.put("minPartitions", "0");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateForSource)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("minPartitions");
+        }
+
+        @Test
+        void rejectsNonPositivePollTimeoutMs() {
+            var map = minimalStreamOptions();
+            map.put("pollTimeoutMs", "0");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateForSource)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("pollTimeoutMs");
+        }
+
+        @Test
+        void rejectsNonPositiveMaxWaitMs() {
+            var map = minimalStreamOptions();
+            map.put("maxWaitMs", "-1");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateForSource)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("maxWaitMs");
+        }
+
+        @Test
+        void rejectsNonPositiveInitialCredits() {
+            var map = minimalStreamOptions();
+            map.put("initialCredits", "0");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateForSource)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("initialCredits");
+        }
+
+        @Test
+        void rejectsNonPositiveQueueCapacity() {
+            var map = minimalStreamOptions();
+            map.put("queueCapacity", "0");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateForSource)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("queueCapacity");
+        }
+
+        @Test
+        void rejectsNonPositiveEstimatedMessageSize() {
+            var map = minimalStreamOptions();
+            map.put("estimatedMessageSizeBytes", "-1");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateForSource)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("estimatedMessageSizeBytes");
+        }
+
+        @Test
+        void acceptsValidOffsetConfig() {
+            var map = minimalStreamOptions();
+            map.put("startingOffsets", "offset");
+            map.put("startingOffset", "100");
+            map.put("endingOffsets", "offset");
+            map.put("endingOffset", "200");
+            var opts = new ConnectorOptions(map);
+            assertThatCode(opts::validateForSource).doesNotThrowAnyException();
+        }
+
+        @Test
+        void acceptsValidTimestampConfig() {
+            var map = minimalStreamOptions();
+            map.put("startingOffsets", "timestamp");
+            map.put("startingTimestamp", "1700000000000");
+            var opts = new ConnectorOptions(map);
+            assertThatCode(opts::validateForSource).doesNotThrowAnyException();
+        }
+
+        @Test
+        void sourceValidationAlsoValidatesCommon() {
+            var map = new HashMap<String, String>();
+            map.put("stream", "s");
+            // missing endpoints/uris
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateForSource)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("endpoints");
+        }
+    }
+
+    // ========================================================================
+    // Sink validation
+    // ========================================================================
+
+    @Nested
+    class SinkValidation {
+
+        @Test
+        void validSinkConfig() {
+            var opts = new ConnectorOptions(minimalStreamOptions());
+            assertThatCode(opts::validateForSink).doesNotThrowAnyException();
+        }
+
+        @Test
+        void rejectsCompressionWithoutSubEntrySize() {
+            var map = minimalStreamOptions();
+            map.put("compression", "gzip");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateForSink)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("compression")
+                    .hasMessageContaining("subEntrySize");
+        }
+
+        @Test
+        void rejectsCompressionWithSubEntrySizeOne() {
+            var map = minimalStreamOptions();
+            map.put("compression", "snappy");
+            map.put("subEntrySize", "1");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateForSink)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("subEntrySize");
+        }
+
+        @Test
+        void acceptsCompressionWithSubEntrySizeGreaterThanOne() {
+            var map = minimalStreamOptions();
+            map.put("compression", "lz4");
+            map.put("subEntrySize", "10");
+            var opts = new ConnectorOptions(map);
+            assertThatCode(opts::validateForSink).doesNotThrowAnyException();
+        }
+
+        @Test
+        void rejectsCustomRoutingWithoutPartitionerClass() {
+            var map = minimalStreamOptions();
+            map.put("routingStrategy", "custom");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateForSink)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("partitionerClass")
+                    .hasMessageContaining("required")
+                    .hasMessageContaining("custom");
+        }
+
+        @Test
+        void acceptsCustomRoutingWithPartitionerClass() {
+            var map = minimalStreamOptions();
+            map.put("routingStrategy", "custom");
+            map.put("partitionerClass", "com.example.MyPartitioner");
+            var opts = new ConnectorOptions(map);
+            assertThatCode(opts::validateForSink).doesNotThrowAnyException();
+        }
+
+        @Test
+        void rejectsNonPositiveMaxInFlight() {
+            var map = minimalStreamOptions();
+            map.put("maxInFlight", "0");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateForSink)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("maxInFlight");
+        }
+
+        @Test
+        void rejectsNonPositiveEnqueueTimeoutMs() {
+            var map = minimalStreamOptions();
+            map.put("enqueueTimeoutMs", "0");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateForSink)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("enqueueTimeoutMs");
+        }
+
+        @Test
+        void rejectsNonPositiveBatchSize() {
+            var map = minimalStreamOptions();
+            map.put("batchSize", "-1");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateForSink)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("batchSize");
+        }
+
+        @Test
+        void rejectsNonPositiveSubEntrySize() {
+            var map = minimalStreamOptions();
+            map.put("subEntrySize", "0");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateForSink)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("subEntrySize");
+        }
+
+        @Test
+        void rejectsNonPositivePublisherConfirmTimeout() {
+            var map = minimalStreamOptions();
+            map.put("publisherConfirmTimeoutMs", "0");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateForSink)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("publisherConfirmTimeoutMs");
+        }
+
+        @Test
+        void sinkValidationAlsoValidatesCommon() {
+            var map = new HashMap<String, String>();
+            map.put("stream", "s");
+            // missing endpoints/uris
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateForSink)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("endpoints");
+        }
+    }
+
+    // ========================================================================
+    // Extension loader
+    // ========================================================================
+
+    @Nested
+    class ExtensionLoading {
+
+        @Test
+        void rejectsClassNotFound() {
+            assertThatThrownBy(() -> ExtensionLoader.load(
+                    "com.nonexistent.Foo", ConnectorAddressResolver.class, "addressResolverClass"))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("not found")
+                    .hasMessageContaining("com.nonexistent.Foo");
+        }
+
+        @Test
+        void rejectsWrongType() {
+            assertThatThrownBy(() -> ExtensionLoader.load(
+                    "java.lang.String", ConnectorAddressResolver.class, "addressResolverClass"))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("does not implement");
+        }
+    }
+}
