@@ -10,7 +10,7 @@ import org.apache.spark.sql.connector.metric.CustomTaskMetric;
  * <p>Task-level metrics are collected by {@link RabbitMQPartitionReader} and
  * aggregated by Spark using the corresponding {@link CustomMetric} definitions.
  */
-final class RabbitMQSourceMetrics {
+public final class RabbitMQSourceMetrics {
 
     private RabbitMQSourceMetrics() {}
 
@@ -28,7 +28,9 @@ final class RabbitMQSourceMetrics {
             new ReadLatencyMsMetric(),
     };
 
-    static final class RecordsReadMetric extends CustomSumMetric {
+    public static final class RecordsReadMetric extends CustomSumMetric {
+        public RecordsReadMetric() {}
+
         @Override
         public String name() {
             return RECORDS_READ;
@@ -40,7 +42,9 @@ final class RabbitMQSourceMetrics {
         }
     }
 
-    static final class BytesReadMetric extends CustomSumMetric {
+    public static final class BytesReadMetric extends CustomSumMetric {
+        public BytesReadMetric() {}
+
         @Override
         public String name() {
             return BYTES_READ;
@@ -52,7 +56,9 @@ final class RabbitMQSourceMetrics {
         }
     }
 
-    static final class ReadLatencyMsMetric extends CustomSumMetric {
+    public static final class ReadLatencyMsMetric extends CustomSumMetric {
+        public ReadLatencyMsMetric() {}
+
         @Override
         public String name() {
             return READ_LATENCY_MS;

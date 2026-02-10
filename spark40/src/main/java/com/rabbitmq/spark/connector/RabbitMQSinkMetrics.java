@@ -10,7 +10,7 @@ import org.apache.spark.sql.connector.metric.CustomTaskMetric;
  * <p>Task-level metrics are collected by {@link RabbitMQDataWriter} and
  * aggregated by Spark using the corresponding {@link CustomMetric} definitions.
  */
-final class RabbitMQSinkMetrics {
+public final class RabbitMQSinkMetrics {
 
     private RabbitMQSinkMetrics() {}
 
@@ -26,7 +26,9 @@ final class RabbitMQSinkMetrics {
             new BytesWrittenMetric(),
     };
 
-    static final class RecordsWrittenMetric extends CustomSumMetric {
+    public static final class RecordsWrittenMetric extends CustomSumMetric {
+        public RecordsWrittenMetric() {}
+
         @Override
         public String name() {
             return RECORDS_WRITTEN;
@@ -38,7 +40,9 @@ final class RabbitMQSinkMetrics {
         }
     }
 
-    static final class BytesWrittenMetric extends CustomSumMetric {
+    public static final class BytesWrittenMetric extends CustomSumMetric {
+        public BytesWrittenMetric() {}
+
         @Override
         public String name() {
             return BYTES_WRITTEN;
