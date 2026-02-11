@@ -16,15 +16,106 @@
 
     <properties>
         <spark.version>${spark41.version}</spark.version>
+        <it.connector.artifact>sparkling-rabbit-spark41</it.connector.artifact>
         <!-- Skip install/deploy for test-only module -->
         <maven.install.skip>true</maven.install.skip>
         <maven.deploy.skip>true</maven.deploy.skip>
     </properties>
 
+    <profiles>
+        <profile>
+            <id>spark35</id>
+            <properties>
+                <spark.version>${spark35.version}</spark.version>
+                <it.connector.artifact>sparkling-rabbit-spark35</it.connector.artifact>
+            </properties>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-failsafe-plugin</artifactId>
+                        <configuration>
+                            <argLine>
+                                --add-opens=java.base/java.lang=ALL-UNNAMED
+                                --add-opens=java.base/java.lang.invoke=ALL-UNNAMED
+                                --add-opens=java.base/java.lang.reflect=ALL-UNNAMED
+                                --add-opens=java.base/java.io=ALL-UNNAMED
+                                --add-opens=java.base/java.net=ALL-UNNAMED
+                                --add-opens=java.base/java.nio=ALL-UNNAMED
+                                --add-opens=java.base/java.util=ALL-UNNAMED
+                                --add-opens=java.base/java.util.concurrent=ALL-UNNAMED
+                                --add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED
+                                --add-opens=java.base/jdk.internal.ref=ALL-UNNAMED
+                                --add-opens=java.base/sun.nio.ch=ALL-UNNAMED
+                                --add-opens=java.base/sun.nio.cs=ALL-UNNAMED
+                                --add-opens=java.base/sun.security.action=ALL-UNNAMED
+                                --add-opens=java.base/sun.util.calendar=ALL-UNNAMED
+                                --add-opens=java.security.jgss/sun.security.krb5=ALL-UNNAMED
+                                -Djdk.reflect.useDirectMethodHandle=false
+                                -Dio.netty.tryReflectionSetAccessible=true
+                            </argLine>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+        <profile>
+            <id>spark35-scala212</id>
+            <properties>
+                <spark.version>${spark35.version}</spark.version>
+                <scala.binary.version>2.12</scala.binary.version>
+                <it.connector.artifact>sparkling-rabbit-spark35_2.12</it.connector.artifact>
+            </properties>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-failsafe-plugin</artifactId>
+                        <configuration>
+                            <argLine>
+                                --add-opens=java.base/java.lang=ALL-UNNAMED
+                                --add-opens=java.base/java.lang.invoke=ALL-UNNAMED
+                                --add-opens=java.base/java.lang.reflect=ALL-UNNAMED
+                                --add-opens=java.base/java.io=ALL-UNNAMED
+                                --add-opens=java.base/java.net=ALL-UNNAMED
+                                --add-opens=java.base/java.nio=ALL-UNNAMED
+                                --add-opens=java.base/java.util=ALL-UNNAMED
+                                --add-opens=java.base/java.util.concurrent=ALL-UNNAMED
+                                --add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED
+                                --add-opens=java.base/jdk.internal.ref=ALL-UNNAMED
+                                --add-opens=java.base/sun.nio.ch=ALL-UNNAMED
+                                --add-opens=java.base/sun.nio.cs=ALL-UNNAMED
+                                --add-opens=java.base/sun.security.action=ALL-UNNAMED
+                                --add-opens=java.base/sun.util.calendar=ALL-UNNAMED
+                                --add-opens=java.security.jgss/sun.security.krb5=ALL-UNNAMED
+                                -Djdk.reflect.useDirectMethodHandle=false
+                                -Dio.netty.tryReflectionSetAccessible=true
+                            </argLine>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+        <profile>
+            <id>spark40</id>
+            <properties>
+                <spark.version>${spark40.version}</spark.version>
+                <it.connector.artifact>sparkling-rabbit-spark40</it.connector.artifact>
+            </properties>
+        </profile>
+        <profile>
+            <id>spark41</id>
+            <properties>
+                <spark.version>${spark41.version}</spark.version>
+                <it.connector.artifact>sparkling-rabbit-spark41</it.connector.artifact>
+            </properties>
+        </profile>
+    </profiles>
+
     <dependencies>
         <dependency>
             <groupId>com.rabbitmq.spark</groupId>
-            <artifactId>sparkling-rabbit-spark41</artifactId>
+            <artifactId>${it.connector.artifact}</artifactId>
             <version>${project.version}</version>
             <scope>test</scope>
         </dependency>

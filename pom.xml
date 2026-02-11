@@ -15,10 +15,12 @@
     <modules>
         <module>core</module>
         <module>spark35</module>
+        <module>spark35_2.12</module>
         <module>spark40</module>
         <module>spark41</module>
         <module>shared-tests</module>
         <module>spark35-tests</module>
+        <module>spark35_2.12-tests</module>
         <module>spark40-tests</module>
         <module>spark41-tests</module>
         <module>it-tests</module>
@@ -152,6 +154,7 @@
             <modules>
                 <module>core</module>
                 <module>spark35</module>
+                <module>spark35_2.12</module>
             </modules>
         </profile>
         <profile>

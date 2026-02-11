@@ -8,16 +8,24 @@
 
 ## Unit Tests
 
-Unit tests live in `core`, `spark40`, and `spark41` modules. They use mocks and do not require Docker.
+Unit tests live in `core`, `spark35`, `spark40`, and `spark41` modules. They use mocks and do not require Docker. The `spark35_2.12` module compiles the same sources against Spark 3.5 with Scala 2.12.
 
 ```bash
-mvn verify -pl core,spark40,spark41 -am
+mvn verify -pl core,spark35,spark35_2.12,spark40,spark41 -am
 ```
 
 ## Mutation Testing (PIT)
 
-Mutation testing is configured in the `spark40-tests` and `spark41-tests` modules
+Mutation testing is configured in the `spark35-tests`, `spark35_2.12-tests`, `spark40-tests`, and `spark41-tests` modules
 to exercise the shared unit test suite against each Spark version.
+
+```bash
+mvn -pl spark35-tests -am org.pitest:pitest-maven:mutationCoverage
+```
+
+```bash
+mvn -pl spark35_2.12-tests -am org.pitest:pitest-maven:mutationCoverage
+```
 
 ```bash
 mvn -pl spark40-tests -am org.pitest:pitest-maven:mutationCoverage
@@ -33,12 +41,32 @@ Integration tests live in the `it-tests` module. They use [Testcontainers](https
 
 ### Running
 
+By default, integration tests run against Spark 4.1:
+
 ```bash
 mvn verify -pl it-tests -am
 ```
 
+Use a profile to run against a specific Spark version:
+
 ```bash
-./mvnw -pl spark41,it-tests -am -Dit.test=BatchReadIT,SuperStreamIT verify
+# Spark 3.5 (Scala 2.13)
+mvn verify -pl it-tests -am -Pspark35
+
+# Spark 3.5 (Scala 2.12)
+mvn verify -pl it-tests -am -Pspark35-scala212
+
+# Spark 4.0
+mvn verify -pl it-tests -am -Pspark40
+
+# Spark 4.1 (default, profile optional)
+mvn verify -pl it-tests -am -Pspark41
+```
+
+Run a subset of integration tests:
+
+```bash
+mvn verify -pl it-tests -am -Dit.test=BatchReadIT,SuperStreamIT
 ```
 
 ### Docker configuration
