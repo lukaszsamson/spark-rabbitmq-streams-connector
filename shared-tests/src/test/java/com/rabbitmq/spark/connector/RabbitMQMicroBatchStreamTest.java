@@ -5,6 +5,7 @@ import org.apache.spark.sql.connector.metric.CustomSumMetric;
 import org.apache.spark.sql.connector.read.InputPartition;
 import org.apache.spark.sql.connector.read.streaming.*;
 import org.junit.jupiter.api.Nested;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 
 import com.rabbitmq.stream.ConsumerBuilder;
@@ -469,6 +470,7 @@ class RabbitMQMicroBatchStreamTest {
         }
 
         @Test
+        @Tag("spark4x")
         void defaultReadLimitIsMaxBytesWhenOnlyMaxBytesSet() {
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
@@ -482,6 +484,7 @@ class RabbitMQMicroBatchStreamTest {
         }
 
         @Test
+        @Tag("spark4x")
         void defaultReadLimitIsCompositeWhenBothLimitsSet() {
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
@@ -583,6 +586,7 @@ class RabbitMQMicroBatchStreamTest {
         }
 
         @Test
+        @Tag("spark4x")
         void compositeReadLimitAppliesMostRestrictivePerStream() throws Exception {
             RabbitMQMicroBatchStream stream = createStream(minimalOptions());
             Map<String, Long> snapshot = new LinkedHashMap<>();

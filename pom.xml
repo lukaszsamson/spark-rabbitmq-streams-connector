@@ -14,9 +14,11 @@
 
     <modules>
         <module>core</module>
+        <module>spark35</module>
         <module>spark40</module>
         <module>spark41</module>
         <module>shared-tests</module>
+        <module>spark35-tests</module>
         <module>spark40-tests</module>
         <module>spark41-tests</module>
         <module>it-tests</module>
@@ -28,6 +30,7 @@
 
         <!-- Dependency versions -->
         <rabbitmq.stream.client.version>1.4.0</rabbitmq.stream.client.version>
+        <spark35.version>3.5.8</spark35.version>
         <spark40.version>4.0.2</spark40.version>
         <spark41.version>4.1.1</spark41.version>
         <scala.binary.version>2.13</scala.binary.version>
@@ -70,15 +73,10 @@
                 <version>${rabbitmq.stream.client.version}</version>
             </dependency>
 
-            <!-- Spark 4.0 -->
+            <!-- Spark -->
             <dependency>
                 <groupId>org.apache.spark</groupId>
                 <artifactId>spark-sql_${scala.binary.version}</artifactId>
-                <version>${spark40.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>org.apache.spark</groupId>
-                <artifactId>spark-sql-api_${scala.binary.version}</artifactId>
                 <version>${spark40.version}</version>
             </dependency>
 
@@ -149,6 +147,13 @@
 
     <!-- Profiles for building individual Spark version modules (spec M0 acceptance) -->
     <profiles>
+        <profile>
+            <id>spark35</id>
+            <modules>
+                <module>core</module>
+                <module>spark35</module>
+            </modules>
+        </profile>
         <profile>
             <id>spark40</id>
             <modules>
