@@ -24,6 +24,7 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -474,21 +475,12 @@ class SuperStreamIT extends AbstractRabbitMQIT {
             publishMessages(superStream + "-" + p, 120, "avnow-p" + p + "-");
         }
         Thread.sleep(2000);
-
-        // Delete one partition after the query starts so the partition is part of the planned end.
-        CompletableFuture.runAsync(() -> {
-            try {
-                Thread.sleep(1200);
-                deleteStream(superStream + "-1");
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
-        });
+        AtomicBoolean deleted = new AtomicBoolean(false);
 
         Path checkpointDir = Files.createTempDirectory("spark-checkpoint-ss-avnow-fail-");
-        Path outputDir = Files.createTempDirectory("spark-output-ss-avnow-fail-");
 
-        // With failOnDataLoss=true, should fail
+        // With failOnDataLoss=true, delete a partition after first batch to deterministically
+        // make a planned partition unavailable during subsequent AvailableNow batches.
         StreamingQuery query = spark.readStream()
                 .format("rabbitmq_streams")
                 .option("endpoints", streamEndpoint())
@@ -501,8 +493,11 @@ class SuperStreamIT extends AbstractRabbitMQIT {
                         "com.rabbitmq.spark.connector.TestAddressResolver")
                 .load()
                 .writeStream()
-                .format("parquet")
-                .option("path", outputDir.toString())
+                .foreachBatch((batch, batchId) -> {
+                    if (batchId == 0L && deleted.compareAndSet(false, true)) {
+                        deleteStream(superStream + "-1");
+                    }
+                })
                 .option("checkpointLocation", checkpointDir.toString())
                 .trigger(Trigger.AvailableNow())
                 .start();
@@ -510,6 +505,7 @@ class SuperStreamIT extends AbstractRabbitMQIT {
         assertThatThrownBy(() -> query.awaitTermination(120_000))
                 .satisfies(ex -> assertThat(ex.getMessage())
                         .containsAnyOf("does not exist", "no longer exists"));
+        assertThat(deleted.get()).isTrue();
     }
 
     @Test
@@ -648,6 +644,159 @@ class SuperStreamIT extends AbstractRabbitMQIT {
             long min = offsets.stream().mapToLong(Long::longValue).min().orElse(-1);
             long max = offsets.stream().mapToLong(Long::longValue).max().orElse(-1);
             assertThat(max - min).isEqualTo(99);
+        }
+    }
+
+    // ---- IT-RL-003: skewed superstream with proportional budget ----
+
+    @Test
+    void streamingSkewedSuperStreamProportionalBudget() throws Exception {
+        // Publish skewed data: 100 to p0, 10 to p1, 1 to p2
+        publishMessages(superStream + "-0", 100, "p0-");
+        publishMessages(superStream + "-1", 10, "p1-");
+        publishMessages(superStream + "-2", 1, "p2-");
+        Thread.sleep(2000);
+
+        Path checkpointDir = Files.createTempDirectory("spark-checkpoint-ss-skew-");
+        Path outputDir = Files.createTempDirectory("spark-output-ss-skew-");
+
+        // maxRecordsPerTrigger=20 → forces multiple batches for the skewed distribution
+        StreamingQuery query = spark.readStream()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("superstream", superStream)
+                .option("startingOffsets", "earliest")
+                .option("maxRecordsPerTrigger", "20")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load()
+                .writeStream()
+                .format("parquet")
+                .option("path", outputDir.toString())
+                .option("checkpointLocation", checkpointDir.toString())
+                .trigger(Trigger.AvailableNow())
+                .start();
+
+        query.awaitTermination(120_000);
+
+        // All 111 messages should be consumed
+        Dataset<Row> result = spark.read().schema(MINIMAL_OUTPUT_SCHEMA)
+                .parquet(outputDir.toString());
+        assertThat(result.count()).isEqualTo(111);
+
+        // Verify per-partition counts
+        Map<String, Long> countsByStream = result.collectAsList().stream()
+                .collect(Collectors.groupingBy(
+                        row -> row.getAs("stream").toString(),
+                        Collectors.counting()));
+
+        assertThat(countsByStream).containsEntry(superStream + "-0", 100L);
+        assertThat(countsByStream).containsEntry(superStream + "-1", 10L);
+        assertThat(countsByStream).containsEntry(superStream + "-2", 1L);
+    }
+
+    // ---- IT-SINK-007: custom routing strategy ----
+
+    @Test
+    void batchWriteCustomRoutingStrategy() throws Exception {
+        // Write 30 messages with custom routing that routes everything to partition 0
+        StructType schema = new StructType()
+                .add("value", DataTypes.BinaryType, false)
+                .add("routing_key", DataTypes.StringType, true);
+
+        List<Row> data = new ArrayList<>();
+        for (int i = 0; i < 30; i++) {
+            data.add(RowFactory.create(
+                    ("custom-routed-" + i).getBytes(),
+                    String.valueOf(i)));
+        }
+
+        Dataset<Row> df = spark.createDataFrame(data, schema);
+
+        df.write()
+                .format("rabbitmq_streams")
+                .mode("append")
+                .option("endpoints", streamEndpoint())
+                .option("superstream", superStream)
+                .option("routingStrategy", "custom")
+                .option("partitionerClass",
+                        "com.rabbitmq.spark.connector.TestRoutingStrategy")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .save();
+
+        // TestRoutingStrategy routes all messages to partition 0
+        // Read back via connector to verify all messages are in partition 0
+        Dataset<Row> readDf = spark.read()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("superstream", superStream)
+                .option("startingOffsets", "earliest")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load();
+
+        List<Row> rows = readDf.collectAsList();
+        assertThat(rows).hasSize(30);
+
+        // All messages should be in partition 0
+        Map<String, Long> countsByStream = rows.stream()
+                .collect(Collectors.groupingBy(
+                        row -> row.getAs("stream").toString(),
+                        Collectors.counting()));
+
+        assertThat(countsByStream).containsEntry(superStream + "-0", 30L);
+        assertThat(countsByStream).doesNotContainKey(superStream + "-1");
+        assertThat(countsByStream).doesNotContainKey(superStream + "-2");
+    }
+
+    // ---- IT-ORDER-002: per-partition offsets monotonic ----
+
+    @Test
+    void superstreamPerPartitionOffsetsMonotonic() throws Exception {
+        // Publish 50 messages to each of 3 partitions (150 total)
+        for (int p = 0; p < PARTITION_COUNT; p++) {
+            publishMessages(superStream + "-" + p, 50, "order-p" + p + "-");
+        }
+        Thread.sleep(2000);
+
+        Dataset<Row> df = spark.read()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("superstream", superStream)
+                .option("startingOffsets", "earliest")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load();
+
+        List<Row> rows = df.collectAsList();
+        assertThat(rows).hasSize(150);
+
+        // Group by stream column, verify per-partition offsets
+        Map<String, List<Long>> offsetsByStream = rows.stream()
+                .collect(Collectors.groupingBy(
+                        row -> row.getAs("stream").toString(),
+                        Collectors.mapping(
+                                row -> (Long) row.getAs("offset"),
+                                Collectors.toList())));
+
+        assertThat(offsetsByStream).hasSize(PARTITION_COUNT);
+
+        for (Map.Entry<String, List<Long>> entry : offsetsByStream.entrySet()) {
+            List<Long> offsets = entry.getValue().stream().sorted().toList();
+            assertThat(offsets)
+                    .as("Partition " + entry.getKey() + " should have 50 offsets")
+                    .hasSize(50);
+
+            // Verify strictly increasing and contiguous [0, 49]
+            for (int i = 0; i < offsets.size(); i++) {
+                assertThat(offsets.get(i))
+                        .as("Offset at index " + i + " in partition " + entry.getKey())
+                        .isEqualTo((long) i);
+            }
         }
     }
 

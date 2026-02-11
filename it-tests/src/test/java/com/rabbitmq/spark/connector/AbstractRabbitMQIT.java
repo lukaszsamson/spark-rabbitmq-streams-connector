@@ -283,4 +283,44 @@ abstract class AbstractRabbitMQIT {
             }
         });
     }
+
+    // ---- Filtering helpers ----
+
+    /**
+     * Publish N messages with a broker-side filter value.
+     * The producer uses a {@code filterValue()} extractor that reads from
+     * the application property "filter". Each message's body is "{prefix}{i}".
+     */
+    void publishMessagesWithFilterValue(String stream, int count,
+                                         String prefix, String filterValue) {
+        try (Producer producer = testEnv.producerBuilder()
+                .stream(stream)
+                .filterValue(msg -> {
+                    var props = msg.getApplicationProperties();
+                    return props != null ? (String) props.get("filter") : null;
+                })
+                .build()) {
+            CountDownLatch latch = new CountDownLatch(count);
+            for (int i = 0; i < count; i++) {
+                byte[] body = (prefix + i).getBytes(StandardCharsets.UTF_8);
+                producer.send(
+                        producer.messageBuilder()
+                                .addData(body)
+                                .applicationProperties()
+                                .entry("filter", filterValue)
+                                .messageBuilder()
+                                .build(),
+                        status -> latch.countDown());
+            }
+            if (!latch.await(30, TimeUnit.SECONDS)) {
+                throw new RuntimeException(
+                        "Timed out publishing " + count + " filtered messages to '" + stream + "'");
+            }
+            LOG.info("Published {} messages with filterValue='{}' to stream '{}'",
+                    count, filterValue, stream);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException(e);
+        }
+    }
 }

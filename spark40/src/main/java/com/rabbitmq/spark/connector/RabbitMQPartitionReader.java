@@ -10,6 +10,7 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
@@ -46,6 +47,8 @@ final class RabbitMQPartitionReader implements PartitionReader<InternalRow> {
     private Consumer consumer;
     private InternalRow currentRow;
     private long lastEmittedOffset = -1;
+    private long lastObservedOffset = -1;
+    private boolean filteredTailReached = false;
     private boolean finished = false;
 
     // Task-level metric counters
@@ -78,8 +81,10 @@ final class RabbitMQPartitionReader implements PartitionReader<InternalRow> {
             return false;
         }
 
-        // Fast-path: if we already emitted the final in-range offset, stop immediately.
-        if (lastEmittedOffset >= 0 && lastEmittedOffset >= endOffset - 1) {
+        // Fast-path: if we already observed or emitted the final in-range offset, stop immediately.
+        // lastObservedOffset is needed when post-filter drops tail records.
+        if ((lastEmittedOffset >= 0 && lastEmittedOffset >= endOffset - 1)
+                || (lastObservedOffset >= 0 && lastObservedOffset >= endOffset - 1)) {
             finished = true;
             return false;
         }
@@ -94,6 +99,12 @@ final class RabbitMQPartitionReader implements PartitionReader<InternalRow> {
         long maxWaitMs = options.getMaxWaitMs();
 
         while (true) {
+            if ((lastEmittedOffset >= 0 && lastEmittedOffset >= endOffset - 1)
+                    || (lastObservedOffset >= 0 && lastObservedOffset >= endOffset - 1)) {
+                finished = true;
+                return false;
+            }
+
             // Check for consumer errors
             Throwable error = consumerError.get();
             if (error != null) {
@@ -111,8 +122,21 @@ final class RabbitMQPartitionReader implements PartitionReader<InternalRow> {
             }
 
             if (qm == null) {
+                // With broker-side filtering, not all offsets in [start, end) are delivered.
+                // If the stream tail has already reached this split's end, we can terminate.
+                if (isBrokerFilterConfigured() && hasStreamTailReachedPlannedEnd()) {
+                    finished = true;
+                    return false;
+                }
                 totalWaitMs += pollTimeoutMs;
                 if (totalWaitMs >= maxWaitMs) {
+                    if (isBrokerFilterConfigured()) {
+                        LOG.warn("Reached maxWaitMs={} while reading filtered stream '{}'; " +
+                                        "terminating split early at lastObservedOffset={} for planned endOffset={}",
+                                maxWaitMs, stream, lastObservedOffset, endOffset);
+                        finished = true;
+                        return false;
+                    }
                     throw new IOException(
                             "Timed out waiting for messages from stream '" + stream +
                                     "'. Last emitted offset: " + lastEmittedOffset +
@@ -145,6 +169,10 @@ final class RabbitMQPartitionReader implements PartitionReader<InternalRow> {
             // De-dup on reconnection: skip already-emitted offsets
             if (qm.offset() <= lastEmittedOffset) {
                 continue;
+            }
+
+            if (qm.offset() > lastObservedOffset) {
+                lastObservedOffset = qm.offset();
             }
 
             if (postFilter != null && !postFilter.accept(
@@ -269,6 +297,8 @@ final class RabbitMQPartitionReader implements PartitionReader<InternalRow> {
             builder.filter()
                     .values(options.getFilterValues().toArray(new String[0]))
                     .matchUnfiltered(options.isFilterMatchUnfiltered())
+                    // RabbitMQ stream client requires both filter values and post-filter logic.
+                    .postFilter(msg -> true)
                     .builder();
         }
 
@@ -283,6 +313,62 @@ final class RabbitMQPartitionReader implements PartitionReader<InternalRow> {
             return OffsetSpecification.timestamp(options.getStartingTimestamp());
         }
         return OffsetSpecification.offset(startOffset);
+    }
+
+    private boolean isBrokerFilterConfigured() {
+        return options.getFilterValues() != null && !options.getFilterValues().isEmpty();
+    }
+
+    private boolean hasStreamTailReachedPlannedEnd() {
+        if (filteredTailReached) {
+            return true;
+        }
+        try {
+            StreamStats stats = environment.queryStreamStats(stream);
+            long statsTail = stats.committedChunkId();
+            long probedTail = probeLastMessageOffset();
+            long tail = Math.max(statsTail, probedTail);
+            if (tail < 0) {
+                return endOffset <= 0;
+            }
+            if (tail >= endOffset - 1) {
+                filteredTailReached = true;
+                return true;
+            }
+            return false;
+        } catch (Exception e) {
+            LOG.debug("Unable to probe stream tail for filtered termination on '{}': {}",
+                    stream, e.getMessage());
+            return false;
+        }
+    }
+
+    private long probeLastMessageOffset() {
+        ArrayBlockingQueue<Long> observedOffsets = new ArrayBlockingQueue<>(1);
+        Consumer probe = null;
+        try {
+            probe = environment.consumerBuilder()
+                    .stream(stream)
+                    .offset(OffsetSpecification.last())
+                    .noTrackingStrategy()
+                    .messageHandler((context, message) -> observedOffsets.offer(context.offset()))
+                    .build();
+            Long observed = observedOffsets.poll(5, TimeUnit.SECONDS);
+            return observed == null ? -1 : observed;
+        } catch (Exception e) {
+            LOG.debug("Unable to probe last-message tail offset for stream '{}': {}",
+                    stream, e.getMessage());
+            return -1;
+        } finally {
+            if (probe != null) {
+                try {
+                    probe.close();
+                } catch (Exception e) {
+                    LOG.debug("Error closing probe consumer for stream '{}': {}",
+                            stream, e.getMessage());
+                }
+            }
+        }
     }
 
     private static ConnectorPostFilter createPostFilter(ConnectorOptions options) {

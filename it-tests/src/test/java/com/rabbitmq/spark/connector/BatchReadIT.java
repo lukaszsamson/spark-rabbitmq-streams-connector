@@ -1,12 +1,12 @@
 package com.rabbitmq.spark.connector;
 
-import org.apache.spark.SparkException;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.Arrays;
 import java.util.List;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -543,5 +543,371 @@ class BatchReadIT extends AbstractRabbitMQIT {
         long minOffset = offsets.stream().mapToLong(Long::longValue).min().orElse(-1);
         long maxOffset = offsets.stream().mapToLong(Long::longValue).max().orElse(-1);
         assertThat(maxOffset - minOffset).isEqualTo(99);
+    }
+
+    // ---- IT-RETRY-003: short pollTimeoutMs still succeeds ----
+
+    @Test
+    void batchReadShortPollTimeoutSucceeds() {
+        publishMessages(stream, 50);
+
+        // A very short pollTimeoutMs should not cause premature failure
+        // as long as maxWaitMs gives enough total time
+        Dataset<Row> df = spark.read()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("startingOffsets", "earliest")
+                .option("pollTimeoutMs", "200")
+                .option("maxWaitMs", "60000")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load();
+
+        List<Row> rows = df.collectAsList();
+        assertThat(rows).hasSize(50);
+    }
+
+    // ---- IT-RETRY-004: exceeding maxWaitMs throws diagnostic error ----
+
+    @Test
+    void batchReadExceedMaxWaitMsThrowsDiagnostic() {
+        // Publish only 10 messages but request offsets [0, 100)
+        // Reader will time out waiting for offsets 10-99 that never arrive
+        publishMessages(stream, 10);
+
+        Dataset<Row> df = spark.read()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("startingOffsets", "offset")
+                .option("startingOffset", "0")
+                .option("endingOffsets", "offset")
+                .option("endingOffset", "100")
+                .option("maxWaitMs", "3000")
+                .option("pollTimeoutMs", "500")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load();
+
+        assertThatThrownBy(df::collectAsList)
+                .hasMessageContaining("Timed out waiting for messages")
+                .hasMessageContaining("target end offset");
+    }
+
+    // ---- IT-FILTER-001: broker-side filter with filterValues ----
+
+    @Test
+    void batchReadFilterValuesPreFilter() {
+        // Publish 50 messages with filterValue="alpha" and 50 with filterValue="beta"
+        publishMessagesWithFilterValue(stream, 50, "alpha-", "alpha");
+        publishMessagesWithFilterValue(stream, 50, "beta-", "beta");
+
+        // Read with filterValues=alpha — broker Bloom filter pre-filters at chunk level
+        Dataset<Row> df = spark.read()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("startingOffsets", "earliest")
+                .option("filterValues", "alpha")
+                .option("filterMatchUnfiltered", "false")
+                .option("pollTimeoutMs", "500")
+                .option("maxWaitMs", "10000")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load();
+
+        List<Row> rows = df.collectAsList();
+        // Bloom filter may have false positives but no false negatives:
+        // all 50 "alpha-" messages must be present
+        assertThat(rows.size()).isGreaterThanOrEqualTo(50);
+
+        List<String> values = rows.stream()
+                .map(row -> new String((byte[]) row.getAs("value")))
+                .toList();
+        long alphaCount = values.stream().filter(v -> v.startsWith("alpha-")).count();
+        assertThat(alphaCount).isEqualTo(50);
+    }
+
+    // ---- IT-FILTER-002: filterMatchUnfiltered includes unfiltered messages ----
+
+    @Test
+    void batchReadFilterMatchUnfiltered() {
+        // Publish 30 messages WITH filterValue="alpha"
+        publishMessagesWithFilterValue(stream, 30, "filtered-", "alpha");
+        // Publish 30 messages WITHOUT any filter value (regular publish)
+        publishMessages(stream, 30, "unfiltered-");
+
+        // With filterMatchUnfiltered=true, should get both filtered and unfiltered
+        Dataset<Row> dfAll = spark.read()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("startingOffsets", "earliest")
+                .option("filterValues", "alpha")
+                .option("filterMatchUnfiltered", "true")
+                .option("pollTimeoutMs", "500")
+                .option("maxWaitMs", "10000")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load();
+
+        List<Row> rowsAll = dfAll.collectAsList();
+        // Should include all 60 messages (30 filtered + 30 unfiltered)
+        assertThat(rowsAll.size()).isGreaterThanOrEqualTo(60);
+
+        List<String> allValues = rowsAll.stream()
+                .map(row -> new String((byte[]) row.getAs("value")))
+                .toList();
+        long filteredCount = allValues.stream().filter(v -> v.startsWith("filtered-")).count();
+        long unfilteredCount = allValues.stream().filter(v -> v.startsWith("unfiltered-")).count();
+        assertThat(filteredCount).isEqualTo(30);
+        assertThat(unfilteredCount).isEqualTo(30);
+
+        // With filterMatchUnfiltered=false, should get only filtered messages
+        Dataset<Row> dfFiltered = spark.read()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("startingOffsets", "earliest")
+                .option("filterValues", "alpha")
+                .option("filterMatchUnfiltered", "false")
+                .option("pollTimeoutMs", "500")
+                .option("maxWaitMs", "10000")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load();
+
+        List<Row> rowsFiltered = dfFiltered.collectAsList();
+        // At minimum, all 30 "filtered-" messages must be present (Bloom false positives possible)
+        assertThat(rowsFiltered.size()).isGreaterThanOrEqualTo(30);
+
+        List<String> filteredValues = rowsFiltered.stream()
+                .map(row -> new String((byte[]) row.getAs("value")))
+                .toList();
+        long alphaCount = filteredValues.stream().filter(v -> v.startsWith("filtered-")).count();
+        assertThat(alphaCount).isEqualTo(30);
+    }
+
+    // ---- IT-FILTER-003: custom post-filter class ----
+
+    @Test
+    void batchReadCustomPostFilter() {
+        // Publish 25 "keep-" messages and 25 "drop-" messages
+        publishMessages(stream, 25, "keep-");
+        publishMessages(stream, 25, "drop-");
+
+        // Read with TestPostFilter which accepts only messages starting with "keep-"
+        Dataset<Row> df = spark.read()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("startingOffsets", "earliest")
+                .option("filterPostFilterClass",
+                        "com.rabbitmq.spark.connector.TestPostFilter")
+                .option("pollTimeoutMs", "500")
+                .option("maxWaitMs", "10000")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load();
+
+        List<Row> rows = df.collectAsList();
+        assertThat(rows).hasSize(25);
+
+        List<String> values = rows.stream()
+                .map(row -> new String((byte[]) row.getAs("value")))
+                .toList();
+        assertThat(values).allMatch(v -> v.startsWith("keep-"));
+    }
+
+    // ---- IT-OPT-002: uris option instead of endpoints ----
+
+    @Test
+    void batchReadWithUrisInsteadOfEndpoints() {
+        publishMessages(stream, 20);
+
+        String uri = "rabbitmq-stream://guest:guest@" + RABBIT.getHost() + ":"
+                + RABBIT.getMappedPort(STREAM_PORT);
+
+        Dataset<Row> df = spark.read()
+                .format("rabbitmq_streams")
+                .option("uris", uri)
+                .option("stream", stream)
+                .option("startingOffsets", "earliest")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load();
+
+        List<Row> rows = df.collectAsList();
+        assertThat(rows).hasSize(20);
+    }
+
+    // ---- IT-OPT-004a: wrong password fails fast ----
+
+    @Test
+    void batchReadWithWrongPasswordFailsFast() {
+        publishMessages(stream, 5);
+
+        Dataset<Row> df = spark.read()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("username", "guest")
+                .option("password", "wrong-password")
+                .option("startingOffsets", "earliest")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load();
+
+        assertThatThrownBy(df::collectAsList)
+                .satisfies(ex -> assertThat(ex.toString())
+                        .containsIgnoringCase("authentication"));
+    }
+
+    // ---- IT-OPT-004b: wrong vhost fails fast ----
+
+    @Test
+    void batchReadWithWrongVhostFailsFast() {
+        publishMessages(stream, 5);
+
+        Dataset<Row> df = spark.read()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("vhost", "/nonexistent-vhost")
+                .option("startingOffsets", "earliest")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load();
+
+        assertThatThrownBy(df::collectAsList)
+                .satisfies(ex -> assertThat(ex.toString())
+                        .containsAnyOf("VIRTUAL_HOST", "virtual host", "access refused"));
+    }
+
+    // ---- IT-OPT-005: metadata field subsets ----
+
+    @Test
+    void batchReadMetadataFieldSubsets() {
+        publishMessages(stream, 5);
+
+        String[] fixedCols = {"value", "stream", "offset", "chunk_timestamp"};
+
+        // properties only
+        Dataset<Row> df1 = spark.read()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("startingOffsets", "earliest")
+                .option("metadataFields", "properties")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load();
+        assertThat(df1.schema().fieldNames()).containsExactly(
+                "value", "stream", "offset", "chunk_timestamp", "properties");
+        assertThat(df1.collectAsList()).hasSize(5);
+
+        // application_properties only
+        Dataset<Row> df2 = spark.read()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("startingOffsets", "earliest")
+                .option("metadataFields", "application_properties")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load();
+        assertThat(df2.schema().fieldNames()).containsExactly(
+                "value", "stream", "offset", "chunk_timestamp", "application_properties");
+        assertThat(df2.collectAsList()).hasSize(5);
+
+        // creation_time only
+        Dataset<Row> df3 = spark.read()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("startingOffsets", "earliest")
+                .option("metadataFields", "creation_time")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load();
+        assertThat(df3.schema().fieldNames()).containsExactly(
+                "value", "stream", "offset", "chunk_timestamp", "creation_time");
+        assertThat(df3.collectAsList()).hasSize(5);
+
+        // routing_key,message_annotations
+        Dataset<Row> df4 = spark.read()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("startingOffsets", "earliest")
+                .option("metadataFields", "routing_key,message_annotations")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load();
+        List<String> fieldNames = Arrays.asList(df4.schema().fieldNames());
+        assertThat(fieldNames).containsAll(Arrays.asList(fixedCols));
+        assertThat(fieldNames).contains("message_annotations", "routing_key");
+        assertThat(fieldNames).hasSize(6); // 4 fixed + 2 metadata
+        assertThat(df4.collectAsList()).hasSize(5);
+    }
+
+    // ---- IT-OPT-006-source: invalid option combinations ----
+
+    @Test
+    void batchReadInvalidOptionCombinations() {
+        publishMessages(stream, 5);
+
+        // 1. Both stream and superstream set
+        assertThatThrownBy(() ->
+                spark.read()
+                        .format("rabbitmq_streams")
+                        .option("endpoints", streamEndpoint())
+                        .option("stream", stream)
+                        .option("superstream", "some-super")
+                        .option("startingOffsets", "earliest")
+                        .option("addressResolverClass",
+                                "com.rabbitmq.spark.connector.TestAddressResolver")
+                        .load()
+                        .collectAsList()
+        ).hasMessageContaining("both");
+
+        // 2. Neither endpoints nor uris set
+        assertThatThrownBy(() ->
+                spark.read()
+                        .format("rabbitmq_streams")
+                        .option("stream", stream)
+                        .option("startingOffsets", "earliest")
+                        .option("addressResolverClass",
+                                "com.rabbitmq.spark.connector.TestAddressResolver")
+                        .load()
+                        .collectAsList()
+        ).satisfies(ex -> {
+            assertThat(ex.getMessage()).contains("endpoints");
+            assertThat(ex.getMessage()).contains("uris");
+        });
+
+        // 3. startingOffsets=offset without startingOffset
+        assertThatThrownBy(() ->
+                spark.read()
+                        .format("rabbitmq_streams")
+                        .option("endpoints", streamEndpoint())
+                        .option("stream", stream)
+                        .option("startingOffsets", "offset")
+                        .option("addressResolverClass",
+                                "com.rabbitmq.spark.connector.TestAddressResolver")
+                        .load()
+                        .collectAsList()
+        ).satisfies(ex -> {
+            assertThat(ex.getMessage()).contains("startingOffset");
+            assertThat(ex.getMessage()).contains("required");
+        });
     }
 }
