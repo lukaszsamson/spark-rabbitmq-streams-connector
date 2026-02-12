@@ -19,6 +19,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -84,6 +85,44 @@ class SuperStreamIT extends AbstractRabbitMQIT {
         for (int p = 0; p < PARTITION_COUNT; p++) {
             assertThat(streams).contains(superStream + "-" + p);
         }
+    }
+
+    @Test
+    void batchReadNonExistentSuperStreamFailsFast() {
+        String missing = "missing-super-" + System.currentTimeMillis();
+
+        Dataset<Row> df = spark.read()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("superstream", missing)
+                .option("startingOffsets", "earliest")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load();
+
+        assertThatThrownBy(df::collectAsList)
+                .satisfies(ex -> {
+                    assertThat(ex).isInstanceOfAny(IllegalStateException.class, SparkException.class);
+
+                    boolean foundPartitionMissingCause = false;
+                    Throwable cursor = ex;
+                    while (cursor != null) {
+                        String message = cursor.getMessage();
+                        if (message != null) {
+                            String normalized = message.toLowerCase(Locale.ROOT);
+                            if (normalized.contains("superstream") && normalized.contains("partition")) {
+                                foundPartitionMissingCause = true;
+                                break;
+                            }
+                        }
+                        cursor = cursor.getCause();
+                    }
+
+                    assertThat(foundPartitionMissingCause)
+                            .as("exception chain should mention missing superstream partitions")
+                            .isTrue();
+                });
     }
 
     @Test

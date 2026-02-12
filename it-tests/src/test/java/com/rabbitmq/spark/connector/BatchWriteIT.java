@@ -15,6 +15,7 @@ import org.junit.jupiter.api.Test;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Locale;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -161,6 +162,29 @@ class BatchWriteIT extends AbstractRabbitMQIT {
                                 "com.rabbitmq.spark.connector.TestAddressResolver")
                         .save()
         ).isInstanceOf(SparkException.class);
+    }
+
+    @Test
+    void batchWriteWithWrongPasswordFailsFast() {
+        StructType schema = new StructType()
+                .add("value", DataTypes.BinaryType, false);
+
+        List<Row> data = List.of(RowFactory.create("bad-pass".getBytes()));
+        Dataset<Row> df = spark.createDataFrame(data, schema);
+
+        assertThatThrownBy(() ->
+                df.write()
+                        .format("rabbitmq_streams")
+                        .mode("append")
+                        .option("endpoints", streamEndpoint())
+                        .option("stream", stream)
+                        .option("username", "guest")
+                        .option("password", "wrong-password")
+                        .option("addressResolverClass",
+                                "com.rabbitmq.spark.connector.TestAddressResolver")
+                        .save()
+        ).satisfies(ex -> assertThat(ex.toString())
+                .containsIgnoringCase("authentication"));
     }
 
     // ---- IT-SINK-003: low maxInFlight doesn't deadlock ----
@@ -401,6 +425,49 @@ class BatchWriteIT extends AbstractRabbitMQIT {
         ).satisfies(ex -> {
             assertThat(ex.getMessage()).containsIgnoringCase("partitionerClass");
             assertThat(ex.getMessage()).containsIgnoringCase("required");
+        });
+    }
+
+    @Test
+    void batchWriteToNonExistentSuperStreamFails() {
+        StructType schema = new StructType()
+                .add("value", DataTypes.BinaryType, false)
+                .add("routing_key", DataTypes.StringType, true);
+
+        List<Row> data = List.of(RowFactory.create("ss-miss".getBytes(), "rk"));
+        Dataset<Row> df = spark.createDataFrame(data, schema);
+
+        assertThatThrownBy(() ->
+                df.write()
+                        .format("rabbitmq_streams")
+                        .mode("append")
+                        .option("endpoints", streamEndpoint())
+                        .option("superstream", "missing-superstream-" + System.currentTimeMillis())
+                        .option("routingStrategy", "hash")
+                        .option("addressResolverClass",
+                                "com.rabbitmq.spark.connector.TestAddressResolver")
+                        .save()
+        ).satisfies(ex -> {
+            assertThat(ex).isInstanceOfAny(SparkException.class, IllegalArgumentException.class);
+
+            boolean foundMissingPartitionCause = false;
+            Throwable cursor = ex;
+            while (cursor != null) {
+                String message = cursor.getMessage();
+                if (message != null) {
+                    String normalized = message.toLowerCase(Locale.ROOT);
+                    if (normalized.contains("super stream")
+                            && normalized.contains("partition")) {
+                        foundMissingPartitionCause = true;
+                        break;
+                    }
+                }
+                cursor = cursor.getCause();
+            }
+
+            assertThat(foundMissingPartitionCause)
+                    .as("exception chain should mention missing super stream partitions")
+                    .isTrue();
         });
     }
 

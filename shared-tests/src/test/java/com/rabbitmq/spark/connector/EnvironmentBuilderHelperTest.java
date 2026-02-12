@@ -69,6 +69,26 @@ class EnvironmentBuilderHelperTest {
     }
 
     @Test
+    void configureCredentialsSetsUsernamePasswordVhost() throws Exception {
+        ConnectorOptions options = new ConnectorOptions(Map.of(
+                "endpoints", "hostA",
+                "stream", "test-stream",
+                "username", "user1",
+                "password", "pass1",
+                "vhost", "/v1"
+        ));
+
+        StreamEnvironmentBuilder builder = new StreamEnvironmentBuilder();
+        invokeConfigureCredentials(builder, options);
+
+        Object clientParameters = getClientParameters(builder);
+        Object credentialsProvider = getFieldValue(clientParameters, "credentialsProvider");
+        assertThat(invokeStringGetter(credentialsProvider, "getUsername")).isEqualTo("user1");
+        assertThat(invokeStringGetter(credentialsProvider, "getPassword")).isEqualTo("pass1");
+        assertThat(getFieldValue(clientParameters, "virtualHost")).isEqualTo("/v1");
+    }
+
+    @Test
     void tlsTrustAllConfiguresSslWithoutJks() throws Exception {
         ConnectorOptions options = new ConnectorOptions(Map.of(
                 "endpoints", "hostA",
@@ -97,6 +117,7 @@ class EnvironmentBuilderHelperTest {
 
         assertThatThrownBy(() -> invokeBuildSslContext(options))
                 .hasCauseInstanceOf(IllegalArgumentException.class)
+                .cause()
                 .hasMessageContaining("Failed to initialize TLS JKS configuration");
     }
 
@@ -145,6 +166,16 @@ class EnvironmentBuilderHelperTest {
         method.invoke(null, builder, options);
     }
 
+    private static void invokeConfigureCredentials(StreamEnvironmentBuilder builder,
+                                                   ConnectorOptions options) throws Exception {
+        Method method = EnvironmentBuilderHelper.class.getDeclaredMethod(
+                "configureCredentials",
+                com.rabbitmq.stream.EnvironmentBuilder.class,
+                ConnectorOptions.class);
+        method.setAccessible(true);
+        method.invoke(null, builder, options);
+    }
+
     private static void invokeConfigureAddressResolver(StreamEnvironmentBuilder builder,
                                                        ConnectorOptions options) throws Exception {
         Method method = EnvironmentBuilderHelper.class.getDeclaredMethod(
@@ -175,6 +206,30 @@ class EnvironmentBuilderHelperTest {
         Field tlsField = StreamEnvironmentBuilder.class.getDeclaredField("tls");
         tlsField.setAccessible(true);
         return tlsField.get(builder);
+    }
+
+    private static Object getClientParameters(StreamEnvironmentBuilder builder) throws Exception {
+        return getFieldValue(builder, "clientParameters");
+    }
+
+    private static Object getFieldValue(Object target, String fieldName) throws Exception {
+        Class<?> current = target.getClass();
+        while (current != null) {
+            try {
+                Field field = current.getDeclaredField(fieldName);
+                field.setAccessible(true);
+                return field.get(target);
+            } catch (NoSuchFieldException ignored) {
+                current = current.getSuperclass();
+            }
+        }
+        throw new NoSuchFieldException(fieldName);
+    }
+
+    private static String invokeStringGetter(Object target, String methodName) throws Exception {
+        Method method = target.getClass().getDeclaredMethod(methodName);
+        method.setAccessible(true);
+        return (String) method.invoke(target);
     }
 
     private static boolean getTlsEnabled(Object tlsConfig) throws Exception {

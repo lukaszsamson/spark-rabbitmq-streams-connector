@@ -321,6 +321,58 @@ class MessageToRowConverterTest {
             // Routing key (index 8)
             assertThat(row.getUTF8String(8)).isEqualTo(UTF8String.fromString("rk1"));
         }
+
+        @Test
+        void convertPlacesFieldsAtCorrectArrayIndices() {
+            var converter = new MessageToRowConverter(MetadataField.ALL);
+            Message msg = mockMessage("body".getBytes());
+            Properties props = mock(Properties.class);
+            when(props.getMessageId()).thenReturn("msg-id");
+            when(props.getUserId()).thenReturn("uid".getBytes());
+            when(props.getTo()).thenReturn("to-addr");
+            when(props.getSubject()).thenReturn("subject");
+            when(props.getReplyTo()).thenReturn("reply");
+            when(props.getCorrelationId()).thenReturn("corr");
+            when(props.getContentType()).thenReturn("text/plain");
+            when(props.getContentEncoding()).thenReturn("utf-8");
+            when(props.getAbsoluteExpiryTime()).thenReturn(1700000200000L);
+            when(props.getCreationTime()).thenReturn(1700000100000L);
+            when(props.getGroupId()).thenReturn("group");
+            when(props.getGroupSequence()).thenReturn(99L);
+            when(props.getReplyToGroupId()).thenReturn("reply-group");
+            when(msg.getProperties()).thenReturn(props);
+            when(msg.getApplicationProperties()).thenReturn(Map.of("app", "val", "routing_key", "rk1"));
+            when(msg.getMessageAnnotations()).thenReturn(Map.of("ann", "v1"));
+
+            InternalRow row = converter.convert(msg, "stream-x", 42L, CHUNK_TS_MILLIS);
+
+            assertThat(row.getBinary(0)).isEqualTo("body".getBytes());
+            assertThat(row.getUTF8String(1)).isEqualTo(UTF8String.fromString("stream-x"));
+            assertThat(row.getLong(2)).isEqualTo(42L);
+            assertThat(row.getLong(3)).isEqualTo(CHUNK_TS_MICROS);
+
+            InternalRow propsRow = row.getStruct(4, 13);
+            assertThat(propsRow.getUTF8String(0)).isEqualTo(UTF8String.fromString("msg-id"));
+            assertThat(propsRow.getBinary(1)).isEqualTo("uid".getBytes());
+            assertThat(propsRow.getUTF8String(2)).isEqualTo(UTF8String.fromString("to-addr"));
+            assertThat(propsRow.getUTF8String(3)).isEqualTo(UTF8String.fromString("subject"));
+            assertThat(propsRow.getUTF8String(4)).isEqualTo(UTF8String.fromString("reply"));
+            assertThat(propsRow.getUTF8String(5)).isEqualTo(UTF8String.fromString("corr"));
+            assertThat(propsRow.getUTF8String(6)).isEqualTo(UTF8String.fromString("text/plain"));
+            assertThat(propsRow.getUTF8String(7)).isEqualTo(UTF8String.fromString("utf-8"));
+            assertThat(propsRow.getLong(8)).isEqualTo(1700000200000L * 1000L);
+            assertThat(propsRow.getLong(9)).isEqualTo(1700000100000L * 1000L);
+            assertThat(propsRow.getUTF8String(10)).isEqualTo(UTF8String.fromString("group"));
+            assertThat(propsRow.getLong(11)).isEqualTo(99L);
+            assertThat(propsRow.getUTF8String(12)).isEqualTo(UTF8String.fromString("reply-group"));
+
+            ArrayBasedMapData appProps = (ArrayBasedMapData) row.getMap(5);
+            assertThat(appProps.numElements()).isEqualTo(2);
+            ArrayBasedMapData annotations = (ArrayBasedMapData) row.getMap(6);
+            assertThat(annotations.numElements()).isEqualTo(1);
+            assertThat(row.getLong(7)).isEqualTo(1700000100000L * 1000L);
+            assertThat(row.getUTF8String(8)).isEqualTo(UTF8String.fromString("rk1"));
+        }
     }
 
     // ========================================================================

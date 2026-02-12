@@ -132,6 +132,35 @@ class StoredOffsetLookupTest {
         }
 
         @Test
+        void hasFailuresReturnsTrueWhenAnyStreamFailed() {
+            Environment env = new LocatorEnvironment(Map.of(
+                    "s1", LocatorResponse.ok(41L),
+                    "s2", LocatorResponse.error((short) 3)
+            ));
+
+            StoredOffsetLookup.LookupResult result =
+                    StoredOffsetLookup.lookupWithDetails(env, "c", java.util.List.of("s1", "s2"));
+
+            assertThat(result.getOffsets()).containsEntry("s1", 42L);
+            assertThat(result.getFailedStreams()).containsExactly("s2");
+            assertThat(result.hasFailures()).isTrue();
+        }
+
+        @Test
+        void lookupWithDetailsReportsFailuresInMessage() {
+            Environment env = new LocatorEnvironment(Map.of(
+                    "s1", LocatorResponse.ok(1L),
+                    "s2", LocatorResponse.error((short) 3)
+            ));
+
+            StoredOffsetLookup.LookupResult result =
+                    StoredOffsetLookup.lookupWithDetails(env, "c", java.util.List.of("s1", "s2"));
+
+            assertThat(result.getOffsets()).containsEntry("s1", 2L);
+            assertThat(result.getFailedStreams()).containsExactly("s2");
+        }
+
+        @Test
         void fallbackToConsumerLookupWhenLocatorUnavailable() {
             Environment env = new EnvironmentWithConsumer(7L);
             StoredOffsetLookup.LookupResult result =

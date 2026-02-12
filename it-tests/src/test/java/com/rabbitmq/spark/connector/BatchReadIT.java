@@ -597,6 +597,26 @@ class BatchReadIT extends AbstractRabbitMQIT {
                 .hasMessageContaining("target end offset");
     }
 
+    @Test
+    void batchReadAfterStreamDeletionFailsToCloseReader() {
+        publishMessages(stream, 20);
+
+        Dataset<Row> df = spark.read()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("startingOffsets", "earliest")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load();
+
+        deleteStream(stream);
+
+        assertThatThrownBy(df::collectAsList)
+                .hasMessageContaining("does not exist");
+    }
+
     // ---- IT-FILTER-001: broker-side filter with filterValues ----
 
     @Test

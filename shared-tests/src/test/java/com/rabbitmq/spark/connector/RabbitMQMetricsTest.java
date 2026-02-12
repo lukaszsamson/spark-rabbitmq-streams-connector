@@ -45,4 +45,11 @@ class RabbitMQMetricsTest {
 
         assertThat(names).hasSize(RabbitMQSourceMetrics.SUPPORTED_METRICS.length);
     }
+
+    @Test
+    void sourceTaskMetricReturnsNameAndValue() {
+        var metric = RabbitMQSourceMetrics.taskMetric("recordsRead", 42L);
+        assertThat(metric.name()).isEqualTo("recordsRead");
+        assertThat(metric.value()).isEqualTo(42L);
+    }
 }

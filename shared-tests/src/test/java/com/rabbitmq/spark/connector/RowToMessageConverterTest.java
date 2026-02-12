@@ -64,6 +64,52 @@ class RowToMessageConverterTest {
         });
     }
 
+    private static StructType schemaWithPropertiesFirst(StructType propertiesStruct) {
+        return new StructType(new StructField[]{
+                new StructField("properties", propertiesStruct, true, Metadata.empty()),
+                new StructField("value", DataTypes.BinaryType, false, Metadata.empty()),
+        });
+    }
+
+    private static StructType schemaWithRoutingKeyFirst() {
+        return new StructType(new StructField[]{
+                new StructField("routing_key", DataTypes.StringType, true, Metadata.empty()),
+                new StructField("value", DataTypes.BinaryType, false, Metadata.empty()),
+        });
+    }
+
+    private static StructType schemaWithStreamFirst() {
+        return new StructType(new StructField[]{
+                new StructField("stream", DataTypes.StringType, true, Metadata.empty()),
+                new StructField("value", DataTypes.BinaryType, false, Metadata.empty()),
+        });
+    }
+
+    private static StructType schemaWithCreationTimeFirst() {
+        return new StructType(new StructField[]{
+                new StructField("creation_time", DataTypes.TimestampType, true, Metadata.empty()),
+                new StructField("value", DataTypes.BinaryType, false, Metadata.empty()),
+        });
+    }
+
+    private static StructType schemaWithAppPropertiesFirst() {
+        return new StructType(new StructField[]{
+                new StructField("application_properties",
+                        DataTypes.createMapType(DataTypes.StringType, DataTypes.StringType),
+                        true, Metadata.empty()),
+                new StructField("value", DataTypes.BinaryType, false, Metadata.empty()),
+        });
+    }
+
+    private static StructType schemaWithMsgAnnotationsFirst() {
+        return new StructType(new StructField[]{
+                new StructField("message_annotations",
+                        DataTypes.createMapType(DataTypes.StringType, DataTypes.StringType),
+                        true, Metadata.empty()),
+                new StructField("value", DataTypes.BinaryType, false, Metadata.empty()),
+        });
+    }
+
     private static StructType schemaWithAppProperties() {
         return new StructType(new StructField[]{
                 new StructField("value", DataTypes.BinaryType, false, Metadata.empty()),
@@ -129,6 +175,17 @@ class RowToMessageConverterTest {
         }
 
         @Test
+        void extractsStreamNameAtIndexZero() {
+            var converter = new RowToMessageConverter(schemaWithStreamFirst());
+            InternalRow row = new GenericInternalRow(new Object[]{
+                    UTF8String.fromString("zero-stream"),
+                    "body".getBytes()
+            });
+
+            assertThat(converter.getStream(row)).isEqualTo("zero-stream");
+        }
+
+        @Test
         void streamNullWhenAbsent() {
             var converter = new RowToMessageConverter(valueOnlySchema());
             InternalRow row = new GenericInternalRow(new Object[]{"body".getBytes()});
@@ -153,6 +210,19 @@ class RowToMessageConverterTest {
             });
 
             assertThat(converter.getRoutingKey(row)).isEqualTo("my-key");
+        }
+
+        @Test
+        void extractsRoutingKeyAtIndexZero() {
+            var converter = new RowToMessageConverter(schemaWithRoutingKeyFirst());
+            InternalRow row = new GenericInternalRow(new Object[]{
+                    UTF8String.fromString("rk-zero"),
+                    "body".getBytes()
+            });
+
+            assertThat(converter.getRoutingKey(row)).isEqualTo("rk-zero");
+            Message msg = converter.convert(row, CODEC.messageBuilder());
+            assertThat(msg.getApplicationProperties()).containsEntry("routing_key", "rk-zero");
         }
 
         @Test
@@ -223,6 +293,18 @@ class RowToMessageConverterTest {
         }
 
         @Test
+        void setsCreationTimeWhenFieldIsFirst() {
+            var converter = new RowToMessageConverter(schemaWithCreationTimeFirst());
+            long micros = 1700000200000L * 1000L;
+            InternalRow row = new GenericInternalRow(new Object[]{
+                    micros, "body".getBytes()
+            });
+
+            Message msg = converter.convert(row, CODEC.messageBuilder());
+            assertThat(msg.getProperties().getCreationTime()).isEqualTo(1700000200000L);
+        }
+
+        @Test
         void nullCreationTimeSkipsProperty() {
             var converter = new RowToMessageConverter(schemaWithCreationTime());
             InternalRow row = new GenericInternalRow(new Object[]{"body".getBytes(), null});
@@ -281,6 +363,50 @@ class RowToMessageConverterTest {
             assertThat(p.getGroupId()).isEqualTo("g1");
             assertThat(p.getGroupSequence()).isEqualTo(7L);
             assertThat(p.getReplyToGroupId()).isEqualTo("rg1");
+        }
+
+        @Test
+        void convertsPropertiesWhenStructIsFirst() {
+            StructType schema = schemaWithPropertiesFirst(RabbitMQStreamTable.PROPERTIES_STRUCT);
+            var converter = new RowToMessageConverter(schema);
+            InternalRow propsRow = new GenericInternalRow(new Object[]{
+                    UTF8String.fromString("id-zero"),
+                    null, null, null, null, null, null, null, null, null, null, null, null
+            });
+            InternalRow row = new GenericInternalRow(new Object[]{propsRow, "body".getBytes()});
+
+            Message msg = converter.convert(row, CODEC.messageBuilder());
+            assertThat(msg.getProperties().getMessageIdAsString()).isEqualTo("id-zero");
+        }
+
+        @Test
+        void propertiesFieldsAtIndexZeroAreApplied() {
+            assertSinglePropertyApplied("message_id", UTF8String.fromString("m-1"),
+                    msg -> msg.getProperties().getMessageIdAsString());
+            assertSinglePropertyApplied("user_id", "uid".getBytes(),
+                    msg -> msg.getProperties().getUserId());
+            assertSinglePropertyApplied("to", UTF8String.fromString("to-addr"),
+                    msg -> msg.getProperties().getTo());
+            assertSinglePropertyApplied("subject", UTF8String.fromString("subj"),
+                    msg -> msg.getProperties().getSubject());
+            assertSinglePropertyApplied("reply_to", UTF8String.fromString("reply-to"),
+                    msg -> msg.getProperties().getReplyTo());
+            assertSinglePropertyApplied("correlation_id", UTF8String.fromString("corr"),
+                    msg -> msg.getProperties().getCorrelationIdAsString());
+            assertSinglePropertyApplied("content_type", UTF8String.fromString("text/plain"),
+                    msg -> msg.getProperties().getContentType());
+            assertSinglePropertyApplied("content_encoding", UTF8String.fromString("gzip"),
+                    msg -> msg.getProperties().getContentEncoding());
+            assertSinglePropertyApplied("absolute_expiry_time", 1700000300000L * 1000L,
+                    msg -> msg.getProperties().getAbsoluteExpiryTime());
+            assertSinglePropertyApplied("creation_time", 1700000400000L * 1000L,
+                    msg -> msg.getProperties().getCreationTime());
+            assertSinglePropertyApplied("group_id", UTF8String.fromString("g1"),
+                    msg -> msg.getProperties().getGroupId());
+            assertSinglePropertyApplied("group_sequence", 9L,
+                    msg -> msg.getProperties().getGroupSequence());
+            assertSinglePropertyApplied("reply_to_group_id", UTF8String.fromString("rg1"),
+                    msg -> msg.getProperties().getReplyToGroupId());
         }
 
         @Test
@@ -391,6 +517,16 @@ class RowToMessageConverterTest {
         }
 
         @Test
+        void convertsApplicationPropertiesAtIndexZero() {
+            var converter = new RowToMessageConverter(schemaWithAppPropertiesFirst());
+            var mapData = createStringMap("k1", "v1");
+            InternalRow row = new GenericInternalRow(new Object[]{mapData, "body".getBytes()});
+
+            Message msg = converter.convert(row, CODEC.messageBuilder());
+            assertThat(msg.getApplicationProperties()).containsEntry("k1", "v1");
+        }
+
+        @Test
         void convertsMessageAnnotations() {
             var converter = new RowToMessageConverter(schemaWithMsgAnnotations());
             var mapData = createStringMap("ann1", "val1");
@@ -402,6 +538,16 @@ class RowToMessageConverterTest {
             Map<String, Object> annotations = msg.getMessageAnnotations();
             assertThat(annotations).hasSize(1);
             assertThat(annotations.get("ann1")).hasToString("val1");
+        }
+
+        @Test
+        void convertsMessageAnnotationsAtIndexZero() {
+            var converter = new RowToMessageConverter(schemaWithMsgAnnotationsFirst());
+            var mapData = createStringMap("ann1", "val1");
+            InternalRow row = new GenericInternalRow(new Object[]{mapData, "body".getBytes()});
+
+            Message msg = converter.convert(row, CODEC.messageBuilder());
+            assertThat(msg.getMessageAnnotations()).containsEntry("ann1", "val1");
         }
 
         @Test
@@ -458,5 +604,35 @@ class RowToMessageConverterTest {
         return new ArrayBasedMapData(
                 new GenericArrayData(keys),
                 new GenericArrayData(values));
+    }
+
+    private static void assertSinglePropertyApplied(
+            String fieldName,
+            Object value,
+            java.util.function.Function<Message, Object> extractor) {
+        StructType propsStruct = new StructType(new StructField[]{
+                new StructField(fieldName,
+                        value instanceof byte[] ? DataTypes.BinaryType
+                                : (value instanceof Long ? DataTypes.LongType : DataTypes.StringType),
+                        true,
+                        Metadata.empty())
+        });
+        StructType schema = schemaWithPropertiesFirst(propsStruct);
+        var converter = new RowToMessageConverter(schema);
+        InternalRow propsRow = new GenericInternalRow(new Object[]{value});
+        InternalRow row = new GenericInternalRow(new Object[]{propsRow, "body".getBytes()});
+
+        Message msg = converter.convert(row, CODEC.messageBuilder());
+        Object extracted = extractor.apply(msg);
+        if ("absolute_expiry_time".equals(fieldName) || "creation_time".equals(fieldName)) {
+            long expectedMillis = (long) value / 1000L;
+            assertThat(extracted).isEqualTo(expectedMillis);
+        } else if (value instanceof UTF8String) {
+            assertThat(extracted).isEqualTo(((UTF8String) value).toString());
+        } else if (value instanceof byte[]) {
+            assertThat(extracted).isEqualTo(value);
+        } else {
+            assertThat(extracted).isEqualTo(value);
+        }
     }
 }

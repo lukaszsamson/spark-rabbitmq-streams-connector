@@ -140,6 +140,16 @@ class RabbitMQStreamTableProviderTest {
         }
 
         @Test
+        void tableExposesParsedOptions() {
+            Table table = provider.getTable(null, new Transform[]{}, minimalOptions());
+            RabbitMQStreamTable streamTable = (RabbitMQStreamTable) table;
+            ConnectorOptions opts = streamTable.getOptions();
+
+            assertThat(opts.getStream()).isEqualTo("test-stream");
+            assertThat(opts.getEndpoints()).isEqualTo("localhost:5552");
+        }
+
+        @Test
         void tableSchemaPropertiesStruct() {
             Table table = provider.getTable(null, new Transform[]{}, minimalOptions());
             StructType schema = table.schema();

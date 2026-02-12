@@ -110,6 +110,30 @@ class RabbitMQPartitionReaderTest {
         }
 
         @Test
+        void nextEmitsMessageAtOffsetZero() throws Exception {
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 0, 2, minimalOptions());
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
+
+            BlockingQueue<RabbitMQPartitionReader.QueuedMessage> queue = new LinkedBlockingQueue<>();
+            queue.add(new RabbitMQPartitionReader.QueuedMessage(
+                    CODEC.messageBuilder().addData("a".getBytes()).build(),
+                    0L, 0L, new NoopContext()));
+            queue.add(new RabbitMQPartitionReader.QueuedMessage(
+                    CODEC.messageBuilder().addData("b".getBytes()).build(),
+                    1L, 0L, new NoopContext()));
+
+            setPrivateField(reader, "queue", queue);
+            setPrivateField(reader, "consumer", new NoopConsumer());
+
+            assertThat(reader.next()).isTrue();
+            assertThat(reader.get().getLong(2)).isEqualTo(0L);
+            assertThat(reader.next()).isTrue();
+            assertThat(reader.get().getLong(2)).isEqualTo(1L);
+            assertThat(reader.next()).isFalse();
+        }
+
+        @Test
         void nextTimeoutMessageIncludesOffsets() throws Exception {
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
@@ -131,9 +155,29 @@ class RabbitMQPartitionReaderTest {
         }
 
         @Test
+        void nextTimesOutAtExactMaxWaitMs() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("pollTimeoutMs", "5");
+            opts.put("maxWaitMs", "5");
+
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 0, 10, new ConnectorOptions(opts));
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
+
+            setPrivateField(reader, "consumer", new NoopConsumer());
+            setPrivateField(reader, "queue", new LinkedBlockingQueue<>());
+
+            assertThatThrownBy(reader::next)
+                    .isInstanceOf(IOException.class)
+                    .hasMessageContaining("Timed out waiting for messages");
+        }
+
+        @Test
         void nextDedupSkipsDuplicateOffsets() throws Exception {
             RabbitMQInputPartition partition = new RabbitMQInputPartition(
-                    "test-stream", 0, 10, minimalOptions());
+                    "test-stream", 0, 3, minimalOptions());
             RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
 
             BlockingQueue<RabbitMQPartitionReader.QueuedMessage> queue = new LinkedBlockingQueue<>();
@@ -158,7 +202,7 @@ class RabbitMQPartitionReaderTest {
         @Test
         void nextSkipsMessagesBelowStartOffset() throws Exception {
             RabbitMQInputPartition partition = new RabbitMQInputPartition(
-                    "test-stream", 5, 10, minimalOptions());
+                    "test-stream", 5, 6, minimalOptions());
             RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
 
             BlockingQueue<RabbitMQPartitionReader.QueuedMessage> queue = new LinkedBlockingQueue<>();
@@ -198,6 +242,51 @@ class RabbitMQPartitionReaderTest {
         }
 
         @Test
+        void nextStopsAtExactEndOffset() throws Exception {
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 3, 5, minimalOptions());
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
+
+            BlockingQueue<RabbitMQPartitionReader.QueuedMessage> queue = new LinkedBlockingQueue<>();
+            queue.add(new RabbitMQPartitionReader.QueuedMessage(
+                    CODEC.messageBuilder().addData("a".getBytes()).build(),
+                    3L, 0L, new NoopContext()));
+            queue.add(new RabbitMQPartitionReader.QueuedMessage(
+                    CODEC.messageBuilder().addData("b".getBytes()).build(),
+                    4L, 0L, new NoopContext()));
+            queue.add(new RabbitMQPartitionReader.QueuedMessage(
+                    CODEC.messageBuilder().addData("c".getBytes()).build(),
+                    5L, 0L, new NoopContext()));
+
+            setPrivateField(reader, "queue", queue);
+            setPrivateField(reader, "consumer", new NoopConsumer());
+
+            assertThat(reader.next()).isTrue();
+            assertThat(reader.get().getLong(2)).isEqualTo(3L);
+            assertThat(reader.next()).isTrue();
+            assertThat(reader.get().getLong(2)).isEqualTo(4L);
+            assertThat(reader.next()).isFalse();
+        }
+
+        @Test
+        void nextStopsWhenEndOffsetEqualsOne() throws Exception {
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 0, 1, minimalOptions());
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
+
+            BlockingQueue<RabbitMQPartitionReader.QueuedMessage> queue = new LinkedBlockingQueue<>();
+            queue.add(new RabbitMQPartitionReader.QueuedMessage(
+                    CODEC.messageBuilder().addData("a".getBytes()).build(),
+                    0L, 0L, new NoopContext()));
+
+            setPrivateField(reader, "queue", queue);
+            setPrivateField(reader, "consumer", new NoopConsumer());
+
+            assertThat(reader.next()).isTrue();
+            assertThat(reader.next()).isFalse();
+        }
+
+        @Test
         void nextAppliesPostFilterWithWarningToggle() throws Exception {
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
@@ -205,7 +294,7 @@ class RabbitMQPartitionReaderTest {
             opts.put("filterWarningOnMismatch", "false");
 
             RabbitMQInputPartition partition = new RabbitMQInputPartition(
-                    "test-stream", 0, 10, new ConnectorOptions(opts));
+                    "test-stream", 0, 3, new ConnectorOptions(opts));
             RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
 
             setPrivateField(reader, "postFilter", new RejectAllPostFilter());
@@ -222,6 +311,36 @@ class RabbitMQPartitionReaderTest {
             setPrivateField(reader, "consumer", new NoopConsumer());
 
             assertThat(reader.next()).isFalse();
+        }
+
+        @Test
+        void nextTracksRecordsReadAndBytesRead() throws Exception {
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 0, 4, minimalOptions());
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
+
+            BlockingQueue<RabbitMQPartitionReader.QueuedMessage> queue = new SlowQueue<>(5);
+            queue.add(new RabbitMQPartitionReader.QueuedMessage(
+                    CODEC.messageBuilder().addData("a".getBytes()).build(),
+                    0L, 0L, new NoopContext()));
+            queue.add(new RabbitMQPartitionReader.QueuedMessage(
+                    CODEC.messageBuilder().addData("bb".getBytes()).build(),
+                    1L, 0L, new NoopContext()));
+            queue.add(new RabbitMQPartitionReader.QueuedMessage(
+                    CODEC.messageBuilder().addData("ccc".getBytes()).build(),
+                    2L, 0L, new NoopContext()));
+
+            setPrivateField(reader, "queue", queue);
+            setPrivateField(reader, "consumer", new NoopConsumer());
+
+            assertThat(reader.next()).isTrue();
+            assertThat(reader.next()).isTrue();
+            assertThat(reader.next()).isTrue();
+
+            var metrics = reader.currentMetricsValues();
+            assertThat(metrics[0].value()).isEqualTo(3L);
+            assertThat(metrics[1].value()).isEqualTo(6L);
+            assertThat(metrics[2].value()).isGreaterThan(0L);
         }
 
         @Test
@@ -557,6 +676,22 @@ class RabbitMQPartitionReaderTest {
         public T poll(long timeout, java.util.concurrent.TimeUnit unit)
                 throws InterruptedException {
             throw new InterruptedException("interrupt");
+        }
+    }
+
+    private static final class SlowQueue<T>
+            extends java.util.concurrent.LinkedBlockingQueue<T> {
+        private final long delayMs;
+
+        private SlowQueue(long delayMs) {
+            this.delayMs = delayMs;
+        }
+
+        @Override
+        public T poll(long timeout, java.util.concurrent.TimeUnit unit)
+                throws InterruptedException {
+            Thread.sleep(delayMs);
+            return super.poll(timeout, unit);
         }
     }
 }

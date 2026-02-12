@@ -200,6 +200,72 @@ class EnvironmentPoolTest {
         }
 
         @Test
+        void acquireIncrementsRefCount() throws Exception {
+            EnvironmentPool pool = EnvironmentPool.getInstance();
+            Map<String, String> map = minimalMap("localhost:5552", "test-stream");
+            map.put("environmentIdleTimeoutMs", "60000");
+            ConnectorOptions options = new ConnectorOptions(map);
+
+            EnvironmentPool.EnvironmentKey key = EnvironmentPool.EnvironmentKey.from(options);
+            CountingEnvironment env = new CountingEnvironment();
+            Object entry = newEntry(env);
+            putEntry(key, entry);
+
+            Environment first = pool.acquire(options);
+            assertThat(first).isSameAs(env);
+            assertThat(getRefCount(entry)).isEqualTo(2);
+
+            pool.release(options);
+            assertThat(getRefCount(entry)).isEqualTo(1);
+            assertThat((Object) getEvictionTask(entry)).isNull();
+        }
+
+        @Test
+        void acquireReusesExistingEnvironmentAtRefCountOne() throws Exception {
+            EnvironmentPool pool = EnvironmentPool.getInstance();
+            Map<String, String> map = minimalMap("localhost:5552", "test-stream");
+            map.put("environmentIdleTimeoutMs", "60000");
+            ConnectorOptions options = new ConnectorOptions(map);
+
+            EnvironmentPool.EnvironmentKey key = EnvironmentPool.EnvironmentKey.from(options);
+            CountingEnvironment env = new CountingEnvironment();
+            Object entry = newEntry(env);
+            putEntry(key, entry);
+
+            Environment first = pool.acquire(options);
+            assertThat(first).isSameAs(env);
+            assertThat(getRefCount(entry)).isEqualTo(2);
+
+            pool.release(options);
+            assertThat(getRefCount(entry)).isEqualTo(1);
+            assertThat((Object) getEvictionTask(entry)).isNull();
+        }
+
+        @Test
+        void evictionOnlyHappensWhenRefCountZero() throws Exception {
+            EnvironmentPool pool = EnvironmentPool.getInstance();
+            Map<String, String> map = minimalMap("localhost:5552", "test-stream");
+            map.put("environmentIdleTimeoutMs", "60000");
+            ConnectorOptions options = new ConnectorOptions(map);
+
+            EnvironmentPool.EnvironmentKey key = EnvironmentPool.EnvironmentKey.from(options);
+            CountingEnvironment env = new CountingEnvironment();
+            Object entry = newEntry(env);
+            putEntry(key, entry);
+
+            assertThat(getRefCount(entry)).isEqualTo(1);
+            invokeEvict(pool, EnvironmentPool.EnvironmentKey.from(options), entry);
+            assertThat(getPoolMap()).containsKey(EnvironmentPool.EnvironmentKey.from(options));
+
+            pool.release(options);
+            assertThat(getRefCount(entry)).isEqualTo(0);
+            assertThat((Object) getEvictionTask(entry)).isNotNull();
+
+            invokeEvict(pool, EnvironmentPool.EnvironmentKey.from(options), entry);
+            assertThat(getPoolMap()).doesNotContainKey(EnvironmentPool.EnvironmentKey.from(options));
+        }
+
+        @Test
         void doubleReleaseDoesNotGoNegative() throws Exception {
             EnvironmentPool pool = EnvironmentPool.getInstance();
             ConnectorOptions options = opts("localhost:5552", "test-stream");
@@ -218,7 +284,7 @@ class EnvironmentPoolTest {
         }
 
         @Test
-        void evictionScheduledAndCanceledOnReacquire() throws Exception {
+        void evictionScheduledWhenRefCountZero() throws Exception {
             EnvironmentPool pool = EnvironmentPool.getInstance();
             Map<String, String> map = minimalMap("localhost:5552", "test-stream");
             map.put("environmentIdleTimeoutMs", "60000");
@@ -228,15 +294,10 @@ class EnvironmentPoolTest {
             Object entry = newEntry(env);
             putEntry(key, entry);
 
+            setRefCount(entry, 1);
             pool.release(options);
             ScheduledFuture<?> scheduled = getEvictionTask(entry);
             assertThat((Object) scheduled).isNotNull();
-
-            setRefCount(entry, 1);
-            Environment acquired = pool.acquire(options);
-            assertThat(acquired).isSameAs(env);
-            assertThat((Object) getEvictionTask(entry)).isNull();
-            assertThat(scheduled.isCancelled()).isTrue();
         }
 
         @Test
@@ -323,6 +384,11 @@ class EnvironmentPoolTest {
                 EnvironmentPool.EnvironmentKey.class, entry.getClass());
         evict.setAccessible(true);
         evict.invoke(pool, key, entry);
+    }
+
+    private static Object getEntry(ConnectorOptions options) throws Exception {
+        EnvironmentPool.EnvironmentKey key = EnvironmentPool.EnvironmentKey.from(options);
+        return getPoolMap().get(key);
     }
 
     private static final class CountingEnvironment implements Environment {

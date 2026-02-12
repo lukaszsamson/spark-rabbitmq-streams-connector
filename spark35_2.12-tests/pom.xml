@@ -24,7 +24,6 @@
             <artifactId>sparkling-rabbit-spark35_2.12</artifactId>
             <version>${project.version}</version>
             <classifier>unshaded</classifier>
-            <scope>test</scope>
         </dependency>
         <dependency>
             <groupId>com.rabbitmq</groupId>
@@ -57,6 +56,10 @@
             <groupId>org.assertj</groupId>
             <artifactId>assertj-core</artifactId>
         </dependency>
+        <dependency>
+            <groupId>org.mockito</groupId>
+            <artifactId>mockito-core</artifactId>
+        </dependency>
     </dependencies>
 
     <build>
@@ -65,6 +68,31 @@
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <includes>
+                        <include>**/*Suite.java</include>
+                    </includes>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-dependency-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>unpack-connector-classes</id>
+                        <phase>process-classes</phase>
+                        <goals>
+                            <goal>unpack-dependencies</goal>
+                        </goals>
+                        <configuration>
+                            <includeGroupIds>com.rabbitmq.spark</includeGroupIds>
+                            <includeArtifactIds>sparkling-rabbit-spark35_2.12</includeArtifactIds>
+                            <includeClassifiers>unshaded</includeClassifiers>
+                            <outputDirectory>${project.build.outputDirectory}</outputDirectory>
+                            <includes>com/rabbitmq/spark/connector/**</includes>
+                        </configuration>
+                    </execution>
+                </executions>
             </plugin>
             <plugin>
                 <groupId>org.pitest</groupId>
@@ -86,6 +114,7 @@
                     </targetTests>
                     <avoidCallsTo>
                         <param>com.rabbitmq.stream</param>
+                        <param>org.slf4j</param>
                     </avoidCallsTo>
                     <outputFormats>
                         <param>HTML</param>

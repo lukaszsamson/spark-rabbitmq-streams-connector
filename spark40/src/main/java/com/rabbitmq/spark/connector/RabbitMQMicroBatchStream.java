@@ -524,7 +524,7 @@ final class RabbitMQMicroBatchStream
 
         metrics.put("minOffsetsBehindLatest", String.valueOf(minLag));
         metrics.put("maxOffsetsBehindLatest", String.valueOf(maxLag));
-        metrics.put("avgOffsetsBehindLatest", String.format("%.1f", avgLag));
+        metrics.put("avgOffsetsBehindLatest", String.format(java.util.Locale.ROOT, "%.1f", avgLag));
         return metrics;
     }
 
@@ -569,6 +569,11 @@ final class RabbitMQMicroBatchStream
 
     private List<String> discoverStreams() {
         if (streams != null) {
+            if (streams.isEmpty() && !options.isStreamMode()) {
+                throw new IllegalStateException(
+                        "Superstream '" + options.getSuperStream() +
+                                "' has no partition streams");
+            }
             return streams;
         }
 

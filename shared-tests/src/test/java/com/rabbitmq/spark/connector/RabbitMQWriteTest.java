@@ -507,6 +507,66 @@ class RabbitMQWriteTest {
         }
 
         @Test
+        void commitFlushesAtExactBatchSize() throws Exception {
+            Map<String, String> opts = minimalSinkMap();
+            opts.put("batchSize", "5");
+            ConnectorOptions options = new ConnectorOptions(opts);
+
+            RabbitMQDataWriter writer = new RabbitMQDataWriter(
+                    options, minimalSinkSchema(), 0, 1, -1);
+            BatchTrackingProducer producer = new BatchTrackingProducer();
+            setPrivateField(writer, "producer", producer);
+
+            for (int i = 0; i < 5; i++) {
+                writer.write(new GenericInternalRow(new Object[]{("m" + i).getBytes()}));
+            }
+
+            assertThat(producer.confirmedMessages()).isEqualTo(5);
+            assertThat(writer.commit()).isInstanceOf(RabbitMQWriterCommitMessage.class);
+        }
+
+        @Test
+        void deriveProducerNameReturnsNonEmptyString() throws Exception {
+            Map<String, String> opts = minimalSinkMap();
+            opts.put("producerName", "dedup");
+            ConnectorOptions options = new ConnectorOptions(opts);
+
+            RabbitMQDataWriter writer = new RabbitMQDataWriter(
+                    options, minimalSinkSchema(), 2, 7, -1);
+            CapturingProducerBuilder builder = new CapturingProducerBuilder();
+            seedEnvironmentPool(options, new BuilderEnvironment(builder));
+
+            writer.write(new GenericInternalRow(new Object[]{"x".getBytes()}));
+
+            assertThat(builder.name).isEqualTo("dedup-p2-t7");
+        }
+
+        @Test
+        void extractRoutingKeyReturnsCorrectValue() throws Exception {
+            StructType schema = new StructType(new StructField[]{
+                    new StructField("value", DataTypes.BinaryType, false, Metadata.empty()),
+                    new StructField("routing_key", DataTypes.StringType, true, Metadata.empty()),
+            });
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("superstream", "super");
+            opts.put("routingStrategy", "hash");
+            ConnectorOptions options = new ConnectorOptions(opts);
+
+            RabbitMQDataWriter writer = new RabbitMQDataWriter(
+                    options, schema, 0, 1, -1);
+            setPrivateField(writer, "producer", new NoopProducer());
+
+            InternalRow row = new GenericInternalRow(new Object[]{
+                    "body".getBytes(), UTF8String.fromString("rk-1")
+            });
+
+            writer.write(row);
+            var metrics = writer.currentMetricsValues();
+            assertThat(metrics[0].value()).isEqualTo(1L);
+        }
+
+        @Test
         void commitTimesOutWhenConfirmsOutstanding() throws Exception {
             Map<String, String> opts = minimalSinkMap();
             opts.put("publisherConfirmTimeoutMs", "1");
@@ -992,6 +1052,7 @@ class RabbitMQWriteTest {
         private int batchSize;
         private long batchDelayMs;
         private com.rabbitmq.stream.Resource.StateListener listener;
+        private String name;
 
         @Override
         public com.rabbitmq.stream.ProducerBuilder stream(String stream) {
@@ -1005,6 +1066,7 @@ class RabbitMQWriteTest {
 
         @Override
         public com.rabbitmq.stream.ProducerBuilder name(String name) {
+            this.name = name;
             return this;
         }
 
@@ -1081,6 +1143,37 @@ class RabbitMQWriteTest {
         @Override
         public com.rabbitmq.stream.Producer build() {
             return new NoopProducer();
+        }
+    }
+
+    private static final class BatchTrackingProducer implements com.rabbitmq.stream.Producer {
+        private static final com.rabbitmq.stream.codec.QpidProtonCodec CODEC =
+                new com.rabbitmq.stream.codec.QpidProtonCodec();
+        private int confirmedMessages;
+
+        @Override
+        public com.rabbitmq.stream.MessageBuilder messageBuilder() {
+            return CODEC.messageBuilder();
+        }
+
+        @Override
+        public long getLastPublishingId() {
+            return 0L;
+        }
+
+        @Override
+        public void send(com.rabbitmq.stream.Message message,
+                         com.rabbitmq.stream.ConfirmationHandler confirmationHandler) {
+            confirmedMessages++;
+            confirmationHandler.handle(new com.rabbitmq.stream.ConfirmationStatus(message, true, (short) 0));
+        }
+
+        @Override
+        public void close() {
+        }
+
+        private int confirmedMessages() {
+            return confirmedMessages;
         }
     }
 

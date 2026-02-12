@@ -59,6 +59,9 @@ final class RabbitMQBatchWrite implements BatchWrite {
         }
         LOG.info("Batch write committed: {} partitions, {} total records, {} total bytes",
                 messages.length, totalRecords, totalBytes);
+        for (int i = 0; i < messages.length; i++) {
+            messages[i] = null;
+        }
     }
 
     @Override
