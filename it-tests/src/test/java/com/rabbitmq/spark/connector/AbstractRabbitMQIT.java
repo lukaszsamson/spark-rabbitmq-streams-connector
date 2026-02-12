@@ -19,6 +19,8 @@ import org.testcontainers.utility.DockerImageName;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructType;
 
+import com.rabbitmq.stream.NoOffsetException;
+
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
@@ -291,6 +293,60 @@ abstract class AbstractRabbitMQIT {
      * The producer uses a {@code filterValue()} extractor that reads from
      * the application property "filter". Each message's body is "{prefix}{i}".
      */
+    // ---- Stored offset helpers ----
+
+    /**
+     * Query the stored offset for a consumer on a stream.
+     * Returns the stored offset or throws if none exists.
+     */
+    long queryStoredOffset(String consumerName, String stream) {
+        IllegalStateException lastStateError = null;
+        for (int i = 0; i < 20; i++) {
+            var consumer = testEnv.consumerBuilder()
+                    .stream(stream)
+                    .name(consumerName)
+                    .manualTrackingStrategy()
+                    .builder()
+                    .offset(OffsetSpecification.next())
+                    .messageHandler((ctx, msg) -> {})
+                    .build();
+            try {
+                return consumer.storedOffset();
+            } catch (IllegalStateException e) {
+                lastStateError = e;
+                if (e.getMessage() != null && e.getMessage().contains("for now, consumer state is")) {
+                    try {
+                        Thread.sleep(50);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        throw e;
+                    }
+                    continue;
+                }
+                throw e;
+            } finally {
+                consumer.close();
+            }
+        }
+        throw lastStateError != null ? lastStateError :
+                new IllegalStateException("Failed to query stored offset for consumer '" +
+                        consumerName + "' on stream '" + stream + "'");
+    }
+
+    /**
+     * Check if a stored offset exists for a consumer on a stream.
+     */
+    boolean hasStoredOffset(String consumerName, String stream) {
+        try {
+            queryStoredOffset(consumerName, stream);
+            return true;
+        } catch (NoOffsetException e) {
+            return false;
+        }
+    }
+
+    // ---- Filtering helpers ----
+
     void publishMessagesWithFilterValue(String stream, int count,
                                          String prefix, String filterValue) {
         try (Producer producer = testEnv.producerBuilder()

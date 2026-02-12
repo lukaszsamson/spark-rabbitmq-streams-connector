@@ -14,7 +14,6 @@ import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import com.rabbitmq.stream.NoOffsetException;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -1299,56 +1298,6 @@ class StreamingIT extends AbstractRabbitMQIT {
     }
 
     // ---- Helpers ----
-
-    /**
-     * Query the stored offset for a consumer on a stream.
-     * Returns the stored offset or throws if none exists.
-     */
-    private long queryStoredOffset(String consumerName, String stream) {
-        IllegalStateException lastStateError = null;
-        for (int i = 0; i < 20; i++) {
-            var consumer = testEnv.consumerBuilder()
-                    .stream(stream)
-                    .name(consumerName)
-                    .manualTrackingStrategy()
-                    .builder()
-                    .offset(com.rabbitmq.stream.OffsetSpecification.next())
-                    .messageHandler((ctx, msg) -> {})
-                    .build();
-            try {
-                return consumer.storedOffset();
-            } catch (IllegalStateException e) {
-                lastStateError = e;
-                if (e.getMessage() != null && e.getMessage().contains("for now, consumer state is")) {
-                    try {
-                        Thread.sleep(50);
-                    } catch (InterruptedException ie) {
-                        Thread.currentThread().interrupt();
-                        throw e;
-                    }
-                    continue;
-                }
-                throw e;
-            } finally {
-                consumer.close();
-            }
-        }
-        throw lastStateError != null ? lastStateError :
-                new IllegalStateException("Failed to query stored offset for consumer '" +
-                        consumerName + "' on stream '" + stream + "'");
-    }
-
-    /**
-     * Check if a stored offset exists for a consumer on a stream.
-     */
-    private boolean hasStoredOffset(String consumerName, String stream) {
-        try {
-            queryStoredOffset(consumerName, stream);
-            return true;
-        } catch (NoOffsetException e) {
-            return false;
-        }
-    }
 
     private long readOutputCount(Path outputDir) {
         if (!hasParquetData(outputDir)) {

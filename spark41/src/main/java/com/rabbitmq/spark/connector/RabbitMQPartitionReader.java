@@ -4,6 +4,8 @@ import com.rabbitmq.stream.*;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.connector.metric.CustomTaskMetric;
 import org.apache.spark.sql.connector.read.PartitionReader;
+import org.apache.spark.sql.connector.read.streaming.PartitionOffset;
+import org.apache.spark.sql.connector.read.streaming.SupportsRealTimeRead;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -26,7 +28,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * This reader bridges the two by pushing messages into a bounded
  * {@link BlockingQueue} and pulling from it on demand.
  */
-final class RabbitMQPartitionReader implements PartitionReader<InternalRow> {
+final class RabbitMQPartitionReader
+        implements PartitionReader<InternalRow>, SupportsRealTimeRead<InternalRow> {
 
     private static final Logger LOG = LoggerFactory.getLogger(RabbitMQPartitionReader.class);
 
@@ -199,6 +202,91 @@ final class RabbitMQPartitionReader implements PartitionReader<InternalRow> {
     @Override
     public InternalRow get() {
         return currentRow;
+    }
+
+    // ---- SupportsRealTimeRead ----
+
+    @Override
+    public PartitionOffset getOffset() {
+        long nextOffset = lastEmittedOffset >= 0 ? lastEmittedOffset + 1 : startOffset;
+        return new RabbitMQPartitionOffset(stream, nextOffset);
+    }
+
+    @Override
+    public RecordStatus nextWithTimeout(Long timeout) throws IOException {
+        // Lazy initialization: create consumer on first call
+        if (consumer == null) {
+            initConsumer();
+        }
+
+        long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeout);
+        long pollTimeoutMs = options.getPollTimeoutMs();
+
+        while (true) {
+            // Check for consumer errors
+            Throwable error = consumerError.get();
+            if (error != null) {
+                throw new IOException("Consumer error on stream '" + stream + "'", error);
+            }
+
+            long remainingMs = TimeUnit.NANOSECONDS.toMillis(deadlineNanos - System.nanoTime());
+            if (remainingMs <= 0) {
+                return RecordStatus.newStatusWithoutArrivalTime(false);
+            }
+
+            QueuedMessage qm;
+            try {
+                long pollMs = Math.min(remainingMs, pollTimeoutMs);
+                long pollStart = System.nanoTime();
+                qm = queue.poll(pollMs, TimeUnit.MILLISECONDS);
+                readLatencyMs += TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - pollStart);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IOException("Interrupted while reading from stream '" + stream + "'", e);
+            }
+
+            if (qm == null) {
+                continue;
+            }
+
+            // Credit flow: notify that this message has been consumed
+            qm.context().processed();
+
+            // Skip messages before start offset
+            if (qm.offset() < startOffset) {
+                continue;
+            }
+
+            // De-dup on reconnection: skip already-emitted offsets
+            if (qm.offset() <= lastEmittedOffset) {
+                continue;
+            }
+
+            if (qm.offset() > lastObservedOffset) {
+                lastObservedOffset = qm.offset();
+            }
+
+            // Post-filter
+            if (postFilter != null && !postFilter.accept(
+                    qm.message().getBodyAsBinary(),
+                    coerceMapToStrings(qm.message().getApplicationProperties()))) {
+                if (options.isFilterWarningOnMismatch()) {
+                    LOG.warn("Post-filter dropped message at offset {} on stream '{}'",
+                            qm.offset(), stream);
+                }
+                continue;
+            }
+
+            currentRow = converter.convert(
+                    qm.message(), stream, qm.offset(), qm.chunkTimestampMillis());
+            lastEmittedOffset = qm.offset();
+            recordsRead++;
+            byte[] body = qm.message().getBodyAsBinary();
+            if (body != null) {
+                bytesRead += body.length;
+            }
+            return RecordStatus.newStatusWithArrivalTimeMs(qm.chunkTimestampMillis());
+        }
     }
 
     @Override

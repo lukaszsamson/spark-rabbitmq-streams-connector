@@ -7,6 +7,7 @@ import org.apache.spark.sql.connector.read.InputPartition;
 import org.apache.spark.sql.connector.read.PartitionReaderFactory;
 import org.apache.spark.sql.connector.read.streaming.*;
 import org.apache.spark.sql.types.StructType;
+import org.apache.spark.sql.connector.read.streaming.PartitionOffset;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -25,11 +26,13 @@ import java.lang.reflect.Method;
  *       {@code maxRecordsPerTrigger} and {@code maxBytesPerTrigger}</li>
  *   <li>{@link SupportsTriggerAvailableNow} – snapshot-based bounded processing</li>
  *   <li>{@link ReportsSourceMetrics} – lag metrics for query progress</li>
+ *   <li>{@link SupportsRealTimeMode} – low-latency real-time streaming (Spark 4.1+)</li>
  * </ul>
  */
 final class RabbitMQMicroBatchStream
         implements MicroBatchStream, SupportsAdmissionControl,
-                   SupportsTriggerAvailableNow, ReportsSourceMetrics {
+                   SupportsTriggerAvailableNow, ReportsSourceMetrics,
+                   SupportsRealTimeMode {
 
     private static final Logger LOG = LoggerFactory.getLogger(RabbitMQMicroBatchStream.class);
 
@@ -65,6 +68,9 @@ final class RabbitMQMicroBatchStream
     private volatile Map<String, Long> initialOffsets;
     /** Last end offsets successfully persisted to broker (next offsets). */
     private volatile Map<String, Long> lastStoredEndOffsets;
+
+    /** Whether real-time mode has been activated via {@link #prepareForRealTimeMode()}. */
+    private volatile boolean realTimeMode = false;
 
     RabbitMQMicroBatchStream(ConnectorOptions options, StructType schema,
                               String checkpointLocation) {
@@ -480,6 +486,50 @@ final class RabbitMQMicroBatchStream
         Map<String, Long> snapshot = queryTailOffsetsForAvailableNow();
         this.availableNowSnapshot = snapshot;
         LOG.info("Trigger.AvailableNow: snapshot tail offsets = {}", snapshot);
+    }
+
+    // ---- SupportsRealTimeMode ----
+
+    @Override
+    public void prepareForRealTimeMode() {
+        this.realTimeMode = true;
+        LOG.info("Real-time mode activated");
+    }
+
+    @Override
+    public InputPartition[] planInputPartitions(Offset start) {
+        RabbitMQStreamOffset startOffset = (RabbitMQStreamOffset) start;
+        List<String> streams = discoverStreams();
+
+        List<InputPartition> partitions = new ArrayList<>();
+        for (String stream : streams) {
+            long startOff = startOffset.getStreamOffsets().getOrDefault(stream, 0L);
+
+            // Validate against retention truncation
+            startOff = validateStartOffset(stream, startOff, Long.MAX_VALUE);
+            if (startOff < 0) {
+                continue;
+            }
+
+            partitions.add(new RabbitMQInputPartition(
+                    stream, startOff, Long.MAX_VALUE, options, false));
+        }
+
+        LOG.info("Real-time mode: planned {} input partitions from start {}",
+                partitions.size(), start);
+        return partitions.toArray(new InputPartition[0]);
+    }
+
+    @Override
+    public Offset mergeOffsets(PartitionOffset[] offsets) {
+        Map<String, Long> merged = new LinkedHashMap<>();
+        for (PartitionOffset po : offsets) {
+            RabbitMQPartitionOffset rpo = (RabbitMQPartitionOffset) po;
+            merged.merge(rpo.getStream(), rpo.getNextOffset(), Math::max);
+        }
+        RabbitMQStreamOffset result = new RabbitMQStreamOffset(merged);
+        cachedLatestOffset = result;
+        return result;
     }
 
     // ---- ReportsSourceMetrics ----
