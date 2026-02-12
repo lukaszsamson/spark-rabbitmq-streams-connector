@@ -60,9 +60,6 @@
                 <artifactId>maven-surefire-plugin</artifactId>
                 <configuration>
                     <skip>false</skip>
-                    <includes>
-                        <include>**/RealTime*Test.java</include>
-                    </includes>
                 </configuration>
             </plugin>
             <plugin>

@@ -38,6 +38,8 @@ final class RabbitMQMicroBatchStream
 
     /** Timeout for broker offset commit (best-effort, Spark checkpoint is source of truth). */
     private static final int COMMIT_TIMEOUT_SECONDS = 30;
+    /** Lower bound on interval between opening probe consumers for the same stream. */
+    private static final long TAIL_PROBE_INTERVAL_MS = 2000L;
 
     private final ConnectorOptions options;
     private final StructType schema;
@@ -68,6 +70,10 @@ final class RabbitMQMicroBatchStream
     private volatile Map<String, Long> initialOffsets;
     /** Last end offsets successfully persisted to broker (next offsets). */
     private volatile Map<String, Long> lastStoredEndOffsets;
+    /** Per-stream cache of probe-derived tail offsets (exclusive). */
+    private final ConcurrentMap<String, Long> probeTailCache = new ConcurrentHashMap<>();
+    /** Per-stream timestamp (ms) of the most recent tail probe attempt. */
+    private final ConcurrentMap<String, Long> probeTailCacheTimestampMs = new ConcurrentHashMap<>();
 
     /** Whether real-time mode has been activated via {@link #prepareForRealTimeMode()}. */
     private volatile boolean realTimeMode = false;
@@ -512,7 +518,8 @@ final class RabbitMQMicroBatchStream
             }
 
             partitions.add(new RabbitMQInputPartition(
-                    stream, startOff, Long.MAX_VALUE, options, false));
+                    stream, startOff, Long.MAX_VALUE, options,
+                    useConfiguredStartingOffset(stream, startOff)));
         }
 
         LOG.info("Real-time mode: planned {} input partitions from start {}",
@@ -773,8 +780,20 @@ final class RabbitMQMicroBatchStream
 
     private long queryStreamTailOffsetForLatest(Environment env, String stream) {
         long statsTail = queryStreamTailOffset(env, stream);
-        long probedTail = probeTailOffsetFromLastMessage(env, stream);
+        long probedTail = probeTailOffsetFromLastMessageCached(env, stream);
         return Math.max(statsTail, probedTail);
+    }
+
+    private long probeTailOffsetFromLastMessageCached(Environment env, String stream) {
+        long now = System.currentTimeMillis();
+        Long lastProbeAt = probeTailCacheTimestampMs.get(stream);
+        if (lastProbeAt != null && (now - lastProbeAt) < TAIL_PROBE_INTERVAL_MS) {
+            return probeTailCache.getOrDefault(stream, 0L);
+        }
+        long probedTail = probeTailOffsetFromLastMessage(env, stream);
+        probeTailCacheTimestampMs.put(stream, now);
+        probeTailCache.put(stream, probedTail);
+        return probedTail;
     }
 
     /**

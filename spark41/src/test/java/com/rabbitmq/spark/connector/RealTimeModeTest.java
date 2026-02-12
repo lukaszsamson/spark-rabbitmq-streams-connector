@@ -150,6 +150,50 @@ class RealTimeModeTest {
             RabbitMQInputPartition p = (RabbitMQInputPartition) partitions[0];
             assertThat(p.getStartOffset()).isEqualTo(0L);
         }
+
+        @Test
+        void planInputPartitionsTimestampMarksInitialPartitionForConfiguredSeek() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("startingOffsets", "timestamp");
+            opts.put("startingTimestamp", "1234");
+            ConnectorOptions options = new ConnectorOptions(opts);
+
+            RabbitMQMicroBatchStream stream = createStream(options);
+            setPrivateField(stream, "streams", List.of("test-stream"));
+            setPrivateField(stream, "environment", new NoOpEnvironment());
+            setPrivateField(stream, "initialOffsets", Map.of("test-stream", 42L));
+
+            RabbitMQStreamOffset start = new RabbitMQStreamOffset(Map.of("test-stream", 42L));
+            InputPartition[] partitions = stream.planInputPartitions(start);
+
+            assertThat(partitions).hasSize(1);
+            RabbitMQInputPartition p = (RabbitMQInputPartition) partitions[0];
+            assertThat(p.isUseConfiguredStartingOffset()).isTrue();
+        }
+
+        @Test
+        void planInputPartitionsTimestampDoesNotMarkResumedPartitionForConfiguredSeek() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("startingOffsets", "timestamp");
+            opts.put("startingTimestamp", "1234");
+            ConnectorOptions options = new ConnectorOptions(opts);
+
+            RabbitMQMicroBatchStream stream = createStream(options);
+            setPrivateField(stream, "streams", List.of("test-stream"));
+            setPrivateField(stream, "environment", new NoOpEnvironment());
+            setPrivateField(stream, "initialOffsets", Map.of("test-stream", 42L));
+
+            RabbitMQStreamOffset start = new RabbitMQStreamOffset(Map.of("test-stream", 50L));
+            InputPartition[] partitions = stream.planInputPartitions(start);
+
+            assertThat(partitions).hasSize(1);
+            RabbitMQInputPartition p = (RabbitMQInputPartition) partitions[0];
+            assertThat(p.isUseConfiguredStartingOffset()).isFalse();
+        }
     }
 
     // ======================================================================

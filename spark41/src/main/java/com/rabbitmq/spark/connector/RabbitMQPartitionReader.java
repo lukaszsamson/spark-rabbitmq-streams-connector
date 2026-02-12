@@ -32,6 +32,8 @@ final class RabbitMQPartitionReader
         implements PartitionReader<InternalRow>, SupportsRealTimeRead<InternalRow> {
 
     private static final Logger LOG = LoggerFactory.getLogger(RabbitMQPartitionReader.class);
+    private static final long TAIL_STATS_REFRESH_INTERVAL_MS = 500L;
+    private static final long TAIL_PROBE_REFRESH_INTERVAL_MS = 5000L;
 
     private final String stream;
     private final long startOffset;
@@ -52,6 +54,9 @@ final class RabbitMQPartitionReader
     private long lastEmittedOffset = -1;
     private long lastObservedOffset = -1;
     private boolean filteredTailReached = false;
+    private long cachedTailOffset = -1;
+    private long lastTailRefreshMs = 0;
+    private long lastTailProbeMs = 0;
     private boolean finished = false;
 
     // Task-level metric counters
@@ -411,11 +416,30 @@ final class RabbitMQPartitionReader
         if (filteredTailReached) {
             return true;
         }
+        long now = System.currentTimeMillis();
+        if (cachedTailOffset >= 0 && (now - lastTailRefreshMs) < TAIL_STATS_REFRESH_INTERVAL_MS) {
+            if (cachedTailOffset >= endOffset - 1) {
+                filteredTailReached = true;
+                return true;
+            }
+            return false;
+        }
+
         try {
             StreamStats stats = environment.queryStreamStats(stream);
             long statsTail = stats.committedChunkId();
-            long probedTail = probeLastMessageOffset();
-            long tail = Math.max(statsTail, probedTail);
+            long tail = statsTail;
+
+            if (tail < endOffset - 1 && (now - lastTailProbeMs) >= TAIL_PROBE_REFRESH_INTERVAL_MS) {
+                long probedTail = probeLastMessageOffset();
+                if (probedTail >= 0) {
+                    tail = Math.max(tail, probedTail);
+                }
+                lastTailProbeMs = now;
+            }
+
+            cachedTailOffset = tail;
+            lastTailRefreshMs = now;
             if (tail < 0) {
                 return endOffset <= 0;
             }

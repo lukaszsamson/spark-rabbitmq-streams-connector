@@ -56,7 +56,9 @@ final class RabbitMQBatch implements Batch {
             String stream = entry.getKey();
             long start = entry.getValue()[0];
             long end = entry.getValue()[1];
-            partitions.add(new RabbitMQInputPartition(stream, start, end, options));
+            partitions.add(new RabbitMQInputPartition(
+                    stream, start, end, options,
+                    shouldUseConfiguredStartingOffset(start, start)));
         }
         LOG.info("Planned {} input partitions (one per stream)", partitions.size());
         return partitions.toArray(new InputPartition[0]);
@@ -133,7 +135,9 @@ final class RabbitMQBatch implements Batch {
                               long start, long end, int numSplits) {
         long totalMessages = end - start;
         if (numSplits <= 1 || totalMessages <= 1) {
-            partitions.add(new RabbitMQInputPartition(stream, start, end, options));
+            partitions.add(new RabbitMQInputPartition(
+                    stream, start, end, options,
+                    shouldUseConfiguredStartingOffset(start, start)));
             return;
         }
 
@@ -145,8 +149,15 @@ final class RabbitMQBatch implements Batch {
             long splitSize = chunkSize + (i < remainder ? 1 : 0);
             if (splitSize == 0) break;
             long splitEnd = currentStart + splitSize;
-            partitions.add(new RabbitMQInputPartition(stream, currentStart, splitEnd, options));
+            partitions.add(new RabbitMQInputPartition(
+                    stream, currentStart, splitEnd, options,
+                    shouldUseConfiguredStartingOffset(currentStart, start)));
             currentStart = splitEnd;
         }
+    }
+
+    private boolean shouldUseConfiguredStartingOffset(long partitionStart, long streamRangeStart) {
+        return options.getStartingOffsets() == StartingOffsetsMode.TIMESTAMP
+                && partitionStart == streamRangeStart;
     }
 }

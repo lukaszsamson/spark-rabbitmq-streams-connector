@@ -1,5 +1,6 @@
 package com.rabbitmq.spark.connector;
 
+import org.apache.spark.SparkIllegalArgumentException;
 import org.apache.spark.sql.ForeachWriter;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.streaming.StreamingQuery;
@@ -10,13 +11,17 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Method;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Integration tests for SupportsRealTimeMode (Spark 4.1+).
@@ -83,18 +88,15 @@ class RealTimeModeIT extends AbstractRabbitMQIT {
                 .start();
 
         try {
-            // Wait long enough for the RT query to process the data
-            boolean terminated = query.awaitTermination(30_000);
-            if (!terminated) {
-                query.stop();
-            }
+            awaitAtLeastRows(50, 30_000);
         } finally {
             if (query.isActive()) {
                 query.stop();
             }
         }
 
-        assertThat(COLLECTED_ROWS.size()).isGreaterThanOrEqualTo(50);
+        Set<String> payloads = payloadsWithPrefix("msg-");
+        assertThat(payloads).hasSize(50);
     }
 
     @Test
@@ -121,15 +123,13 @@ class RealTimeModeIT extends AbstractRabbitMQIT {
             publishMessages(sourceStream, 30);
 
             // Wait for messages to be processed
-            long deadline = System.currentTimeMillis() + 30_000;
-            while (COLLECTED_ROWS.size() < 30 && System.currentTimeMillis() < deadline) {
-                Thread.sleep(500);
-            }
+            awaitAtLeastRows(30, 30_000);
         } finally {
             query.stop();
         }
 
-        assertThat(COLLECTED_ROWS.size()).isGreaterThanOrEqualTo(30);
+        Set<String> payloads = payloadsWithPrefix("msg-");
+        assertThat(payloads).hasSize(30);
     }
 
     @Test
@@ -234,7 +234,8 @@ class RealTimeModeIT extends AbstractRabbitMQIT {
         }
 
         int phase1Count = COLLECTED_ROWS.size();
-        assertThat(phase1Count).isGreaterThanOrEqualTo(30);
+        assertThat(payloadsWithPrefix("phase1-")).hasSize(30);
+        assertThat(phase1Count).isEqualTo(30);
 
         // Phase 2: Publish more, resume from checkpoint
         publishMessages(sourceStream, 20, "phase2-");
@@ -267,7 +268,8 @@ class RealTimeModeIT extends AbstractRabbitMQIT {
         }
 
         // Phase 2 should only have the new messages (no duplicates from phase 1)
-        assertThat(COLLECTED_ROWS.size()).isGreaterThanOrEqualTo(20);
+        assertThat(payloadsWithPrefix("phase2-")).hasSize(20);
+        assertThat(payloadsWithPrefix("phase1-")).isEmpty();
     }
 
     @Test
@@ -323,9 +325,111 @@ class RealTimeModeIT extends AbstractRabbitMQIT {
                 query.stop();
             }
 
-            assertThat(COLLECTED_ROWS.size()).isGreaterThanOrEqualTo(30);
+            assertThat(payloadsWithPrefix("ss-msg-")).hasSize(30);
         } finally {
             deleteSuperStream(superStream);
+        }
+    }
+
+    @Test
+    void realTimeModeStartingOffsetsLatestSkipsHistorical() throws Exception {
+        publishMessages(sourceStream, 20, "old-");
+        Thread.sleep(2000);
+
+        StreamingQuery query = spark.readStream()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", sourceStream)
+                .option("startingOffsets", "latest")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load()
+                .writeStream()
+                .outputMode("update")
+                .foreach(new RowCollector())
+                .option("checkpointLocation", checkpointDir.toString())
+                .trigger(createRealTimeTrigger("2 seconds"))
+                .start();
+
+        try {
+            Thread.sleep(3000);
+            publishMessages(sourceStream, 15, "new-");
+            awaitAtLeastRows(15, 30_000);
+        } finally {
+            query.stop();
+        }
+
+        assertThat(payloadsWithPrefix("new-")).hasSize(15);
+        assertThat(payloadsWithPrefix("old-")).isEmpty();
+    }
+
+    @Test
+    void realTimeModeStartingOffsetsTimestampSkipsOlderMessages() throws Exception {
+        publishMessages(sourceStream, 10, "before-");
+        Thread.sleep(1200);
+        long boundaryTimestampMs = System.currentTimeMillis();
+        Thread.sleep(1200);
+        publishMessages(sourceStream, 12, "after-");
+
+        StreamingQuery query = spark.readStream()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", sourceStream)
+                .option("startingOffsets", "timestamp")
+                .option("startingTimestamp", String.valueOf(boundaryTimestampMs))
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load()
+                .writeStream()
+                .outputMode("update")
+                .foreach(new RowCollector())
+                .option("checkpointLocation", checkpointDir.toString())
+                .trigger(createRealTimeTrigger("2 seconds"))
+                .start();
+
+        try {
+            awaitAtLeastRows(12, 30_000);
+        } finally {
+            query.stop();
+        }
+
+        assertThat(payloadsWithPrefix("after-")).hasSize(12);
+        assertThat(payloadsWithPrefix("before-")).isEmpty();
+    }
+
+    @Test
+    void realTimeModeConnectorSinkRequiresAllowlistOverride() throws Exception {
+        String sinkStream = uniqueStreamName();
+        createStream(sinkStream);
+        try {
+            publishMessages(sourceStream, 1, "sink-src-");
+            Thread.sleep(2000);
+            assertThatThrownBy(() -> spark.readStream()
+                    .format("rabbitmq_streams")
+                    .option("endpoints", streamEndpoint())
+                    .option("stream", sourceStream)
+                    .option("startingOffsets", "earliest")
+                    .option("metadataFields", "")
+                    .option("addressResolverClass",
+                            "com.rabbitmq.spark.connector.TestAddressResolver")
+                    .load()
+                    .writeStream()
+                    .format("rabbitmq_streams")
+                    .outputMode("update")
+                    .option("endpoints", streamEndpoint())
+                    .option("stream", sinkStream)
+                    .option("checkpointLocation",
+                            Files.createTempDirectory("spark-rt-sink-checkpoint-").toString())
+                    .option("addressResolverClass",
+                            "com.rabbitmq.spark.connector.TestAddressResolver")
+                    .trigger(createRealTimeTrigger("2 seconds"))
+                    .start())
+                    .isInstanceOf(SparkIllegalArgumentException.class)
+                    .hasMessageContaining("sink allowlist");
+        } finally {
+            deleteStream(sinkStream);
         }
     }
 
@@ -374,5 +478,24 @@ class RealTimeModeIT extends AbstractRabbitMQIT {
         @Override
         public void close(Throwable errorOrNull) {
         }
+    }
+
+    private static void awaitAtLeastRows(int expectedMinRows, long timeoutMs) throws Exception {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (COLLECTED_ROWS.size() < expectedMinRows && System.currentTimeMillis() < deadline) {
+            Thread.sleep(200);
+        }
+    }
+
+    private static Set<String> payloadsWithPrefix(String prefix) {
+        Set<String> payloads = new HashSet<>();
+        for (Row row : COLLECTED_ROWS) {
+            byte[] value = row.getAs("value");
+            String payload = new String(value, StandardCharsets.UTF_8);
+            if (payload.startsWith(prefix)) {
+                payloads.add(payload);
+            }
+        }
+        return payloads;
     }
 }
