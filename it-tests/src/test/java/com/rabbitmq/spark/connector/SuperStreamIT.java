@@ -274,6 +274,88 @@ class SuperStreamIT extends AbstractRabbitMQIT {
     }
 
     @Test
+    void streamingWriteToSuperStreamAppendMode() throws Exception {
+        StructType schema = new StructType()
+                .add("value", DataTypes.BinaryType, false)
+                .add("routing_key", DataTypes.StringType, true);
+
+        List<Row> data = new ArrayList<>();
+        for (int i = 0; i < 24; i++) {
+            data.add(RowFactory.create(
+                    ("ss-streaming-append-" + i).getBytes(),
+                    String.valueOf(i % PARTITION_COUNT)));
+        }
+
+        Path inputDir = Files.createTempDirectory("spark-input-ss-append-").resolve("data");
+        Path checkpointDir = Files.createTempDirectory("spark-checkpoint-ss-append-");
+        spark.createDataFrame(data, schema).write().parquet(inputDir.toString());
+
+        StreamingQuery query = spark.readStream()
+                .schema(schema)
+                .parquet(inputDir.toString())
+                .writeStream()
+                .format("rabbitmq_streams")
+                .outputMode("append")
+                .option("endpoints", streamEndpoint())
+                .option("superstream", superStream)
+                .option("routingStrategy", "hash")
+                .option("checkpointLocation", checkpointDir.toString())
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .trigger(Trigger.AvailableNow())
+                .start();
+
+        query.awaitTermination(60_000);
+
+        int totalMessages = 0;
+        for (int p = 0; p < PARTITION_COUNT; p++) {
+            totalMessages += consumeMessages(superStream + "-" + p, 24).size();
+        }
+        assertThat(totalMessages).isEqualTo(24);
+    }
+
+    @Test
+    void streamingWriteToSuperStreamUpdateMode() throws Exception {
+        StructType schema = new StructType()
+                .add("value", DataTypes.BinaryType, false)
+                .add("routing_key", DataTypes.StringType, true);
+
+        List<Row> data = new ArrayList<>();
+        for (int i = 0; i < 24; i++) {
+            data.add(RowFactory.create(
+                    ("ss-streaming-update-" + i).getBytes(),
+                    String.valueOf(i % PARTITION_COUNT)));
+        }
+
+        Path inputDir = Files.createTempDirectory("spark-input-ss-update-").resolve("data");
+        Path checkpointDir = Files.createTempDirectory("spark-checkpoint-ss-update-");
+        spark.createDataFrame(data, schema).write().parquet(inputDir.toString());
+
+        StreamingQuery query = spark.readStream()
+                .schema(schema)
+                .parquet(inputDir.toString())
+                .writeStream()
+                .format("rabbitmq_streams")
+                .outputMode("update")
+                .option("endpoints", streamEndpoint())
+                .option("superstream", superStream)
+                .option("routingStrategy", "hash")
+                .option("checkpointLocation", checkpointDir.toString())
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .trigger(Trigger.AvailableNow())
+                .start();
+
+        query.awaitTermination(60_000);
+
+        int totalMessages = 0;
+        for (int p = 0; p < PARTITION_COUNT; p++) {
+            totalMessages += consumeMessages(superStream + "-" + p, 24).size();
+        }
+        assertThat(totalMessages).isEqualTo(24);
+    }
+
+    @Test
     void failOnDataLossSkipsDeletedPartitionStream() throws Exception {
         // Publish to all partitions
         for (int p = 0; p < PARTITION_COUNT; p++) {

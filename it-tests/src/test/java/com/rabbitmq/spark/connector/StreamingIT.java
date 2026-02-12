@@ -19,6 +19,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -182,6 +184,281 @@ class StreamingIT extends AbstractRabbitMQIT {
                 .toList();
 
         assertThat(bodies).contains("streaming-write-0", "streaming-write-24");
+    }
+
+    // ---- IT-SINK-UPDATE-001: stateless update mode matches append mode ----
+
+    @Test
+    void streamingSinkUpdateModeStatelessEquivalentToAppend() throws Exception {
+        String appendSink = uniqueStreamName();
+        String updateSink = uniqueStreamName();
+        createStream(appendSink);
+        createStream(updateSink);
+        try {
+            publishMessages(sourceStream, 40, "mode-");
+            Thread.sleep(2000);
+
+            Path appendCheckpoint = Files.createTempDirectory("spark-sink-append-ckpt-");
+            StreamingQuery appendQuery = spark.readStream()
+                    .format("rabbitmq_streams")
+                    .option("endpoints", streamEndpoint())
+                    .option("stream", sourceStream)
+                    .option("startingOffsets", "earliest")
+                    .option("metadataFields", "")
+                    .option("addressResolverClass",
+                            "com.rabbitmq.spark.connector.TestAddressResolver")
+                    .load()
+                    .select("value")
+                    .writeStream()
+                    .format("rabbitmq_streams")
+                    .outputMode("append")
+                    .option("endpoints", streamEndpoint())
+                    .option("stream", appendSink)
+                    .option("checkpointLocation", appendCheckpoint.toString())
+                    .option("addressResolverClass",
+                            "com.rabbitmq.spark.connector.TestAddressResolver")
+                    .trigger(Trigger.AvailableNow())
+                    .start();
+            appendQuery.awaitTermination(120_000);
+
+            Path updateCheckpoint = Files.createTempDirectory("spark-sink-update-ckpt-");
+            StreamingQuery updateQuery = spark.readStream()
+                    .format("rabbitmq_streams")
+                    .option("endpoints", streamEndpoint())
+                    .option("stream", sourceStream)
+                    .option("startingOffsets", "earliest")
+                    .option("metadataFields", "")
+                    .option("addressResolverClass",
+                            "com.rabbitmq.spark.connector.TestAddressResolver")
+                    .load()
+                    .select("value")
+                    .writeStream()
+                    .format("rabbitmq_streams")
+                    .outputMode("update")
+                    .option("endpoints", streamEndpoint())
+                    .option("stream", updateSink)
+                    .option("checkpointLocation", updateCheckpoint.toString())
+                    .option("addressResolverClass",
+                            "com.rabbitmq.spark.connector.TestAddressResolver")
+                    .trigger(Trigger.AvailableNow())
+                    .start();
+            updateQuery.awaitTermination(120_000);
+
+            Set<String> appendPayloads = readAllValuesFromStream(appendSink).stream()
+                    .map(row -> new String((byte[]) row.getAs("value")))
+                    .collect(Collectors.toSet());
+            Set<String> updatePayloads = readAllValuesFromStream(updateSink).stream()
+                    .map(row -> new String((byte[]) row.getAs("value")))
+                    .collect(Collectors.toSet());
+
+            assertThat(appendPayloads).hasSize(40);
+            assertThat(updatePayloads).hasSize(40);
+            assertThat(updatePayloads).isEqualTo(appendPayloads);
+        } finally {
+            deleteStream(appendSink);
+            deleteStream(updateSink);
+        }
+    }
+
+    // ---- IT-SINK-UPDATE-002: stateful update mode appends updates ----
+
+    @Test
+    void streamingSinkUpdateModeStatefulAppendsUpdates() throws Exception {
+        String updateSink = uniqueStreamName();
+        createStream(updateSink);
+        try {
+            publishMessages(sourceStream, 60, "stateful-");
+            Thread.sleep(2000);
+
+            Path updateCheckpoint = Files.createTempDirectory("spark-sink-stateful-update-ckpt-");
+            StreamingQuery query = spark.readStream()
+                    .format("rabbitmq_streams")
+                    .option("endpoints", streamEndpoint())
+                    .option("stream", sourceStream)
+                    .option("startingOffsets", "earliest")
+                    .option("maxRecordsPerTrigger", "10")
+                    .option("metadataFields", "")
+                    .option("addressResolverClass",
+                            "com.rabbitmq.spark.connector.TestAddressResolver")
+                    .load()
+                    .selectExpr("CAST(offset % 3 AS STRING) AS k")
+                    .groupBy("k")
+                    .count()
+                    .selectExpr("CAST(concat(k, ':', CAST(count AS STRING)) AS BINARY) AS value")
+                    .writeStream()
+                    .format("rabbitmq_streams")
+                    .outputMode("update")
+                    .option("endpoints", streamEndpoint())
+                    .option("stream", updateSink)
+                    .option("checkpointLocation", updateCheckpoint.toString())
+                    .option("addressResolverClass",
+                            "com.rabbitmq.spark.connector.TestAddressResolver")
+                    .trigger(Trigger.AvailableNow())
+                    .start();
+            query.awaitTermination(120_000);
+
+            List<String> updates = readAllValuesFromStream(updateSink).stream()
+                    .map(row -> new String((byte[]) row.getAs("value")))
+                    .toList();
+
+            Map<String, Set<Long>> distinctCountsByKey = new HashMap<>();
+            for (String update : updates) {
+                String[] parts = update.split(":");
+                assertThat(parts).hasSize(2);
+                String key = parts[0];
+                long count = Long.parseLong(parts[1]);
+                distinctCountsByKey.computeIfAbsent(key, k -> new java.util.HashSet<>()).add(count);
+            }
+
+            assertThat(distinctCountsByKey.keySet()).containsExactlyInAnyOrder("0", "1", "2");
+            for (String key : distinctCountsByKey.keySet()) {
+                Set<Long> counts = distinctCountsByKey.get(key);
+                assertThat(counts).hasSizeGreaterThan(1);
+                long max = counts.stream().mapToLong(Long::longValue).max().orElse(-1);
+                assertThat(max).isEqualTo(20L);
+            }
+        } finally {
+            deleteStream(updateSink);
+        }
+    }
+
+    // ---- IT-SINK-UPDATE-003: update mode checkpoint resume ----
+
+    @Test
+    void streamingSinkUpdateModeCheckpointResume() throws Exception {
+        String updateSink = uniqueStreamName();
+        createStream(updateSink);
+        try {
+            Path updateCheckpoint = Files.createTempDirectory("spark-sink-update-resume-ckpt-");
+
+            publishMessages(sourceStream, 30, "resume1-");
+            Thread.sleep(2000);
+
+            StreamingQuery phase1 = spark.readStream()
+                    .format("rabbitmq_streams")
+                    .option("endpoints", streamEndpoint())
+                    .option("stream", sourceStream)
+                    .option("startingOffsets", "earliest")
+                    .option("maxRecordsPerTrigger", "10")
+                    .option("metadataFields", "")
+                    .option("addressResolverClass",
+                            "com.rabbitmq.spark.connector.TestAddressResolver")
+                    .load()
+                    .selectExpr("CAST(offset % 3 AS STRING) AS k")
+                    .groupBy("k")
+                    .count()
+                    .selectExpr("CAST(concat(k, ':', CAST(count AS STRING)) AS BINARY) AS value")
+                    .writeStream()
+                    .format("rabbitmq_streams")
+                    .outputMode("update")
+                    .option("endpoints", streamEndpoint())
+                    .option("stream", updateSink)
+                    .option("checkpointLocation", updateCheckpoint.toString())
+                    .option("addressResolverClass",
+                            "com.rabbitmq.spark.connector.TestAddressResolver")
+                    .trigger(Trigger.AvailableNow())
+                    .start();
+            phase1.awaitTermination(120_000);
+
+            List<Row> phase1SinkRows = readAllValuesFromStream(updateSink);
+            assertThat(phase1SinkRows).isNotEmpty();
+            long phase1MaxSinkOffset = phase1SinkRows.stream()
+                    .mapToLong(row -> row.getAs("offset"))
+                    .max().orElse(-1);
+
+            publishMessages(sourceStream, 30, "resume2-");
+            Thread.sleep(2000);
+
+            StreamingQuery phase2 = spark.readStream()
+                    .format("rabbitmq_streams")
+                    .option("endpoints", streamEndpoint())
+                    .option("stream", sourceStream)
+                    .option("startingOffsets", "earliest")
+                    .option("maxRecordsPerTrigger", "10")
+                    .option("metadataFields", "")
+                    .option("addressResolverClass",
+                            "com.rabbitmq.spark.connector.TestAddressResolver")
+                    .load()
+                    .selectExpr("CAST(offset % 3 AS STRING) AS k")
+                    .groupBy("k")
+                    .count()
+                    .selectExpr("CAST(concat(k, ':', CAST(count AS STRING)) AS BINARY) AS value")
+                    .writeStream()
+                    .format("rabbitmq_streams")
+                    .outputMode("update")
+                    .option("endpoints", streamEndpoint())
+                    .option("stream", updateSink)
+                    .option("checkpointLocation", updateCheckpoint.toString())
+                    .option("addressResolverClass",
+                            "com.rabbitmq.spark.connector.TestAddressResolver")
+                    .trigger(Trigger.AvailableNow())
+                    .start();
+            phase2.awaitTermination(120_000);
+
+            List<Row> allSinkRows = readAllValuesFromStream(updateSink);
+            assertThat(allSinkRows.size()).isGreaterThan(phase1SinkRows.size());
+
+            Map<String, Long> maxByKey = new HashMap<>();
+            for (Row row : allSinkRows) {
+                String update = new String((byte[]) row.getAs("value"));
+                String[] parts = update.split(":");
+                String key = parts[0];
+                long count = Long.parseLong(parts[1]);
+                maxByKey.merge(key, count, Math::max);
+            }
+            assertThat(maxByKey).containsEntry("0", 20L)
+                    .containsEntry("1", 20L)
+                    .containsEntry("2", 20L);
+
+            List<String> phase2Updates = allSinkRows.stream()
+                    .filter(row -> (Long) row.getAs("offset") > phase1MaxSinkOffset)
+                    .sorted(Comparator.comparingLong(row -> row.getAs("offset")))
+                    .map(row -> new String((byte[]) row.getAs("value")))
+                    .toList();
+            assertThat(phase2Updates).isNotEmpty();
+            assertThat(phase2Updates).allMatch(v -> Long.parseLong(v.split(":")[1]) > 10L);
+        } finally {
+            deleteStream(updateSink);
+        }
+    }
+
+    // ---- IT-SINK-UPDATE-004: append regression after update support ----
+
+    @Test
+    void streamingSinkAppendModeStillWorksAfterUpdateSupport() throws Exception {
+        publishMessages(sourceStream, 25, "append-regression-");
+        Thread.sleep(2000);
+
+        Path sinkCheckpointDir = Files.createTempDirectory("spark-sink-append-regression-ckpt-");
+        StreamingQuery query = spark.readStream()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", sourceStream)
+                .option("startingOffsets", "earliest")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load()
+                .select("value")
+                .writeStream()
+                .format("rabbitmq_streams")
+                .outputMode("append")
+                .option("endpoints", streamEndpoint())
+                .option("stream", sinkStream)
+                .option("checkpointLocation", sinkCheckpointDir.toString())
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .trigger(Trigger.AvailableNow())
+                .start();
+
+        query.awaitTermination(120_000);
+
+        Set<String> values = readAllValuesFromStream(sinkStream).stream()
+                .map(row -> new String((byte[]) row.getAs("value")))
+                .collect(Collectors.toSet());
+
+        assertThat(values).hasSize(25);
+        assertThat(values).allMatch(v -> v.startsWith("append-regression-"));
     }
 
     @Test
@@ -1312,6 +1589,19 @@ class StreamingIT extends AbstractRabbitMQIT {
         }
         return spark.read().schema(MINIMAL_OUTPUT_SCHEMA)
                 .parquet(outputDir.toString())
+                .collectAsList();
+    }
+
+    private List<Row> readAllValuesFromStream(String stream) {
+        return spark.read()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("startingOffsets", "earliest")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load()
                 .collectAsList();
     }
 

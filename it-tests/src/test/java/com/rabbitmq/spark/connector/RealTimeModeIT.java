@@ -311,7 +311,7 @@ class RealTimeModeIT extends AbstractRabbitMQIT {
                             "com.rabbitmq.spark.connector.TestAddressResolver")
                     .load()
                     .writeStream()
-                    .outputMode("append")
+                    .outputMode("update")
                     .foreach(new RowCollector())
                     .option("checkpointLocation", ssCheckpointDir.toString())
                     .trigger(createRealTimeTrigger("2 seconds"))
