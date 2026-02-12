@@ -1,5 +1,6 @@
 package com.rabbitmq.spark.connector;
 
+import com.rabbitmq.stream.Message;
 import org.apache.spark.SparkIllegalArgumentException;
 import org.apache.spark.sql.ForeachWriter;
 import org.apache.spark.sql.Row;
@@ -310,7 +311,7 @@ class RealTimeModeIT extends AbstractRabbitMQIT {
                             "com.rabbitmq.spark.connector.TestAddressResolver")
                     .load()
                     .writeStream()
-                    .outputMode("update")
+                    .outputMode("append")
                     .foreach(new RowCollector())
                     .option("checkpointLocation", ssCheckpointDir.toString())
                     .trigger(createRealTimeTrigger("2 seconds"))
@@ -415,6 +416,7 @@ class RealTimeModeIT extends AbstractRabbitMQIT {
                     .option("addressResolverClass",
                             "com.rabbitmq.spark.connector.TestAddressResolver")
                     .load()
+                    .select("value")
                     .writeStream()
                     .format("rabbitmq_streams")
                     .outputMode("update")
@@ -429,6 +431,56 @@ class RealTimeModeIT extends AbstractRabbitMQIT {
                     .isInstanceOf(SparkIllegalArgumentException.class)
                     .hasMessageContaining("sink allowlist");
         } finally {
+            deleteStream(sinkStream);
+        }
+    }
+
+    @Test
+    void realTimeModeConnectorSinkWithAllowlistOverrideWritesData() throws Exception {
+        String sinkStream = uniqueStreamName();
+        Path sinkCheckpointDir = Files.createTempDirectory("spark-rt-sink-checkpoint-");
+        createStream(sinkStream);
+        spark.conf().set("spark.sql.streaming.realTimeMode.allowlistCheck", "false");
+        try {
+            StreamingQuery query = spark.readStream()
+                    .format("rabbitmq_streams")
+                    .option("endpoints", streamEndpoint())
+                    .option("stream", sourceStream)
+                    .option("startingOffsets", "latest")
+                    .option("serverSideOffsetTracking", "false")
+                    .option("metadataFields", "")
+                    .option("addressResolverClass",
+                            "com.rabbitmq.spark.connector.TestAddressResolver")
+                    .load()
+                    // Sink accepts a write schema, not the full source schema.
+                    // Mirror Kafka sink tests: project only sink payload columns.
+                    .select("value")
+                    .writeStream()
+                    .format("rabbitmq_streams")
+                    .outputMode("update")
+                    .option("endpoints", streamEndpoint())
+                    .option("stream", sinkStream)
+                    .option("addressResolverClass",
+                            "com.rabbitmq.spark.connector.TestAddressResolver")
+                    .option("checkpointLocation", sinkCheckpointDir.toString())
+                    .trigger(createRealTimeTrigger("2 seconds"))
+                    .start();
+
+            try {
+                Thread.sleep(3000);
+                publishMessages(sourceStream, 10, "sink-live-");
+                List<Message> sinkMessages = consumeMessages(sinkStream, 10);
+                Set<String> payloads = new HashSet<>();
+                for (Message msg : sinkMessages) {
+                    payloads.add(new String(msg.getBodyAsBinary(), StandardCharsets.UTF_8));
+                }
+                assertThat(payloads).hasSize(10);
+                assertThat(payloads).allMatch(v -> v.startsWith("sink-live-"));
+            } finally {
+                query.stop();
+            }
+        } finally {
+            spark.conf().unset("spark.sql.streaming.realTimeMode.allowlistCheck");
             deleteStream(sinkStream);
         }
     }

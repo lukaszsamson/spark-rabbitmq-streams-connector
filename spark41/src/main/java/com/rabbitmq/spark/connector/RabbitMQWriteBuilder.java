@@ -2,6 +2,7 @@ package com.rabbitmq.spark.connector;
 
 import org.apache.spark.sql.connector.write.Write;
 import org.apache.spark.sql.connector.write.WriteBuilder;
+import org.apache.spark.sql.internal.connector.SupportsStreamingUpdateAsAppend;
 import org.apache.spark.sql.types.StructType;
 
 /**
@@ -10,7 +11,7 @@ import org.apache.spark.sql.types.StructType;
  * <p>Validation runs eagerly at construction time: sink-specific options are
  * checked and the input schema is validated against the expected sink columns.
  */
-final class RabbitMQWriteBuilder implements WriteBuilder {
+final class RabbitMQWriteBuilder implements WriteBuilder, SupportsStreamingUpdateAsAppend {
 
     private final ConnectorOptions options;
     private final StructType inputSchema;
