@@ -366,6 +366,66 @@ class RealTimeModeIT extends AbstractRabbitMQIT {
     }
 
     @Test
+    void realTimeModeSuperstreamContinuesAfterPartitionDeletion() throws Exception {
+        String superStream = "rt-super-refresh-" + System.currentTimeMillis();
+        String partition0 = superStream + "-0";
+        String partition1 = superStream + "-1";
+        String partition2 = superStream + "-2";
+        createSuperStream(superStream, 3);
+        try {
+            publishMessages(partition0, 10, "pre-p0-");
+            publishMessages(partition1, 10, "pre-p1-");
+            publishMessages(partition2, 10, "pre-p2-");
+            Thread.sleep(2000);
+
+            Path ssCheckpointDir = Files.createTempDirectory("spark-rt-ss-refresh-checkpoint-");
+
+            StreamingQuery query = spark.readStream()
+                    .format("rabbitmq_streams")
+                    .option("endpoints", streamEndpoint())
+                    .option("superstream", superStream)
+                    .option("startingOffsets", "earliest")
+                    .option("failOnDataLoss", "false")
+                    .option("metadataFields", "")
+                    .option("addressResolverClass",
+                            "com.rabbitmq.spark.connector.TestAddressResolver")
+                    .load()
+                    .writeStream()
+                    .outputMode("update")
+                    .foreach(new RowCollector())
+                    .option("checkpointLocation", ssCheckpointDir.toString())
+                    .trigger(createRealTimeTrigger("2 seconds"))
+                    .start();
+
+            try {
+                awaitAtLeastRows(30, 30_000);
+                assertThat(payloadsWithPrefix("pre-p0-")).hasSize(10);
+                assertThat(payloadsWithPrefix("pre-p1-")).hasSize(10);
+                assertThat(payloadsWithPrefix("pre-p2-")).hasSize(10);
+
+                COLLECTED_ROWS.clear();
+                deleteStream(partition2);
+                Thread.sleep(1500);
+
+                publishMessages(partition0, 8, "post-p0-");
+                publishMessages(partition1, 8, "post-p1-");
+
+                awaitAtLeastRows(16, 30_000);
+            } finally {
+                if (query.isActive()) {
+                    query.stop();
+                }
+            }
+
+            assertThat(payloadsWithPrefix("post-p0-")).hasSize(8);
+            assertThat(payloadsWithPrefix("post-p1-")).hasSize(8);
+            assertThat(payloadsWithPrefix("post-p2-")).isEmpty();
+        } finally {
+            deleteSuperStream(superStream);
+        }
+    }
+
+    @Test
     void realTimeModeStartingOffsetsLatestSkipsHistorical() throws Exception {
         publishMessages(sourceStream, 20, "old-");
         Thread.sleep(2000);

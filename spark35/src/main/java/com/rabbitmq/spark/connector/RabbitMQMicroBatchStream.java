@@ -435,12 +435,16 @@ final class RabbitMQMicroBatchStream
 
         RabbitMQStreamOffset start = (RabbitMQStreamOffset) startOffset;
         Map<String, Long> startMap = start.getStreamOffsets();
+        Map<String, Long> effectiveStartMap = new LinkedHashMap<>(startMap);
+        for (String stream : tailOffsets.keySet()) {
+            effectiveStartMap.computeIfAbsent(stream, this::resolveStartingOffset);
+        }
 
         // Ensure tail offsets never go backwards due to failed per-stream queries
         // (queryStreamTailOffset returns 0 on failure which may be less than start)
         Map<String, Long> safeTail = new LinkedHashMap<>(tailOffsets);
         for (Map.Entry<String, Long> entry : safeTail.entrySet()) {
-            long startOff = startMap.getOrDefault(entry.getKey(), 0L);
+            long startOff = effectiveStartMap.getOrDefault(entry.getKey(), 0L);
             if (entry.getValue() < startOff) {
                 entry.setValue(startOff);
             }
@@ -451,7 +455,7 @@ final class RabbitMQMicroBatchStream
         // Check if any stream has new data
         boolean hasNewData = false;
         for (Map.Entry<String, Long> entry : tailOffsets.entrySet()) {
-            long startOff = startMap.getOrDefault(entry.getKey(), 0L);
+            long startOff = effectiveStartMap.getOrDefault(entry.getKey(), 0L);
             if (entry.getValue() > startOff) {
                 hasNewData = true;
                 break;
@@ -463,7 +467,7 @@ final class RabbitMQMicroBatchStream
         }
 
         // Apply read limit budget
-        Map<String, Long> endOffsets = applyReadLimit(startMap, tailOffsets, limit);
+        Map<String, Long> endOffsets = applyReadLimit(effectiveStartMap, tailOffsets, limit);
 
         RabbitMQStreamOffset latest = new RabbitMQStreamOffset(endOffsets);
         cachedLatestOffset = latest;
@@ -565,27 +569,43 @@ final class RabbitMQMicroBatchStream
     // ---- Internal helpers ----
 
     private List<String> discoverStreams() {
-        if (streams != null) {
-            if (streams.isEmpty() && !options.isStreamMode()) {
-                throw new IllegalStateException(
-                        "Superstream '" + options.getSuperStream() +
-                                "' has no partition streams");
+        if (options.isStreamMode()) {
+            if (streams == null) {
+                streams = List.of(options.getStream());
             }
             return streams;
         }
 
-        if (options.isStreamMode()) {
-            streams = List.of(options.getStream());
-        } else {
-            streams = SuperStreamPartitionDiscovery.discoverPartitions(
-                    options, options.getSuperStream());
-            if (streams.isEmpty()) {
+        List<String> previous = streams;
+        try {
+            List<String> discovered = SuperStreamPartitionDiscovery.discoverPartitions(
+                    getEnvironment(), options.getSuperStream());
+            if (discovered.isEmpty()) {
                 throw new IllegalStateException(
                         "Superstream '" + options.getSuperStream() +
                                 "' has no partition streams");
             }
-            LOG.info("Discovered {} partition streams for superstream '{}'",
-                    streams.size(), options.getSuperStream());
+
+            if (previous == null) {
+                LOG.info("Discovered {} partition streams for superstream '{}'",
+                        discovered.size(), options.getSuperStream());
+            } else if (!new LinkedHashSet<>(previous).equals(new LinkedHashSet<>(discovered))) {
+                LOG.info("Refreshed partition streams for superstream '{}': {} -> {}",
+                        options.getSuperStream(), previous.size(), discovered.size());
+            }
+            streams = discovered;
+        } catch (Exception e) {
+            if (previous == null) {
+                throw e;
+            }
+            LOG.warn("Failed to refresh superstream '{}' partition streams, using cached topology: {}",
+                    options.getSuperStream(), e.getMessage());
+            streams = previous;
+        }
+        if (streams.isEmpty()) {
+            throw new IllegalStateException(
+                    "Superstream '" + options.getSuperStream() +
+                            "' has no partition streams");
         }
         return streams;
     }

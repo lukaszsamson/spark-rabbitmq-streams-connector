@@ -755,6 +755,65 @@ class SuperStreamIT extends AbstractRabbitMQIT {
         assertThat(streams).doesNotContain(superStream + "-1");
     }
 
+    @Test
+    void triggerAvailableNowRefreshesTopologyAfterPartitionDeletion() throws Exception {
+        String p0 = superStream + "-0";
+        String p1 = superStream + "-1";
+        String p2 = superStream + "-2";
+
+        publishMessages(p0, 120, "dyn-p0-");
+        publishMessages(p1, 120, "dyn-p1-");
+        publishMessages(p2, 120, "dyn-p2-");
+        Thread.sleep(2000);
+
+        Path checkpointDir = Files.createTempDirectory("spark-checkpoint-ss-dyn-");
+        Path outputDir = Files.createTempDirectory("spark-output-ss-dyn-");
+        AtomicBoolean deleted = new AtomicBoolean(false);
+
+        StreamingQuery query = spark.readStream()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("superstream", superStream)
+                .option("startingOffsets", "earliest")
+                .option("failOnDataLoss", "false")
+                .option("maxRecordsPerTrigger", "15")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load()
+                .writeStream()
+                .foreachBatch((batch, batchId) -> {
+                    batch.write()
+                            .mode("append")
+                            .format("parquet")
+                            .save(outputDir.toString());
+                    if (batchId == 0L && deleted.compareAndSet(false, true)) {
+                        deleteStream(p2);
+                    }
+                })
+                .option("checkpointLocation", checkpointDir.toString())
+                .trigger(Trigger.AvailableNow())
+                .start();
+
+        query.awaitTermination(120_000);
+        assertThat(deleted.get()).isTrue();
+
+        List<Row> rows = spark.read().schema(MINIMAL_OUTPUT_SCHEMA)
+                .parquet(outputDir.toString())
+                .collectAsList();
+
+        Map<String, Long> countsByStream = rows.stream()
+                .collect(Collectors.groupingBy(
+                        row -> row.getAs("stream").toString(),
+                        Collectors.counting()));
+
+        assertThat(countsByStream).containsEntry(p0, 120L);
+        assertThat(countsByStream).containsEntry(p1, 120L);
+        assertThat(countsByStream.getOrDefault(p2, 0L)).isLessThan(120L);
+        assertThat(rows.size()).isGreaterThan(240);
+        assertThat(rows.size()).isLessThan(360);
+    }
+
     // ---- IT-DATALOSS-006: failOnDataLoss=false no duplicates ----
 
     @Test
@@ -1011,4 +1070,5 @@ class SuperStreamIT extends AbstractRabbitMQIT {
         }
         return spark.read().schema(MINIMAL_OUTPUT_SCHEMA).parquet(outputDir.toString()).count();
     }
+
 }

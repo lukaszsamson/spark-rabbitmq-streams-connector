@@ -586,6 +586,23 @@ class RabbitMQMicroBatchStreamTest {
         }
 
         @Test
+        void latestOffsetUsesConfiguredStartForStreamsMissingFromCheckpoint() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("superstream", "super");
+            opts.put("startingOffsets", "offset");
+            opts.put("startingOffset", "5");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            setPrivateField(stream, "availableNowSnapshot", Map.of("s1", 10L, "s2", 4L));
+
+            RabbitMQStreamOffset start = new RabbitMQStreamOffset(Map.of("s1", 10L));
+            Offset latest = stream.latestOffset(start, ReadLimit.allAvailable());
+
+            assertThat(latest).isSameAs(start);
+        }
+
+        @Test
         @Tag("spark4x")
         void compositeReadLimitAppliesMostRestrictivePerStream() throws Exception {
             RabbitMQMicroBatchStream stream = createStream(minimalOptions());
