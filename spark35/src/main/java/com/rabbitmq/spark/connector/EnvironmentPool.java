@@ -47,7 +47,8 @@ final class EnvironmentPool {
             String tlsTruststorePassword,
             String tlsKeystore,
             String tlsKeystorePassword,
-            String addressResolverClass
+            String addressResolverClass,
+            String observationCollectorClass
     ) {
         static EnvironmentKey from(ConnectorOptions options) {
             return new EnvironmentKey(
@@ -62,7 +63,8 @@ final class EnvironmentPool {
                     options.getTlsTruststorePassword(),
                     options.getTlsKeystore(),
                     options.getTlsKeystorePassword(),
-                    options.getAddressResolverClass()
+                    options.getAddressResolverClass(),
+                    options.getObservationCollectorClass()
             );
         }
     }

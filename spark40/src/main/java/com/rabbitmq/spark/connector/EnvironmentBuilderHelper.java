@@ -42,6 +42,7 @@ final class EnvironmentBuilderHelper {
         configureCredentials(builder, options);
         configureTls(builder, options);
         configureAddressResolver(builder, options);
+        configureObservationCollector(builder, options);
         configureTuning(builder, options);
 
         return builder.build();
@@ -115,6 +116,24 @@ final class EnvironmentBuilderHelper {
                     new ConnectorAddressResolver.Address(address.host(), address.port()));
             return new Address(resolved.host(), resolved.port());
         });
+    }
+
+    private static void configureObservationCollector(EnvironmentBuilder builder,
+                                                      ConnectorOptions options) {
+        String collectorClass = options.getObservationCollectorClass();
+        if (collectorClass == null || collectorClass.isEmpty()) {
+            return;
+        }
+        ConnectorObservationCollectorFactory factory = ExtensionLoader.load(
+                collectorClass, ConnectorObservationCollectorFactory.class,
+                ConnectorOptions.OBSERVATION_COLLECTOR_CLASS);
+        var collector = factory.create(options);
+        if (collector == null) {
+            throw new IllegalArgumentException(
+                    "Class specified by '" + ConnectorOptions.OBSERVATION_COLLECTOR_CLASS +
+                            "' returned null ObservationCollector");
+        }
+        builder.observationCollector(collector);
     }
 
     private static void configureTuning(EnvironmentBuilder builder, ConnectorOptions options) {

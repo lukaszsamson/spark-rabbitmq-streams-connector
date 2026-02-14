@@ -139,6 +139,19 @@ class EnvironmentPoolTest {
         }
 
         @Test
+        void keyIncludesObservationCollectorClass() {
+            Map<String, String> map1 = minimalMap("localhost:5552", "test-stream");
+
+            Map<String, String> map2 = minimalMap("localhost:5552", "test-stream");
+            map2.put("observationCollectorClass", "com.example.MyObservationCollector");
+
+            var key1 = EnvironmentPool.EnvironmentKey.from(new ConnectorOptions(map1));
+            var key2 = EnvironmentPool.EnvironmentKey.from(new ConnectorOptions(map2));
+
+            assertThat(key1).isNotEqualTo(key2);
+        }
+
+        @Test
         void uriBasedKeyDiffersFromEndpointBased() {
             Map<String, String> map1 = minimalMap("localhost:5552", "test-stream");
 

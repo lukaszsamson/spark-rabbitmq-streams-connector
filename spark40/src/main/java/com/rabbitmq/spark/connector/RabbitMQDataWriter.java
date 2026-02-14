@@ -53,6 +53,9 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
     // Metrics
     private long recordsWritten = 0;
     private long bytesWritten = 0;
+    private final AtomicLong writeLatencyMs = new AtomicLong(0);
+    private final AtomicLong publishConfirms = new AtomicLong(0);
+    private final AtomicLong publishErrors = new AtomicLong(0);
 
     RabbitMQDataWriter(ConnectorOptions options, StructType inputSchema,
                        int partitionId, long taskId, long epochId) {
@@ -109,15 +112,22 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
 
         // Track outstanding confirms
         outstandingConfirms.incrementAndGet();
+        long sendStartNanos = System.nanoTime();
 
         // Send with confirmation handler
         try {
             producer.send(message, confirmationStatus -> {
+                long elapsedMs = TimeUnit.NANOSECONDS.toMillis(
+                        System.nanoTime() - sendStartNanos);
+                writeLatencyMs.addAndGet(Math.max(0L, elapsedMs));
                 if (!confirmationStatus.isConfirmed()) {
+                    publishErrors.incrementAndGet();
                     sendError.compareAndSet(null,
                             new IOException("Message confirmation failed with code " +
                                     confirmationStatus.getCode() +
                                     " on partition " + partitionId));
+                } else {
+                    publishConfirms.incrementAndGet();
                 }
                 synchronized (confirmMonitor) {
                     if (outstandingConfirms.decrementAndGet() == 0) {
@@ -127,6 +137,7 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
             });
         } catch (Exception e) {
             outstandingConfirms.decrementAndGet();
+            publishErrors.incrementAndGet();
             throw new IOException("Failed to send message on partition " + partitionId, e);
         }
 
@@ -218,6 +229,12 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
         return new CustomTaskMetric[]{
                 RabbitMQSinkMetrics.taskMetric(RabbitMQSinkMetrics.RECORDS_WRITTEN, recordsWritten),
                 RabbitMQSinkMetrics.taskMetric(RabbitMQSinkMetrics.BYTES_WRITTEN, bytesWritten),
+                RabbitMQSinkMetrics.taskMetric(RabbitMQSinkMetrics.WRITE_LATENCY_MS,
+                        writeLatencyMs.get()),
+                RabbitMQSinkMetrics.taskMetric(RabbitMQSinkMetrics.PUBLISH_CONFIRMS,
+                        publishConfirms.get()),
+                RabbitMQSinkMetrics.taskMetric(RabbitMQSinkMetrics.PUBLISH_ERRORS,
+                        publishErrors.get()),
         };
     }
 

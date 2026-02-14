@@ -160,14 +160,16 @@ class RabbitMQWriteTest {
         void supportedCustomMetricsIncludesWriteMetrics() {
             Write write = buildWrite();
             CustomMetric[] metrics = write.supportedCustomMetrics();
-            assertThat(metrics).hasSize(2);
+            assertThat(metrics).hasSize(5);
 
             Set<String> names = new HashSet<>();
             for (CustomMetric m : metrics) {
                 names.add(m.name());
                 assertThat(m).isInstanceOf(CustomSumMetric.class);
             }
-            assertThat(names).containsExactlyInAnyOrder("recordsWritten", "bytesWritten");
+            assertThat(names).containsExactlyInAnyOrder(
+                    "recordsWritten", "bytesWritten", "writeLatencyMs",
+                    "publishConfirms", "publishErrors");
         }
     }
 
@@ -340,7 +342,7 @@ class RabbitMQWriteTest {
             // createWriter returns a DataWriter; it won't connect until write() is called
             var writer = factory.createWriter(0, 1);
             assertThat(writer).isInstanceOf(RabbitMQDataWriter.class);
-            assertThat(writer.currentMetricsValues()).hasSize(2);
+            assertThat(writer.currentMetricsValues()).hasSize(5);
         }
 
         @Test
@@ -349,7 +351,7 @@ class RabbitMQWriteTest {
                     minimalSinkOptions(), minimalSinkSchema());
             var writer = factory.createWriter(0, 1, 0L);
             assertThat(writer).isInstanceOf(RabbitMQDataWriter.class);
-            assertThat(writer.currentMetricsValues()).hasSize(2);
+            assertThat(writer.currentMetricsValues()).hasSize(5);
         }
     }
 
@@ -364,6 +366,9 @@ class RabbitMQWriteTest {
         void metricsHaveCorrectNames() {
             assertThat(RabbitMQSinkMetrics.RECORDS_WRITTEN).isEqualTo("recordsWritten");
             assertThat(RabbitMQSinkMetrics.BYTES_WRITTEN).isEqualTo("bytesWritten");
+            assertThat(RabbitMQSinkMetrics.WRITE_LATENCY_MS).isEqualTo("writeLatencyMs");
+            assertThat(RabbitMQSinkMetrics.PUBLISH_CONFIRMS).isEqualTo("publishConfirms");
+            assertThat(RabbitMQSinkMetrics.PUBLISH_ERRORS).isEqualTo("publishErrors");
         }
 
         @Test
@@ -424,7 +429,7 @@ class RabbitMQWriteTest {
             RabbitMQDataWriter writer = new RabbitMQDataWriter(
                     minimalSinkOptions(), minimalSinkSchema(), 0, 1, -1);
             var metrics = writer.currentMetricsValues();
-            assertThat(metrics).hasSize(2);
+            assertThat(metrics).hasSize(5);
             for (var m : metrics) {
                 assertThat(m.value()).isEqualTo(0);
             }
@@ -659,6 +664,20 @@ class RabbitMQWriteTest {
         }
 
         @Test
+        void metricsIncludePublishConfirmsAndLatencyOnSuccessfulSend() throws Exception {
+            RabbitMQDataWriter writer = new RabbitMQDataWriter(
+                    minimalSinkOptions(), minimalSinkSchema(), 0, 1, -1);
+            setPrivateField(writer, "producer", new NoopProducer());
+
+            writer.write(new GenericInternalRow(new Object[]{"x".getBytes()}));
+
+            Map<String, Long> metrics = metricsByName(writer.currentMetricsValues());
+            assertThat(metrics.get("publishConfirms")).isEqualTo(1L);
+            assertThat(metrics.get("publishErrors")).isEqualTo(0L);
+            assertThat(metrics.get("writeLatencyMs")).isGreaterThanOrEqualTo(0L);
+        }
+
+        @Test
         void initProducerAppliesOptions() throws Exception {
             Map<String, String> opts = minimalSinkMap();
             opts.put("maxInFlight", "7");
@@ -829,6 +848,14 @@ class RabbitMQWriteTest {
         var field = target.getClass().getDeclaredField(fieldName);
         field.setAccessible(true);
         return field.get(target);
+    }
+
+    private static Map<String, Long> metricsByName(org.apache.spark.sql.connector.metric.CustomTaskMetric[] metrics) {
+        Map<String, Long> byName = new HashMap<>();
+        for (var metric : metrics) {
+            byName.put(metric.name(), metric.value());
+        }
+        return byName;
     }
 
     /**

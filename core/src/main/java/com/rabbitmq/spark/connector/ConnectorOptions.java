@@ -35,6 +35,7 @@ public final class ConnectorOptions implements Serializable {
     public static final String METADATA_FIELDS = "metadataFields";
     public static final String FAIL_ON_DATA_LOSS = "failOnDataLoss";
     public static final String ADDRESS_RESOLVER_CLASS = "addressResolverClass";
+    public static final String OBSERVATION_COLLECTOR_CLASS = "observationCollectorClass";
     public static final String ENVIRONMENT_ID = "environmentId";
     public static final String RPC_TIMEOUT_MS = "rpcTimeoutMs";
     public static final String REQUESTED_HEARTBEAT_SECONDS = "requestedHeartbeatSeconds";
@@ -121,6 +122,7 @@ public final class ConnectorOptions implements Serializable {
     private final Set<MetadataField> metadataFields;
     private final boolean failOnDataLoss;
     private final String addressResolverClass;
+    private final String observationCollectorClass;
     private final String environmentId;
     private final Long rpcTimeoutMs;
     private final Long requestedHeartbeatSeconds;
@@ -190,6 +192,7 @@ public final class ConnectorOptions implements Serializable {
                 getString(options, METADATA_FIELDS, DEFAULT_METADATA_FIELDS));
         this.failOnDataLoss = getBoolean(options, FAIL_ON_DATA_LOSS, DEFAULT_FAIL_ON_DATA_LOSS);
         this.addressResolverClass = getString(options, ADDRESS_RESOLVER_CLASS);
+        this.observationCollectorClass = getString(options, OBSERVATION_COLLECTOR_CLASS);
         this.environmentId = getString(options, ENVIRONMENT_ID);
         this.rpcTimeoutMs = getLong(options, RPC_TIMEOUT_MS);
         this.requestedHeartbeatSeconds = getLong(options, REQUESTED_HEARTBEAT_SECONDS);
@@ -286,6 +289,10 @@ public final class ConnectorOptions implements Serializable {
         if (addressResolverClass != null && !addressResolverClass.isEmpty()) {
             ExtensionLoader.load(addressResolverClass, ConnectorAddressResolver.class,
                     ADDRESS_RESOLVER_CLASS);
+        }
+        if (observationCollectorClass != null && !observationCollectorClass.isEmpty()) {
+            ExtensionLoader.load(observationCollectorClass, ConnectorObservationCollectorFactory.class,
+                    OBSERVATION_COLLECTOR_CLASS);
         }
         if (rpcTimeoutMs != null && rpcTimeoutMs <= 0) {
             throw new IllegalArgumentException(
@@ -491,6 +498,7 @@ public final class ConnectorOptions implements Serializable {
     public Set<MetadataField> getMetadataFields() { return metadataFields; }
     public boolean isFailOnDataLoss() { return failOnDataLoss; }
     public String getAddressResolverClass() { return addressResolverClass; }
+    public String getObservationCollectorClass() { return observationCollectorClass; }
     public String getEnvironmentId() { return environmentId; }
     public Long getRpcTimeoutMs() { return rpcTimeoutMs; }
     public Long getRequestedHeartbeatSeconds() { return requestedHeartbeatSeconds; }

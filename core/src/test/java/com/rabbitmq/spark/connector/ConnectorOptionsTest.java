@@ -157,6 +157,15 @@ class ConnectorOptionsTest {
         }
 
         @Test
+        void parsesObservationCollectorClass() {
+            var map = minimalStreamOptions();
+            map.put("observationCollectorClass", TestObservationCollectorFactory.class.getName());
+            var opts = new ConnectorOptions(map);
+            assertThat(opts.getObservationCollectorClass())
+                    .isEqualTo(TestObservationCollectorFactory.class.getName());
+        }
+
+        @Test
         void parsesEnvironmentTuningOptions() {
             var map = minimalStreamOptions();
             map.put("environmentId", "spark-rmq-prod");
@@ -805,6 +814,28 @@ class ConnectorOptionsTest {
         }
 
         @Test
+        void rejectsInvalidObservationCollectorClassNotFound() {
+            var map = minimalStreamOptions();
+            map.put("observationCollectorClass", "com.nonexistent.CollectorFactory");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateCommon)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("observationCollectorClass")
+                    .hasMessageContaining("not found");
+        }
+
+        @Test
+        void rejectsObservationCollectorClassWrongType() {
+            var map = minimalStreamOptions();
+            map.put("observationCollectorClass", "java.lang.String");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateCommon)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("observationCollectorClass")
+                    .hasMessageContaining("does not implement");
+        }
+
+        @Test
         void rejectsNonPositiveRpcTimeout() {
             var map = minimalStreamOptions();
             map.put("rpcTimeoutMs", "0");
@@ -1250,6 +1281,14 @@ class ConnectorOptionsTest {
                     "java.lang.String", ConnectorAddressResolver.class, "addressResolverClass"))
                     .isInstanceOf(IllegalArgumentException.class)
                     .hasMessageContaining("does not implement");
+        }
+    }
+
+    public static final class TestObservationCollectorFactory
+            implements ConnectorObservationCollectorFactory {
+        @Override
+        public com.rabbitmq.stream.ObservationCollector<?> create(ConnectorOptions options) {
+            return com.rabbitmq.stream.ObservationCollector.NO_OP;
         }
     }
 }

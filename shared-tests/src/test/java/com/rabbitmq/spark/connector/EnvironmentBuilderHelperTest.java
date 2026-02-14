@@ -139,6 +139,39 @@ class EnvironmentBuilderHelperTest {
     }
 
     @Test
+    void observationCollectorClassConfiguresBuilderCollector() throws Exception {
+        ConnectorOptions options = new ConnectorOptions(Map.of(
+                "endpoints", "hostA:5552",
+                "stream", "test-stream",
+                "observationCollectorClass",
+                "com.rabbitmq.spark.connector.EnvironmentBuilderHelperTest$TestObservationCollectorFactory"
+        ));
+
+        StreamEnvironmentBuilder builder = new StreamEnvironmentBuilder();
+        invokeConfigureObservationCollector(builder, options);
+
+        Object collector = getFieldValue(builder, "observationCollector");
+        assertThat(collector).isSameAs(TestObservationCollectorFactory.COLLECTOR);
+    }
+
+    @Test
+    void observationCollectorClassReturningNullFailsFast() {
+        ConnectorOptions options = new ConnectorOptions(Map.of(
+                "endpoints", "hostA:5552",
+                "stream", "test-stream",
+                "observationCollectorClass",
+                "com.rabbitmq.spark.connector.EnvironmentBuilderHelperTest$NullObservationCollectorFactory"
+        ));
+
+        StreamEnvironmentBuilder builder = new StreamEnvironmentBuilder();
+        assertThatThrownBy(() -> invokeConfigureObservationCollector(builder, options))
+                .hasCauseInstanceOf(IllegalArgumentException.class)
+                .cause()
+                .hasMessageContaining("observationCollectorClass")
+                .hasMessageContaining("returned null");
+    }
+
+    @Test
     void appliesHighPriorityEnvironmentTuningOptions() throws Exception {
         ConnectorOptions options = new ConnectorOptions(Map.of(
                 "endpoints", "hostA:5552",
@@ -228,6 +261,16 @@ class EnvironmentBuilderHelperTest {
         method.invoke(null, builder, options);
     }
 
+    private static void invokeConfigureObservationCollector(StreamEnvironmentBuilder builder,
+                                                            ConnectorOptions options) throws Exception {
+        Method method = EnvironmentBuilderHelper.class.getDeclaredMethod(
+                "configureObservationCollector",
+                com.rabbitmq.stream.EnvironmentBuilder.class,
+                ConnectorOptions.class);
+        method.setAccessible(true);
+        method.invoke(null, builder, options);
+    }
+
     private static Object invokeBuildSslContext(ConnectorOptions options) throws Exception {
         Method method = EnvironmentBuilderHelper.class.getDeclaredMethod(
                 "buildSslContext", ConnectorOptions.class);
@@ -293,6 +336,25 @@ class EnvironmentBuilderHelperTest {
         public Address resolve(Address address) {
             lastResolved = new Address("resolved-host", 6000);
             return lastResolved;
+        }
+    }
+
+    public static final class TestObservationCollectorFactory
+            implements ConnectorObservationCollectorFactory {
+        static final com.rabbitmq.stream.ObservationCollector<?> COLLECTOR =
+                com.rabbitmq.stream.ObservationCollector.NO_OP;
+
+        @Override
+        public com.rabbitmq.stream.ObservationCollector<?> create(ConnectorOptions options) {
+            return COLLECTOR;
+        }
+    }
+
+    public static final class NullObservationCollectorFactory
+            implements ConnectorObservationCollectorFactory {
+        @Override
+        public com.rabbitmq.stream.ObservationCollector<?> create(ConnectorOptions options) {
+            return null;
         }
     }
 }

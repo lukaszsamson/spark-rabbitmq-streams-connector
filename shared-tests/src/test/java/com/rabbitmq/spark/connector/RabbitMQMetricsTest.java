@@ -47,6 +47,15 @@ class RabbitMQMetricsTest {
     }
 
     @Test
+    void sinkMetricsNamesAreUnique() {
+        Set<String> names = Arrays.stream(RabbitMQSinkMetrics.SUPPORTED_METRICS)
+                .map(CustomMetric::name)
+                .collect(Collectors.toSet());
+
+        assertThat(names).hasSize(RabbitMQSinkMetrics.SUPPORTED_METRICS.length);
+    }
+
+    @Test
     void sourceTaskMetricReturnsNameAndValue() {
         var metric = RabbitMQSourceMetrics.taskMetric("recordsRead", 42L);
         assertThat(metric.name()).isEqualTo("recordsRead");

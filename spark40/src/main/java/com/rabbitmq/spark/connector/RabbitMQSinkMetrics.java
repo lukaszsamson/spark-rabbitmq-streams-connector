@@ -18,12 +18,18 @@ public final class RabbitMQSinkMetrics {
 
     static final String RECORDS_WRITTEN = "recordsWritten";
     static final String BYTES_WRITTEN = "bytesWritten";
+    static final String WRITE_LATENCY_MS = "writeLatencyMs";
+    static final String PUBLISH_CONFIRMS = "publishConfirms";
+    static final String PUBLISH_ERRORS = "publishErrors";
 
     // ---- CustomMetric definitions (registered on Write) ----
 
     static final CustomMetric[] SUPPORTED_METRICS = {
             new RecordsWrittenMetric(),
             new BytesWrittenMetric(),
+            new WriteLatencyMetric(),
+            new PublishConfirmsMetric(),
+            new PublishErrorsMetric(),
     };
 
     public static final class RecordsWrittenMetric extends CustomSumMetric {
@@ -51,6 +57,48 @@ public final class RabbitMQSinkMetrics {
         @Override
         public String description() {
             return "Total bytes written to RabbitMQ streams";
+        }
+    }
+
+    public static final class WriteLatencyMetric extends CustomSumMetric {
+        public WriteLatencyMetric() {}
+
+        @Override
+        public String name() {
+            return WRITE_LATENCY_MS;
+        }
+
+        @Override
+        public String description() {
+            return "Total publisher confirmation latency in milliseconds";
+        }
+    }
+
+    public static final class PublishConfirmsMetric extends CustomSumMetric {
+        public PublishConfirmsMetric() {}
+
+        @Override
+        public String name() {
+            return PUBLISH_CONFIRMS;
+        }
+
+        @Override
+        public String description() {
+            return "Total publish confirms received";
+        }
+    }
+
+    public static final class PublishErrorsMetric extends CustomSumMetric {
+        public PublishErrorsMetric() {}
+
+        @Override
+        public String name() {
+            return PUBLISH_ERRORS;
+        }
+
+        @Override
+        public String description() {
+            return "Total publish errors and negative confirms";
         }
     }
 
