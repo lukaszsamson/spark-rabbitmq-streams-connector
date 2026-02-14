@@ -1,121 +1,105 @@
 package com.rabbitmq.spark.connector;
 
-import com.rabbitmq.stream.impl.Client;
+import com.rabbitmq.stream.ConsumerBuilder;
+import com.rabbitmq.stream.Environment;
+import com.rabbitmq.stream.ProducerBuilder;
+import com.rabbitmq.stream.StreamCreator;
+import com.rabbitmq.stream.StreamStats;
 import org.junit.jupiter.api.Test;
 
-import java.lang.reflect.Method;
-import java.util.Map;
+import java.util.List;
+import java.util.function.Function;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * Unit tests for superstream partition discovery parameter parsing without
- * connecting to a broker.
+ * Unit tests for superstream partition discovery logic without requiring a broker.
  */
 class SuperStreamPartitionDiscoveryTest {
 
     @Test
-    void endpointParsingHostAndPort() throws Exception {
-        ConnectorOptions options = new ConnectorOptions(Map.of(
-                "endpoints", "hostA:6000",
-                "superstream", "super"
-        ));
+    void discoversPartitionsViaEnvironmentLocatorOperation() {
+        StubEnvironment env = new StubEnvironment(List.of("super-0", "super-1"));
 
-        Client.ClientParameters params = buildParams(options);
+        List<String> partitions = SuperStreamPartitionDiscovery.discoverPartitions(env, "super");
 
-        assertThat(getField(params, "host")).isEqualTo("hostA");
-        assertThat(getField(params, "port")).isEqualTo(6000);
+        assertThat(partitions).containsExactly("super-0", "super-1");
+        assertThat(env.maybeInitialized).isTrue();
     }
 
     @Test
-    void endpointHostOnlyUsesDefaultPort() throws Exception {
-        ConnectorOptions options = new ConnectorOptions(Map.of(
-                "endpoints", "hostOnly",
-                "superstream", "super"
-        ));
+    void wrapsReflectionFailuresWithStateException() {
+        Environment env = new MinimalEnvironment();
 
-        Client.ClientParameters params = buildParams(options);
-
-        assertThat(getField(params, "host")).isEqualTo("hostOnly");
-        assertThat(getField(params, "port")).isEqualTo(Client.DEFAULT_PORT);
+        assertThatThrownBy(() -> SuperStreamPartitionDiscovery.discoverPartitions(env, "super"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Unable to discover superstream partitions");
     }
 
-    @Test
-    void uriParsingHostAndPort() throws Exception {
-        ConnectorOptions options = new ConnectorOptions(Map.of(
-                "uris", "rabbitmq-stream://uri-host:6001",
-                "superstream", "super"
-        ));
+    private static final class StubEnvironment extends MinimalEnvironment {
+        private final List<String> partitions;
+        private boolean maybeInitialized;
 
-        Client.ClientParameters params = buildParams(options);
+        private StubEnvironment(List<String> partitions) {
+            this.partitions = partitions;
+        }
 
-        assertThat(getField(params, "host")).isEqualTo("uri-host");
-        assertThat(getField(params, "port")).isEqualTo(6001);
+        @SuppressWarnings("unused")
+        void maybeInitializeLocator() {
+            this.maybeInitialized = true;
+        }
+
+        @SuppressWarnings("unused")
+        Object locatorOperation(Function<com.rabbitmq.stream.impl.Client, List<String>> operation) {
+            return this.partitions;
+        }
     }
 
-    @Test
-    void endpointsTakePrecedenceOverUris() throws Exception {
-        ConnectorOptions options = new ConnectorOptions(Map.of(
-                "endpoints", "hostA:6000",
-                "uris", "rabbitmq-stream://uri-host:6001",
-                "superstream", "super"
-        ));
+    private static class MinimalEnvironment implements Environment {
+        @Override
+        public StreamCreator streamCreator() {
+            throw new UnsupportedOperationException();
+        }
 
-        Client.ClientParameters params = buildParams(options);
+        @Override
+        public void deleteStream(String stream) {
+            throw new UnsupportedOperationException();
+        }
 
-        assertThat(getField(params, "host")).isEqualTo("hostA");
-        assertThat(getField(params, "port")).isEqualTo(6000);
-    }
+        @Override
+        public void deleteSuperStream(String superStream) {
+            throw new UnsupportedOperationException();
+        }
 
-    @Test
-    void malformedEndpointThrows() throws Exception {
-        ConnectorOptions options = new ConnectorOptions(Map.of(
-                "endpoints", "hostA:not-a-port",
-                "superstream", "super"
-        ));
+        @Override
+        public StreamStats queryStreamStats(String stream) {
+            throw new UnsupportedOperationException();
+        }
 
-        assertThatThrownBy(() -> buildParams(options))
-                .hasCauseInstanceOf(NumberFormatException.class);
-    }
+        @Override
+        public void storeOffset(String reference, String stream, long offset) {
+            throw new UnsupportedOperationException();
+        }
 
-    @Test
-    void credentialsAndVhostAreApplied() throws Exception {
-        ConnectorOptions options = new ConnectorOptions(Map.of(
-                "endpoints", "hostA:6000",
-                "superstream", "super",
-                "username", "user",
-                "password", "secret",
-                "vhost", "/v1"
-        ));
+        @Override
+        public boolean streamExists(String stream) {
+            throw new UnsupportedOperationException();
+        }
 
-        Client.ClientParameters params = buildParams(options);
+        @Override
+        public ProducerBuilder producerBuilder() {
+            throw new UnsupportedOperationException();
+        }
 
-        Object creds = getField(params, "credentialsProvider");
-        Object username = invokeGetter(creds, "getUsername");
-        Object password = invokeGetter(creds, "getPassword");
-        Object vhost = getField(params, "virtualHost");
+        @Override
+        public ConsumerBuilder consumerBuilder() {
+            throw new UnsupportedOperationException();
+        }
 
-        assertThat(username).isEqualTo("user");
-        assertThat(password).isEqualTo("secret");
-        assertThat(vhost).isEqualTo("/v1");
-    }
-
-    private static Client.ClientParameters buildParams(ConnectorOptions options) throws Exception {
-        Method method = SuperStreamPartitionDiscovery.class.getDeclaredMethod(
-                "buildClientParams", ConnectorOptions.class);
-        method.setAccessible(true);
-        return (Client.ClientParameters) method.invoke(null, options);
-    }
-
-    private static Object getField(Object target, String name) throws Exception {
-        var field = target.getClass().getDeclaredField(name);
-        field.setAccessible(true);
-        return field.get(target);
-    }
-
-    private static Object invokeGetter(Object target, String name) throws Exception {
-        Method method = target.getClass().getMethod(name);
-        return method.invoke(target);
+        @Override
+        public void close() {
+            // no-op
+        }
     }
 }

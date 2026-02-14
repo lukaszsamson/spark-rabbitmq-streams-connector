@@ -138,6 +138,38 @@ class EnvironmentBuilderHelperTest {
         assertThat(TestAddressResolver.lastResolved.port()).isEqualTo(6000);
     }
 
+    @Test
+    void appliesHighPriorityEnvironmentTuningOptions() throws Exception {
+        ConnectorOptions options = new ConnectorOptions(Map.of(
+                "endpoints", "hostA:5552",
+                "stream", "test-stream",
+                "environmentId", "spark-rmq-prod",
+                "rpcTimeoutMs", "15000",
+                "requestedHeartbeatSeconds", "30",
+                "forceReplicaForConsumers", "true",
+                "forceLeaderForProducers", "false",
+                "locatorConnectionCount", "3"
+        ));
+
+        StreamEnvironmentBuilder builder = new StreamEnvironmentBuilder();
+        invokeConfigureConnection(builder, options);
+        invokeConfigureCredentials(builder, options);
+        invokeConfigureTls(builder, options);
+        invokeConfigureAddressResolver(builder, options);
+        invokeConfigureTuning(builder, options);
+
+        assertThat(getFieldValue(builder, "id")).isEqualTo("spark-rmq-prod");
+        assertThat(getFieldValue(builder, "forceReplicaForConsumers")).isEqualTo(true);
+        assertThat(getFieldValue(builder, "forceLeaderForProducers")).isEqualTo(false);
+        assertThat(getFieldValue(builder, "locatorConnectionCount")).isEqualTo(3);
+
+        Object clientParameters = getClientParameters(builder);
+        assertThat(getFieldValue(clientParameters, "rpcTimeout"))
+                .hasToString("PT15S");
+        assertThat(getFieldValue(clientParameters, "requestedHeartbeat"))
+                .hasToString("PT30S");
+    }
+
     private static List<String> getUris(StreamEnvironmentBuilder builder) throws Exception {
         Field urisField = StreamEnvironmentBuilder.class.getDeclaredField("uris");
         urisField.setAccessible(true);
@@ -180,6 +212,16 @@ class EnvironmentBuilderHelperTest {
                                                        ConnectorOptions options) throws Exception {
         Method method = EnvironmentBuilderHelper.class.getDeclaredMethod(
                 "configureAddressResolver",
+                com.rabbitmq.stream.EnvironmentBuilder.class,
+                ConnectorOptions.class);
+        method.setAccessible(true);
+        method.invoke(null, builder, options);
+    }
+
+    private static void invokeConfigureTuning(StreamEnvironmentBuilder builder,
+                                              ConnectorOptions options) throws Exception {
+        Method method = EnvironmentBuilderHelper.class.getDeclaredMethod(
+                "configureTuning",
                 com.rabbitmq.stream.EnvironmentBuilder.class,
                 ConnectorOptions.class);
         method.setAccessible(true);

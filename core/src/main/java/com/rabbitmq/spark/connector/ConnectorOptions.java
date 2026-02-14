@@ -35,6 +35,12 @@ public final class ConnectorOptions implements Serializable {
     public static final String METADATA_FIELDS = "metadataFields";
     public static final String FAIL_ON_DATA_LOSS = "failOnDataLoss";
     public static final String ADDRESS_RESOLVER_CLASS = "addressResolverClass";
+    public static final String ENVIRONMENT_ID = "environmentId";
+    public static final String RPC_TIMEOUT_MS = "rpcTimeoutMs";
+    public static final String REQUESTED_HEARTBEAT_SECONDS = "requestedHeartbeatSeconds";
+    public static final String FORCE_REPLICA_FOR_CONSUMERS = "forceReplicaForConsumers";
+    public static final String FORCE_LEADER_FOR_PRODUCERS = "forceLeaderForProducers";
+    public static final String LOCATOR_CONNECTION_COUNT = "locatorConnectionCount";
 
     // Source
     public static final String STARTING_OFFSETS = "startingOffsets";
@@ -115,6 +121,12 @@ public final class ConnectorOptions implements Serializable {
     private final Set<MetadataField> metadataFields;
     private final boolean failOnDataLoss;
     private final String addressResolverClass;
+    private final String environmentId;
+    private final Long rpcTimeoutMs;
+    private final Long requestedHeartbeatSeconds;
+    private final Boolean forceReplicaForConsumers;
+    private final Boolean forceLeaderForProducers;
+    private final Integer locatorConnectionCount;
 
     // Source
     private final StartingOffsetsMode startingOffsets;
@@ -178,6 +190,12 @@ public final class ConnectorOptions implements Serializable {
                 getString(options, METADATA_FIELDS, DEFAULT_METADATA_FIELDS));
         this.failOnDataLoss = getBoolean(options, FAIL_ON_DATA_LOSS, DEFAULT_FAIL_ON_DATA_LOSS);
         this.addressResolverClass = getString(options, ADDRESS_RESOLVER_CLASS);
+        this.environmentId = getString(options, ENVIRONMENT_ID);
+        this.rpcTimeoutMs = getLong(options, RPC_TIMEOUT_MS);
+        this.requestedHeartbeatSeconds = getLong(options, REQUESTED_HEARTBEAT_SECONDS);
+        this.forceReplicaForConsumers = getNullableBoolean(options, FORCE_REPLICA_FOR_CONSUMERS);
+        this.forceLeaderForProducers = getNullableBoolean(options, FORCE_LEADER_FOR_PRODUCERS);
+        this.locatorConnectionCount = getInteger(options, LOCATOR_CONNECTION_COUNT);
 
         // Source
         this.startingOffsets = parseEnum(options, STARTING_OFFSETS,
@@ -268,6 +286,20 @@ public final class ConnectorOptions implements Serializable {
         if (addressResolverClass != null && !addressResolverClass.isEmpty()) {
             ExtensionLoader.load(addressResolverClass, ConnectorAddressResolver.class,
                     ADDRESS_RESOLVER_CLASS);
+        }
+        if (rpcTimeoutMs != null && rpcTimeoutMs <= 0) {
+            throw new IllegalArgumentException(
+                    "'" + RPC_TIMEOUT_MS + "' must be > 0, got: " + rpcTimeoutMs);
+        }
+        if (requestedHeartbeatSeconds != null && requestedHeartbeatSeconds <= 0) {
+            throw new IllegalArgumentException(
+                    "'" + REQUESTED_HEARTBEAT_SECONDS + "' must be > 0, got: " +
+                            requestedHeartbeatSeconds);
+        }
+        if (locatorConnectionCount != null && locatorConnectionCount <= 0) {
+            throw new IllegalArgumentException(
+                    "'" + LOCATOR_CONNECTION_COUNT + "' must be > 0, got: " +
+                            locatorConnectionCount);
         }
     }
 
@@ -459,6 +491,12 @@ public final class ConnectorOptions implements Serializable {
     public Set<MetadataField> getMetadataFields() { return metadataFields; }
     public boolean isFailOnDataLoss() { return failOnDataLoss; }
     public String getAddressResolverClass() { return addressResolverClass; }
+    public String getEnvironmentId() { return environmentId; }
+    public Long getRpcTimeoutMs() { return rpcTimeoutMs; }
+    public Long getRequestedHeartbeatSeconds() { return requestedHeartbeatSeconds; }
+    public Boolean getForceReplicaForConsumers() { return forceReplicaForConsumers; }
+    public Boolean getForceLeaderForProducers() { return forceLeaderForProducers; }
+    public Integer getLocatorConnectionCount() { return locatorConnectionCount; }
 
     // ---- Getters: Source ----
 

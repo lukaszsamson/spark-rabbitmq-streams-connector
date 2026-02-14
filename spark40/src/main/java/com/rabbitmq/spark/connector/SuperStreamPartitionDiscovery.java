@@ -1,17 +1,14 @@
 package com.rabbitmq.spark.connector;
 
+import com.rabbitmq.stream.Environment;
 import com.rabbitmq.stream.impl.Client;
 
-import java.net.URI;
-import java.util.Arrays;
 import java.util.List;
+import java.util.function.Function;
 
 /**
- * Discovers partition streams for a RabbitMQ superstream.
- *
- * <p>Uses the low-level {@link Client} API to query superstream partitions
- * from the broker. This is safe because the RabbitMQ client is shaded into
- * the connector jar.
+ * Discovers partition streams for a RabbitMQ superstream via the configured
+ * {@link Environment} path.
  */
 final class SuperStreamPartitionDiscovery {
 
@@ -25,62 +22,34 @@ final class SuperStreamPartitionDiscovery {
      * @return ordered list of partition stream names
      */
     static List<String> discoverPartitions(ConnectorOptions options, String superStream) {
-        Client.ClientParameters params = buildClientParams(options);
-        try (Client client = new Client(params)) {
-            return client.partitions(superStream);
+        Environment environment = EnvironmentBuilderHelper.buildEnvironment(options);
+        try {
+            return discoverPartitions(environment, superStream);
+        } finally {
+            try {
+                environment.close();
+            } catch (Exception ignored) {
+                // best-effort close
+            }
         }
     }
 
-    private static Client.ClientParameters buildClientParams(ConnectorOptions options) {
-        Client.ClientParameters params = new Client.ClientParameters();
+    @SuppressWarnings("unchecked")
+    static List<String> discoverPartitions(Environment environment, String superStream) {
+        try {
+            // Ensure locators are initialized before issuing superstream operations.
+            var maybeInitialize = environment.getClass().getDeclaredMethod("maybeInitializeLocator");
+            maybeInitialize.setAccessible(true);
+            maybeInitialize.invoke(environment);
 
-        applyHostAndPort(params, options);
-
-        if (options.getUsername() != null) {
-            params.username(options.getUsername());
-        }
-        if (options.getPassword() != null) {
-            params.password(options.getPassword());
-        }
-        if (options.getVhost() != null) {
-            params.virtualHost(options.getVhost());
-        }
-
-        return params;
-    }
-
-    private static void applyHostAndPort(Client.ClientParameters params, ConnectorOptions options) {
-        if (options.getEndpoints() != null && !options.getEndpoints().isEmpty()) {
-            String endpoint = Arrays.stream(options.getEndpoints().split(","))
-                    .map(String::trim)
-                    .filter(s -> !s.isEmpty())
-                    .findFirst()
-                    .orElse(null);
-            if (endpoint != null) {
-                String[] parts = endpoint.split(":");
-                params.host(parts[0]);
-                if (parts.length > 1) {
-                    params.port(Integer.parseInt(parts[1].trim()));
-                }
-                return;
-            }
-        }
-
-        if (options.getUris() != null && !options.getUris().isEmpty()) {
-            String uriText = Arrays.stream(options.getUris().split(","))
-                    .map(String::trim)
-                    .filter(s -> !s.isEmpty())
-                    .findFirst()
-                    .orElse(null);
-            if (uriText != null) {
-                URI uri = URI.create(uriText);
-                if (uri.getHost() != null) {
-                    params.host(uri.getHost());
-                }
-                if (uri.getPort() > 0) {
-                    params.port(uri.getPort());
-                }
-            }
+            var locatorOperation = environment.getClass().getDeclaredMethod(
+                    "locatorOperation", Function.class);
+            locatorOperation.setAccessible(true);
+            return (List<String>) locatorOperation.invoke(
+                    environment, (Function<Client, List<String>>) c -> c.partitions(superStream));
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException(
+                    "Unable to discover superstream partitions via configured Environment", e);
         }
     }
 }

@@ -12,6 +12,7 @@ import java.io.FileInputStream;
 import java.io.IOException;
 import java.security.GeneralSecurityException;
 import java.security.KeyStore;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -41,6 +42,7 @@ final class EnvironmentBuilderHelper {
         configureCredentials(builder, options);
         configureTls(builder, options);
         configureAddressResolver(builder, options);
+        configureTuning(builder, options);
 
         return builder.build();
     }
@@ -113,6 +115,27 @@ final class EnvironmentBuilderHelper {
                     new ConnectorAddressResolver.Address(address.host(), address.port()));
             return new Address(resolved.host(), resolved.port());
         });
+    }
+
+    private static void configureTuning(EnvironmentBuilder builder, ConnectorOptions options) {
+        if (options.getEnvironmentId() != null && !options.getEnvironmentId().isEmpty()) {
+            builder.id(options.getEnvironmentId());
+        }
+        if (options.getRpcTimeoutMs() != null) {
+            builder.rpcTimeout(Duration.ofMillis(options.getRpcTimeoutMs()));
+        }
+        if (options.getRequestedHeartbeatSeconds() != null) {
+            builder.requestedHeartbeat(Duration.ofSeconds(options.getRequestedHeartbeatSeconds()));
+        }
+        if (options.getForceReplicaForConsumers() != null) {
+            builder.forceReplicaForConsumers(options.getForceReplicaForConsumers());
+        }
+        if (options.getForceLeaderForProducers() != null) {
+            builder.forceLeaderForProducers(options.getForceLeaderForProducers());
+        }
+        if (options.getLocatorConnectionCount() != null) {
+            builder.locatorConnectionCount(options.getLocatorConnectionCount());
+        }
     }
 
     private static SslContext buildSslContext(ConnectorOptions options) {

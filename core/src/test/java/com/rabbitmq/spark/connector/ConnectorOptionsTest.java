@@ -155,6 +155,25 @@ class ConnectorOptionsTest {
             var opts = new ConnectorOptions(map);
             assertThat(opts.getAddressResolverClass()).isEqualTo("com.example.MyResolver");
         }
+
+        @Test
+        void parsesEnvironmentTuningOptions() {
+            var map = minimalStreamOptions();
+            map.put("environmentId", "spark-rmq-prod");
+            map.put("rpcTimeoutMs", "15000");
+            map.put("requestedHeartbeatSeconds", "30");
+            map.put("forceReplicaForConsumers", "true");
+            map.put("forceLeaderForProducers", "false");
+            map.put("locatorConnectionCount", "3");
+
+            var opts = new ConnectorOptions(map);
+            assertThat(opts.getEnvironmentId()).isEqualTo("spark-rmq-prod");
+            assertThat(opts.getRpcTimeoutMs()).isEqualTo(15000L);
+            assertThat(opts.getRequestedHeartbeatSeconds()).isEqualTo(30L);
+            assertThat(opts.getForceReplicaForConsumers()).isEqualTo(Boolean.TRUE);
+            assertThat(opts.getForceLeaderForProducers()).isEqualTo(Boolean.FALSE);
+            assertThat(opts.getLocatorConnectionCount()).isEqualTo(3);
+        }
     }
 
     // ========================================================================
@@ -783,6 +802,36 @@ class ConnectorOptionsTest {
                     .isInstanceOf(IllegalArgumentException.class)
                     .hasMessageContaining("addressResolverClass")
                     .hasMessageContaining("does not implement");
+        }
+
+        @Test
+        void rejectsNonPositiveRpcTimeout() {
+            var map = minimalStreamOptions();
+            map.put("rpcTimeoutMs", "0");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateCommon)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("rpcTimeoutMs");
+        }
+
+        @Test
+        void rejectsNonPositiveRequestedHeartbeat() {
+            var map = minimalStreamOptions();
+            map.put("requestedHeartbeatSeconds", "-1");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateCommon)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("requestedHeartbeatSeconds");
+        }
+
+        @Test
+        void rejectsNonPositiveLocatorConnectionCount() {
+            var map = minimalStreamOptions();
+            map.put("locatorConnectionCount", "0");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateCommon)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("locatorConnectionCount");
         }
     }
 
