@@ -211,6 +211,57 @@ class BatchWriteIT extends AbstractRabbitMQIT {
     }
 
     @Test
+    void batchWriteFilterValueColumnFromPropertiesSubjectRoundTrip() {
+        StructType propsSchema = new StructType()
+                .add("subject", DataTypes.StringType, true);
+        StructType schema = new StructType()
+                .add("value", DataTypes.BinaryType, false)
+                .add("properties", propsSchema, true);
+
+        List<Row> data = new ArrayList<>();
+        for (int i = 0; i < 20; i++) {
+            data.add(RowFactory.create(("alpha-" + i).getBytes(), RowFactory.create("alpha")));
+            data.add(RowFactory.create(("beta-" + i).getBytes(), RowFactory.create("beta")));
+        }
+
+        spark.createDataFrame(data, schema)
+                .coalesce(1)
+                .write()
+                .format("rabbitmq_streams")
+                .mode("append")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("filterValueColumn", "properties.subject")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .save();
+
+        Dataset<Row> readDf = spark.read()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("startingOffsets", "earliest")
+                .option("filterValues", "alpha")
+                .option("filterMatchUnfiltered", "false")
+                .option("filterPostFilterClass",
+                        "com.rabbitmq.spark.connector.TestAlphaPrefixPostFilter")
+                .option("pollTimeoutMs", "500")
+                .option("maxWaitMs", "10000")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load();
+
+        List<String> values = readDf.collectAsList().stream()
+                .map(row -> new String((byte[]) row.getAs("value")))
+                .sorted()
+                .toList();
+
+        assertThat(values).hasSize(20);
+        assertThat(values).allMatch(v -> v.startsWith("alpha-"));
+    }
+
+    @Test
     void batchWriteThenBatchRead() {
         // Write via connector
         StructType schema = new StructType()

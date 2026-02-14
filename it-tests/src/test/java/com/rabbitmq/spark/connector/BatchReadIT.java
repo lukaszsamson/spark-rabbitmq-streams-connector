@@ -678,6 +678,35 @@ class BatchReadIT extends AbstractRabbitMQIT {
         assertThat(alphaCount).isEqualTo(50);
     }
 
+    @Test
+    void batchReadFilterValuesMultiple() {
+        publishMessagesWithFilterValue(stream, 20, "alpha-", "alpha");
+        publishMessagesWithFilterValue(stream, 20, "beta-", "beta");
+        publishMessagesWithFilterValue(stream, 20, "gamma-", "gamma");
+
+        Dataset<Row> df = spark.read()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("startingOffsets", "earliest")
+                .option("filterValues", "alpha,beta")
+                .option("filterValueColumn", "filter")
+                .option("filterMatchUnfiltered", "false")
+                .option("pollTimeoutMs", "500")
+                .option("maxWaitMs", "10000")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load();
+
+        List<String> values = df.collectAsList().stream()
+                .map(row -> new String((byte[]) row.getAs("value")))
+                .toList();
+
+        assertThat(values).hasSize(40);
+        assertThat(values).allMatch(v -> v.startsWith("alpha-") || v.startsWith("beta-"));
+    }
+
     // ---- IT-FILTER-002: filterMatchUnfiltered includes unfiltered messages ----
 
     @Test

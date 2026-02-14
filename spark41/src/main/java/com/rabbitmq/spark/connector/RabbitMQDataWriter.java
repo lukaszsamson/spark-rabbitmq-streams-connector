@@ -314,15 +314,7 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
         // Filter value extraction
         if (options.getFilterValueColumn() != null && !options.getFilterValueColumn().isEmpty()) {
             String filterCol = options.getFilterValueColumn();
-            builder.filterValue(message -> {
-                // The filter value is extracted from the message's application properties
-                var appProps = message.getApplicationProperties();
-                if (appProps != null) {
-                    Object val = appProps.get(filterCol);
-                    return val != null ? val.toString() : null;
-                }
-                return null;
-            });
+            builder.filterValue(message -> extractFilterValue(message, filterCol));
         }
 
         producer = builder.build();
@@ -416,6 +408,37 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
         }
         if (message.getProperties() != null && message.getProperties().getSubject() != null) {
             return message.getProperties().getSubject();
+        }
+        return null;
+    }
+
+    /**
+     * Extract producer-side filter value from known message fields.
+     *
+     * <p>Lookup order:
+     * <ol>
+     *   <li>application_properties[filterValueColumn]</li>
+     *   <li>if filterValueColumn is "routing_key", route key fallback</li>
+     *   <li>if filterValueColumn is "subject" or "properties.subject", properties.subject</li>
+     * </ol>
+     */
+    private static String extractFilterValue(Message message, String filterValueColumn) {
+        var appProps = message.getApplicationProperties();
+        if (appProps != null) {
+            Object val = appProps.get(filterValueColumn);
+            if (val != null) {
+                return val.toString();
+            }
+        }
+
+        String normalized = filterValueColumn == null ? "" : filterValueColumn.toLowerCase();
+        if ("routing_key".equals(normalized)) {
+            return extractRoutingKey(message);
+        }
+        if ("subject".equals(normalized) || "properties.subject".equals(normalized)) {
+            if (message.getProperties() != null && message.getProperties().getSubject() != null) {
+                return message.getProperties().getSubject();
+            }
         }
         return null;
     }
