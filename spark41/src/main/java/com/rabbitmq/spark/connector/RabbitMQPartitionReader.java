@@ -362,7 +362,7 @@ final class RabbitMQPartitionReader
                         // backpressure and avoiding blocking the Netty I/O thread.
                         if (!queue.offer(new QueuedMessage(
                                 message, context.offset(), context.timestamp(), context),
-                                5, TimeUnit.SECONDS)) {
+                                options.getCallbackEnqueueTimeoutMs(), TimeUnit.MILLISECONDS)) {
                             consumerError.compareAndSet(null,
                                     new IOException("Queue full: timed out enqueuing message " +
                                             "at offset " + context.offset() +
@@ -376,6 +376,9 @@ final class RabbitMQPartitionReader
                 .strategy(ConsumerFlowStrategy.creditWhenHalfMessagesProcessed(
                         options.getInitialCredits()))
                 .builder();
+        if (options.isSingleActiveConsumer()) {
+            builder.name(options.getConsumerName()).singleActiveConsumer();
+        }
 
         // State listener for RECOVERING/CLOSED transitions
         builder.listeners(context -> {

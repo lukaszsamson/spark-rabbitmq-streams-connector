@@ -393,12 +393,14 @@ class ConnectorOptionsTest {
             var map = minimalStreamOptions();
             map.put("pollTimeoutMs", "5000");
             map.put("maxWaitMs", "60000");
+            map.put("callbackEnqueueTimeoutMs", "250");
             map.put("initialCredits", "3");
             map.put("queueCapacity", "20000");
             map.put("estimatedMessageSizeBytes", "2048");
             var opts = new ConnectorOptions(map);
             assertThat(opts.getPollTimeoutMs()).isEqualTo(5000L);
             assertThat(opts.getMaxWaitMs()).isEqualTo(60000L);
+            assertThat(opts.getCallbackEnqueueTimeoutMs()).isEqualTo(250L);
             assertThat(opts.getInitialCredits()).isEqualTo(3);
             assertThat(opts.getQueueCapacity()).isEqualTo(20000);
             assertThat(opts.getEstimatedMessageSizeBytes()).isEqualTo(2048);
@@ -409,9 +411,26 @@ class ConnectorOptionsTest {
             var opts = new ConnectorOptions(minimalStreamOptions());
             assertThat(opts.getPollTimeoutMs()).isEqualTo(30_000L);
             assertThat(opts.getMaxWaitMs()).isEqualTo(300_000L);
+            assertThat(opts.getCallbackEnqueueTimeoutMs()).isEqualTo(5_000L);
             assertThat(opts.getInitialCredits()).isEqualTo(1);
             assertThat(opts.getQueueCapacity()).isEqualTo(10_000);
             assertThat(opts.getEstimatedMessageSizeBytes()).isEqualTo(1024);
+        }
+
+        @Test
+        void parsesSingleActiveConsumer() {
+            var map = minimalStreamOptions();
+            map.put("consumerName", "orders-consumer");
+            map.put("singleActiveConsumer", "true");
+
+            var opts = new ConnectorOptions(map);
+            assertThat(opts.isSingleActiveConsumer()).isTrue();
+        }
+
+        @Test
+        void singleActiveConsumerDefaultsToFalse() {
+            var opts = new ConnectorOptions(minimalStreamOptions());
+            assertThat(opts.isSingleActiveConsumer()).isFalse();
         }
 
         @Test
@@ -1022,6 +1041,24 @@ class ConnectorOptionsTest {
         }
 
         @Test
+        void rejectsNegativeCallbackEnqueueTimeoutMs() {
+            var map = minimalStreamOptions();
+            map.put("callbackEnqueueTimeoutMs", "-1");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateForSource)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("callbackEnqueueTimeoutMs");
+        }
+
+        @Test
+        void allowsZeroCallbackEnqueueTimeoutMs() {
+            var map = minimalStreamOptions();
+            map.put("callbackEnqueueTimeoutMs", "0");
+            var opts = new ConnectorOptions(map);
+            assertThatCode(opts::validateForSource).doesNotThrowAnyException();
+        }
+
+        @Test
         void rejectsNonPositiveInitialCredits() {
             var map = minimalStreamOptions();
             map.put("initialCredits", "0");
@@ -1049,6 +1086,26 @@ class ConnectorOptionsTest {
             assertThatThrownBy(opts::validateForSource)
                     .isInstanceOf(IllegalArgumentException.class)
                     .hasMessageContaining("estimatedMessageSizeBytes");
+        }
+
+        @Test
+        void rejectsSingleActiveConsumerWithoutConsumerName() {
+            var map = minimalStreamOptions();
+            map.put("singleActiveConsumer", "true");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateForSource)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("consumerName")
+                    .hasMessageContaining("singleActiveConsumer");
+        }
+
+        @Test
+        void acceptsSingleActiveConsumerWithConsumerName() {
+            var map = minimalStreamOptions();
+            map.put("singleActiveConsumer", "true");
+            map.put("consumerName", "orders-consumer");
+            var opts = new ConnectorOptions(map);
+            assertThatCode(opts::validateForSource).doesNotThrowAnyException();
         }
 
         @Test

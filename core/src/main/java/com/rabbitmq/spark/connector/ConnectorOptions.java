@@ -59,9 +59,11 @@ public final class ConnectorOptions implements Serializable {
     public static final String FILTER_WARNING_ON_MISMATCH = "filterWarningOnMismatch";
     public static final String POLL_TIMEOUT_MS = "pollTimeoutMs";
     public static final String MAX_WAIT_MS = "maxWaitMs";
+    public static final String CALLBACK_ENQUEUE_TIMEOUT_MS = "callbackEnqueueTimeoutMs";
     public static final String INITIAL_CREDITS = "initialCredits";
     public static final String QUEUE_CAPACITY = "queueCapacity";
     public static final String ESTIMATED_MESSAGE_SIZE_BYTES = "estimatedMessageSizeBytes";
+    public static final String SINGLE_ACTIVE_CONSUMER = "singleActiveConsumer";
 
     // Sink
     public static final String PRODUCER_NAME = "producerName";
@@ -96,6 +98,7 @@ public final class ConnectorOptions implements Serializable {
     public static final boolean DEFAULT_FILTER_WARNING_ON_MISMATCH = true;
     public static final long DEFAULT_POLL_TIMEOUT_MS = 30_000L;
     public static final long DEFAULT_MAX_WAIT_MS = 300_000L;
+    public static final long DEFAULT_CALLBACK_ENQUEUE_TIMEOUT_MS = 5_000L;
     public static final int DEFAULT_INITIAL_CREDITS = 1;
     public static final int DEFAULT_QUEUE_CAPACITY = 10_000;
     public static final int DEFAULT_ESTIMATED_MESSAGE_SIZE_BYTES = 1024;
@@ -149,9 +152,11 @@ public final class ConnectorOptions implements Serializable {
     private final boolean filterWarningOnMismatch;
     private final long pollTimeoutMs;
     private final long maxWaitMs;
+    private final long callbackEnqueueTimeoutMs;
     private final int initialCredits;
     private final int queueCapacity;
     private final int estimatedMessageSizeBytes;
+    private final boolean singleActiveConsumer;
 
     // Sink
     private final String producerName;
@@ -226,10 +231,13 @@ public final class ConnectorOptions implements Serializable {
                 DEFAULT_FILTER_WARNING_ON_MISMATCH);
         this.pollTimeoutMs = getLongPrimitive(options, POLL_TIMEOUT_MS, DEFAULT_POLL_TIMEOUT_MS);
         this.maxWaitMs = getLongPrimitive(options, MAX_WAIT_MS, DEFAULT_MAX_WAIT_MS);
+        this.callbackEnqueueTimeoutMs = getLongPrimitive(options, CALLBACK_ENQUEUE_TIMEOUT_MS,
+                DEFAULT_CALLBACK_ENQUEUE_TIMEOUT_MS);
         this.initialCredits = getIntPrimitive(options, INITIAL_CREDITS, DEFAULT_INITIAL_CREDITS);
         this.queueCapacity = getIntPrimitive(options, QUEUE_CAPACITY, DEFAULT_QUEUE_CAPACITY);
         this.estimatedMessageSizeBytes = getIntPrimitive(options, ESTIMATED_MESSAGE_SIZE_BYTES,
                 DEFAULT_ESTIMATED_MESSAGE_SIZE_BYTES);
+        this.singleActiveConsumer = getBoolean(options, SINGLE_ACTIVE_CONSUMER, false);
 
         // Sink
         this.producerName = getString(options, PRODUCER_NAME);
@@ -385,6 +393,11 @@ public final class ConnectorOptions implements Serializable {
             throw new IllegalArgumentException(
                     "'" + MAX_WAIT_MS + "' must be > 0, got: " + maxWaitMs);
         }
+        if (callbackEnqueueTimeoutMs < 0) {
+            throw new IllegalArgumentException(
+                    "'" + CALLBACK_ENQUEUE_TIMEOUT_MS + "' must be >= 0, got: " +
+                            callbackEnqueueTimeoutMs);
+        }
         if (initialCredits <= 0) {
             throw new IllegalArgumentException(
                     "'" + INITIAL_CREDITS + "' must be > 0, got: " + initialCredits);
@@ -397,6 +410,11 @@ public final class ConnectorOptions implements Serializable {
             throw new IllegalArgumentException(
                     "'" + ESTIMATED_MESSAGE_SIZE_BYTES + "' must be > 0, got: " +
                             estimatedMessageSizeBytes);
+        }
+        if (singleActiveConsumer && (consumerName == null || consumerName.isEmpty())) {
+            throw new IllegalArgumentException(
+                    "'" + CONSUMER_NAME + "' is required when '" + SINGLE_ACTIVE_CONSUMER +
+                            "' is true");
         }
 
         // Validate extension class: filterPostFilterClass
@@ -537,9 +555,11 @@ public final class ConnectorOptions implements Serializable {
     public boolean isFilterWarningOnMismatch() { return filterWarningOnMismatch; }
     public long getPollTimeoutMs() { return pollTimeoutMs; }
     public long getMaxWaitMs() { return maxWaitMs; }
+    public long getCallbackEnqueueTimeoutMs() { return callbackEnqueueTimeoutMs; }
     public int getInitialCredits() { return initialCredits; }
     public int getQueueCapacity() { return queueCapacity; }
     public int getEstimatedMessageSizeBytes() { return estimatedMessageSizeBytes; }
+    public boolean isSingleActiveConsumer() { return singleActiveConsumer; }
 
     // ---- Getters: Sink ----
 
