@@ -205,5 +205,23 @@ class RabbitMQStreamTableProviderTest {
             Table table = provider.getTable(null, new Transform[]{}, caseInsensitive);
             assertThat(table.name()).isEqualTo("test-stream");
         }
+
+        @Test
+        void acceptsLowercasedAddressResolverInPlainMap() {
+            // Spark Connect batch can pass lowercased keys in a plain map.
+            // ConnectorOptions must still resolve the custom resolver option.
+            var map = new HashMap<String, String>();
+            map.put("stream", "test-stream");
+            map.put("endpoints", "localhost:5552");
+            map.put("addressresolverclass",
+                    "com.rabbitmq.spark.connector.EnvironmentBuilderHelperTest$TestAddressResolver");
+
+            Table table = provider.getTable(null, new Transform[]{}, map);
+            RabbitMQStreamTable streamTable = (RabbitMQStreamTable) table;
+
+            assertThat(streamTable.getOptions().getAddressResolverClass())
+                    .isEqualTo(
+                            "com.rabbitmq.spark.connector.EnvironmentBuilderHelperTest$TestAddressResolver");
+        }
     }
 }

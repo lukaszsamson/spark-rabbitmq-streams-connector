@@ -502,18 +502,26 @@ public final class ConnectorOptions implements Serializable {
 
     // ---- Parsing helpers ----
 
+    private static String lookupOption(Map<String, String> options, String key) {
+        String value = options.get(key);
+        if (value != null || options.containsKey(key)) {
+            return value;
+        }
+        return options.get(key.toLowerCase(Locale.ROOT));
+    }
+
     private static String getString(Map<String, String> options, String key) {
-        return options.get(key);
+        return lookupOption(options, key);
     }
 
     private static String getString(Map<String, String> options, String key, String defaultValue) {
-        String value = options.get(key);
+        String value = lookupOption(options, key);
         return (value != null) ? value : defaultValue;
     }
 
     private static boolean getBoolean(Map<String, String> options, String key,
                                       boolean defaultValue) {
-        String value = options.get(key);
+        String value = lookupOption(options, key);
         if (value == null) {
             return defaultValue;
         }
@@ -525,7 +533,7 @@ public final class ConnectorOptions implements Serializable {
     }
 
     private static Boolean getNullableBoolean(Map<String, String> options, String key) {
-        String value = options.get(key);
+        String value = lookupOption(options, key);
         if (value == null) {
             return null;
         }
@@ -537,7 +545,7 @@ public final class ConnectorOptions implements Serializable {
     }
 
     private static Long getLong(Map<String, String> options, String key) {
-        String value = options.get(key);
+        String value = lookupOption(options, key);
         if (value == null) {
             return null;
         }
@@ -556,7 +564,7 @@ public final class ConnectorOptions implements Serializable {
     }
 
     private static Integer getInteger(Map<String, String> options, String key) {
-        String value = options.get(key);
+        String value = lookupOption(options, key);
         if (value == null) {
             return null;
         }
@@ -575,7 +583,7 @@ public final class ConnectorOptions implements Serializable {
 
     private static <T> T parseEnum(Map<String, String> options, String key,
                                    java.util.function.Function<String, T> parser, T defaultValue) {
-        String value = options.get(key);
+        String value = lookupOption(options, key);
         if (value == null) {
             return defaultValue;
         }

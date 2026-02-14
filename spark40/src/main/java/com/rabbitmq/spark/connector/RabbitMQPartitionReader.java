@@ -41,6 +41,7 @@ final class RabbitMQPartitionReader implements PartitionReader<InternalRow> {
     private final BlockingQueue<QueuedMessage> queue;
     private final AtomicReference<Throwable> consumerError = new AtomicReference<>();
     private final AtomicBoolean consumerClosed = new AtomicBoolean(false);
+    private final AtomicBoolean closeCalled = new AtomicBoolean(false);
 
     private boolean pooledEnvironment = false;
     private Environment environment;
@@ -123,14 +124,17 @@ final class RabbitMQPartitionReader implements PartitionReader<InternalRow> {
 
             if (qm == null) {
                 // With broker-side filtering, not all offsets in [start, end) are delivered.
+                // Timestamp-seek split can also legitimately have no in-range rows when the
+                // resolved broker seek position is already past this split's end.
                 // If the stream tail has already reached this split's end, we can terminate.
-                if (isBrokerFilterConfigured() && hasStreamTailReachedPlannedEnd()) {
+                boolean canTerminateOnEmpty = isBrokerFilterConfigured() || useConfiguredStartingOffset;
+                if (canTerminateOnEmpty && hasStreamTailReachedPlannedEnd()) {
                     finished = true;
                     return false;
                 }
                 totalWaitMs += pollTimeoutMs;
                 if (totalWaitMs >= maxWaitMs) {
-                    if (isBrokerFilterConfigured()) {
+                    if (canTerminateOnEmpty) {
                         LOG.warn("Reached maxWaitMs={} while reading filtered stream '{}'; " +
                                         "terminating split early at lastObservedOffset={} for planned endOffset={}",
                                 maxWaitMs, stream, lastObservedOffset, endOffset);
@@ -203,6 +207,9 @@ final class RabbitMQPartitionReader implements PartitionReader<InternalRow> {
 
     @Override
     public void close() throws IOException {
+        if (!closeCalled.compareAndSet(false, true)) {
+            return;
+        }
         finished = true;
         // Report actual message sizes for running average estimation
         MessageSizeTracker.record(bytesRead, recordsRead);

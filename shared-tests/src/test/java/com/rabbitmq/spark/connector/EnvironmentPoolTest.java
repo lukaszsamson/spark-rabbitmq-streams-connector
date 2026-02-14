@@ -15,7 +15,9 @@ import java.lang.reflect.Method;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -242,6 +244,32 @@ class EnvironmentPoolTest {
         }
 
         @Test
+        void acquireRevivesZeroRefCountEntryWithoutCreatingNewEnvironment() throws Exception {
+            EnvironmentPool pool = EnvironmentPool.getInstance();
+            ConnectorOptions options = opts("localhost:5552", "test-stream");
+            EnvironmentPool.EnvironmentKey key = EnvironmentPool.EnvironmentKey.from(options);
+            CountingEnvironment env = new CountingEnvironment();
+            Object entry = newEntry(env);
+            setRefCount(entry, 0);
+            putEntry(key, entry);
+
+            var scheduler = Executors.newSingleThreadScheduledExecutor();
+            ScheduledFuture<?> scheduled = scheduler.schedule(() -> {}, 60, TimeUnit.SECONDS);
+            setEvictionTask(entry, scheduled);
+
+            try {
+                Environment acquired = pool.acquire(options);
+                assertThat(acquired).isSameAs(env);
+                assertThat(getRefCount(entry)).isEqualTo(1);
+                assertThat((Object) getEvictionTask(entry)).isNull();
+                assertThat(scheduled.isCancelled()).isTrue();
+                assertThat(env.closeCount.get()).isZero();
+            } finally {
+                scheduler.shutdownNow();
+            }
+        }
+
+        @Test
         void evictionOnlyHappensWhenRefCountZero() throws Exception {
             EnvironmentPool pool = EnvironmentPool.getInstance();
             Map<String, String> map = minimalMap("localhost:5552", "test-stream");
@@ -376,6 +404,12 @@ class EnvironmentPoolTest {
         Field evictionTaskField = entry.getClass().getDeclaredField("evictionTask");
         evictionTaskField.setAccessible(true);
         return (ScheduledFuture<?>) evictionTaskField.get(entry);
+    }
+
+    private static void setEvictionTask(Object entry, ScheduledFuture<?> task) throws Exception {
+        Field evictionTaskField = entry.getClass().getDeclaredField("evictionTask");
+        evictionTaskField.setAccessible(true);
+        evictionTaskField.set(entry, task);
     }
 
     private static void invokeEvict(EnvironmentPool pool, EnvironmentPool.EnvironmentKey key,

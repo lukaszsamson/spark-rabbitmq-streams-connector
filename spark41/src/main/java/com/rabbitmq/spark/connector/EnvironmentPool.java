@@ -100,40 +100,42 @@ final class EnvironmentPool {
         EnvironmentKey key = EnvironmentKey.from(options);
 
         while (true) {
-            PooledEntry existing = pool.get(key);
-            if (existing != null) {
-                // Try to increment refcount; if it's > 0, the entry is still alive
-                int current = existing.refCount.get();
-                if (current > 0 && existing.refCount.compareAndSet(current, current + 1)) {
-                    // Cancel pending eviction if any
-                    ScheduledFuture<?> eviction = existing.evictionTask;
-                    if (eviction != null) {
-                        eviction.cancel(false);
-                        existing.evictionTask = null;
-                    }
-                    LOG.debug("Reusing pooled environment for key {}, refCount={}",
-                            key.endpoints(), current + 1);
-                    return existing.environment;
-                }
-                // Entry is being evicted (refCount=0), remove and create new
-                pool.remove(key, existing);
+            final boolean[] created = {false};
+            PooledEntry entry = pool.computeIfAbsent(key, k -> {
+                created[0] = true;
+                return new PooledEntry(EnvironmentBuilderHelper.buildEnvironment(options));
+            });
+
+            if (created[0]) {
+                LOG.info("Created new pooled environment for key {}", key.endpoints());
+                return entry.environment;
             }
 
-            // Create a new environment
-            Environment env = EnvironmentBuilderHelper.buildEnvironment(options);
-            PooledEntry newEntry = new PooledEntry(env);
-            PooledEntry prev = pool.putIfAbsent(key, newEntry);
-            if (prev == null) {
-                LOG.info("Created new pooled environment for key {}", key.endpoints());
-                return env;
+            int current = entry.refCount.get();
+            if (current < 0) {
+                pool.remove(key, entry);
+                continue;
             }
-            // Another thread beat us; close our env and retry
-            try {
-                env.close();
-            } catch (Exception e) {
-                LOG.debug("Error closing duplicate environment", e);
+
+            if (!entry.refCount.compareAndSet(current, current + 1)) {
+                continue;
             }
-            // Loop to try acquiring the one that was inserted
+
+            // If this entry was scheduled for eviction (refCount was 0), ensure it
+            // is still the active mapping. If eviction won the race, retry.
+            if (current == 0 && pool.get(key) != entry) {
+                entry.refCount.decrementAndGet();
+                continue;
+            }
+
+            ScheduledFuture<?> eviction = entry.evictionTask;
+            if (eviction != null) {
+                eviction.cancel(false);
+                entry.evictionTask = null;
+            }
+            LOG.debug("Reusing pooled environment for key {}, refCount={}",
+                    key.endpoints(), current + 1);
+            return entry.environment;
         }
     }
 

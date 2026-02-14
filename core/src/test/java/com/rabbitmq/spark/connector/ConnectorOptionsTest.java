@@ -147,6 +147,14 @@ class ConnectorOptionsTest {
             var opts = new ConnectorOptions(map);
             assertThat(opts.getAddressResolverClass()).isEqualTo("com.example.MyResolver");
         }
+
+        @Test
+        void parsesAddressResolverClassFromLowercasedKey() {
+            var map = minimalStreamOptions();
+            map.put("addressresolverclass", "com.example.MyResolver");
+            var opts = new ConnectorOptions(map);
+            assertThat(opts.getAddressResolverClass()).isEqualTo("com.example.MyResolver");
+        }
     }
 
     // ========================================================================

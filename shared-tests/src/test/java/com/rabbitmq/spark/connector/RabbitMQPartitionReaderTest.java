@@ -175,6 +175,28 @@ class RabbitMQPartitionReaderTest {
         }
 
         @Test
+        void nextTimestampInitialSplitWithoutInRangeDataTerminatesInsteadOfTimingOut() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("startingOffsets", "timestamp");
+            opts.put("startingTimestamp", "1700000000000");
+            opts.put("pollTimeoutMs", "5");
+            opts.put("maxWaitMs", "5");
+
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 0, 10, new ConnectorOptions(opts), true);
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
+
+            setPrivateField(reader, "consumer", new NoopConsumer());
+            setPrivateField(reader, "queue", new LinkedBlockingQueue<>());
+
+            // Regression: initial timestamp-seek split can legitimately have no in-range rows.
+            // It must terminate cleanly instead of failing the whole batch with timeout.
+            assertThat(reader.next()).isFalse();
+        }
+
+        @Test
         void nextDedupSkipsDuplicateOffsets() throws Exception {
             RabbitMQInputPartition partition = new RabbitMQInputPartition(
                     "test-stream", 0, 3, minimalOptions());
@@ -390,6 +412,26 @@ class RabbitMQPartitionReaderTest {
             setPrivateField(reader, "recordsRead", 2L);
 
             reader.close();
+            int first = MessageSizeTracker.drainAverage(100);
+            int second = MessageSizeTracker.drainAverage(100);
+
+            assertThat(first).isEqualTo(10);
+            assertThat(second).isEqualTo(100);
+        }
+
+        @Test
+        void closeIsIdempotentWhenCalledTwice() throws Exception {
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 0, 10, minimalOptions());
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
+
+            setPrivateField(reader, "bytesRead", 20L);
+            setPrivateField(reader, "recordsRead", 2L);
+
+            reader.close();
+            reader.close();
+
+            // Regression: duplicate close must not record metrics twice or double-release resources.
             int first = MessageSizeTracker.drainAverage(100);
             int second = MessageSizeTracker.drainAverage(100);
 
