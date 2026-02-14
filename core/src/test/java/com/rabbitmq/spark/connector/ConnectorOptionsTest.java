@@ -583,10 +583,14 @@ class ConnectorOptionsTest {
             map.put("publisherConfirmTimeoutMs", "5000");
             map.put("maxInFlight", "100");
             map.put("enqueueTimeoutMs", "3000");
+            map.put("retryOnRecovery", "false");
+            map.put("dynamicBatch", "true");
             var opts = new ConnectorOptions(map);
             assertThat(opts.getPublisherConfirmTimeoutMs()).isEqualTo(5000L);
             assertThat(opts.getMaxInFlight()).isEqualTo(100);
             assertThat(opts.getEnqueueTimeoutMs()).isEqualTo(3000L);
+            assertThat(opts.getRetryOnRecovery()).isEqualTo(Boolean.FALSE);
+            assertThat(opts.getDynamicBatch()).isEqualTo(Boolean.TRUE);
         }
 
         @Test
@@ -650,6 +654,15 @@ class ConnectorOptionsTest {
             map.put("filterValueColumn", "region");
             var opts = new ConnectorOptions(map);
             assertThat(opts.getFilterValueColumn()).isEqualTo("region");
+        }
+
+        @Test
+        void parsesCompressionCodecFactoryClass() {
+            var map = minimalStreamOptions();
+            map.put("compressionCodecFactoryClass", TestCompressionCodecFactory.class.getName());
+            var opts = new ConnectorOptions(map);
+            assertThat(opts.getCompressionCodecFactoryClass())
+                    .isEqualTo(TestCompressionCodecFactory.class.getName());
         }
 
         @Test
@@ -832,6 +845,28 @@ class ConnectorOptionsTest {
             assertThatThrownBy(opts::validateCommon)
                     .isInstanceOf(IllegalArgumentException.class)
                     .hasMessageContaining("observationCollectorClass")
+                    .hasMessageContaining("does not implement");
+        }
+
+        @Test
+        void rejectsInvalidCompressionCodecFactoryClassNotFound() {
+            var map = minimalStreamOptions();
+            map.put("compressionCodecFactoryClass", "com.nonexistent.CodecFactory");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateCommon)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("compressionCodecFactoryClass")
+                    .hasMessageContaining("not found");
+        }
+
+        @Test
+        void rejectsCompressionCodecFactoryClassWrongType() {
+            var map = minimalStreamOptions();
+            map.put("compressionCodecFactoryClass", "java.lang.String");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateCommon)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("compressionCodecFactoryClass")
                     .hasMessageContaining("does not implement");
         }
 
@@ -1289,6 +1324,15 @@ class ConnectorOptionsTest {
         @Override
         public com.rabbitmq.stream.ObservationCollector<?> create(ConnectorOptions options) {
             return com.rabbitmq.stream.ObservationCollector.NO_OP;
+        }
+    }
+
+    public static final class TestCompressionCodecFactory
+            implements ConnectorCompressionCodecFactory {
+        @Override
+        public com.rabbitmq.stream.compression.CompressionCodecFactory create(
+                ConnectorOptions options) {
+            return compression -> null;
         }
     }
 }

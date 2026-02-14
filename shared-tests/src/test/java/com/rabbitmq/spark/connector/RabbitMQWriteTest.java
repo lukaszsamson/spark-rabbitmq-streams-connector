@@ -698,6 +698,8 @@ class RabbitMQWriteTest {
             opts.put("enqueueTimeoutMs", "0");
             opts.put("batchSize", "5");
             opts.put("batchPublishingDelayMs", "9");
+            opts.put("retryOnRecovery", "false");
+            opts.put("dynamicBatch", "true");
             ConnectorOptions options = new ConnectorOptions(opts);
 
             RabbitMQDataWriter writer = new RabbitMQDataWriter(
@@ -712,6 +714,8 @@ class RabbitMQWriteTest {
             assertThat(builder.enqueueTimeoutMs).isEqualTo(0L);
             assertThat(builder.batchSize).isEqualTo(5);
             assertThat(builder.batchDelayMs).isEqualTo(9L);
+            assertThat(builder.retryOnRecovery).isEqualTo(Boolean.FALSE);
+            assertThat(builder.dynamicBatch).isEqualTo(Boolean.TRUE);
         }
 
         @Test
@@ -1122,6 +1126,8 @@ class RabbitMQWriteTest {
         private long enqueueTimeoutMs;
         private int batchSize;
         private long batchDelayMs;
+        private Boolean retryOnRecovery;
+        private Boolean dynamicBatch;
         private com.rabbitmq.stream.Resource.StateListener listener;
         private String name;
 
@@ -1183,11 +1189,13 @@ class RabbitMQWriteTest {
 
         @Override
         public com.rabbitmq.stream.ProducerBuilder retryOnRecovery(boolean retryOnRecovery) {
+            this.retryOnRecovery = retryOnRecovery;
             return this;
         }
 
         @Override
         public com.rabbitmq.stream.ProducerBuilder dynamicBatch(boolean dynamicBatch) {
+            this.dynamicBatch = dynamicBatch;
             return this;
         }
 

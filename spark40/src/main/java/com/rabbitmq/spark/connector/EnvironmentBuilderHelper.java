@@ -43,6 +43,7 @@ final class EnvironmentBuilderHelper {
         configureTls(builder, options);
         configureAddressResolver(builder, options);
         configureObservationCollector(builder, options);
+        configureCompressionCodecFactory(builder, options);
         configureTuning(builder, options);
 
         return builder.build();
@@ -134,6 +135,24 @@ final class EnvironmentBuilderHelper {
                             "' returned null ObservationCollector");
         }
         builder.observationCollector(collector);
+    }
+
+    private static void configureCompressionCodecFactory(EnvironmentBuilder builder,
+                                                         ConnectorOptions options) {
+        String factoryClass = options.getCompressionCodecFactoryClass();
+        if (factoryClass == null || factoryClass.isEmpty()) {
+            return;
+        }
+        ConnectorCompressionCodecFactory factory = ExtensionLoader.load(
+                factoryClass, ConnectorCompressionCodecFactory.class,
+                ConnectorOptions.COMPRESSION_CODEC_FACTORY_CLASS);
+        var codecFactory = factory.create(options);
+        if (codecFactory == null) {
+            throw new IllegalArgumentException(
+                    "Class specified by '" + ConnectorOptions.COMPRESSION_CODEC_FACTORY_CLASS +
+                            "' returned null CompressionCodecFactory");
+        }
+        builder.compressionCodecFactory(codecFactory);
     }
 
     private static void configureTuning(EnvironmentBuilder builder, ConnectorOptions options) {

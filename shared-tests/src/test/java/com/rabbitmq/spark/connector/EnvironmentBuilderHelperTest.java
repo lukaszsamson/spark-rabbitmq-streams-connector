@@ -172,6 +172,39 @@ class EnvironmentBuilderHelperTest {
     }
 
     @Test
+    void compressionCodecFactoryClassConfiguresBuilderFactory() throws Exception {
+        ConnectorOptions options = new ConnectorOptions(Map.of(
+                "endpoints", "hostA:5552",
+                "stream", "test-stream",
+                "compressionCodecFactoryClass",
+                "com.rabbitmq.spark.connector.EnvironmentBuilderHelperTest$TestCompressionCodecFactory"
+        ));
+
+        StreamEnvironmentBuilder builder = new StreamEnvironmentBuilder();
+        invokeConfigureCompressionCodecFactory(builder, options);
+
+        Object codecFactory = getFieldValue(builder, "compressionCodecFactory");
+        assertThat(codecFactory).isSameAs(TestCompressionCodecFactory.CODEC_FACTORY);
+    }
+
+    @Test
+    void compressionCodecFactoryClassReturningNullFailsFast() {
+        ConnectorOptions options = new ConnectorOptions(Map.of(
+                "endpoints", "hostA:5552",
+                "stream", "test-stream",
+                "compressionCodecFactoryClass",
+                "com.rabbitmq.spark.connector.EnvironmentBuilderHelperTest$NullCompressionCodecFactory"
+        ));
+
+        StreamEnvironmentBuilder builder = new StreamEnvironmentBuilder();
+        assertThatThrownBy(() -> invokeConfigureCompressionCodecFactory(builder, options))
+                .hasCauseInstanceOf(IllegalArgumentException.class)
+                .cause()
+                .hasMessageContaining("compressionCodecFactoryClass")
+                .hasMessageContaining("returned null");
+    }
+
+    @Test
     void appliesHighPriorityEnvironmentTuningOptions() throws Exception {
         ConnectorOptions options = new ConnectorOptions(Map.of(
                 "endpoints", "hostA:5552",
@@ -271,6 +304,16 @@ class EnvironmentBuilderHelperTest {
         method.invoke(null, builder, options);
     }
 
+    private static void invokeConfigureCompressionCodecFactory(StreamEnvironmentBuilder builder,
+                                                               ConnectorOptions options) throws Exception {
+        Method method = EnvironmentBuilderHelper.class.getDeclaredMethod(
+                "configureCompressionCodecFactory",
+                com.rabbitmq.stream.EnvironmentBuilder.class,
+                ConnectorOptions.class);
+        method.setAccessible(true);
+        method.invoke(null, builder, options);
+    }
+
     private static Object invokeBuildSslContext(ConnectorOptions options) throws Exception {
         Method method = EnvironmentBuilderHelper.class.getDeclaredMethod(
                 "buildSslContext", ConnectorOptions.class);
@@ -354,6 +397,27 @@ class EnvironmentBuilderHelperTest {
             implements ConnectorObservationCollectorFactory {
         @Override
         public com.rabbitmq.stream.ObservationCollector<?> create(ConnectorOptions options) {
+            return null;
+        }
+    }
+
+    public static final class TestCompressionCodecFactory
+            implements ConnectorCompressionCodecFactory {
+        static final com.rabbitmq.stream.compression.CompressionCodecFactory CODEC_FACTORY =
+                compression -> null;
+
+        @Override
+        public com.rabbitmq.stream.compression.CompressionCodecFactory create(
+                ConnectorOptions options) {
+            return CODEC_FACTORY;
+        }
+    }
+
+    public static final class NullCompressionCodecFactory
+            implements ConnectorCompressionCodecFactory {
+        @Override
+        public com.rabbitmq.stream.compression.CompressionCodecFactory create(
+                ConnectorOptions options) {
             return null;
         }
     }

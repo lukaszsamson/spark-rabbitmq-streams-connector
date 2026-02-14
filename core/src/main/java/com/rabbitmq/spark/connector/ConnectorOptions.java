@@ -72,6 +72,9 @@ public final class ConnectorOptions implements Serializable {
     public static final String BATCH_PUBLISHING_DELAY_MS = "batchPublishingDelayMs";
     public static final String COMPRESSION = "compression";
     public static final String SUB_ENTRY_SIZE = "subEntrySize";
+    public static final String RETRY_ON_RECOVERY = "retryOnRecovery";
+    public static final String DYNAMIC_BATCH = "dynamicBatch";
+    public static final String COMPRESSION_CODEC_FACTORY_CLASS = "compressionCodecFactoryClass";
     public static final String ROUTING_STRATEGY = "routingStrategy";
     public static final String PARTITIONER_CLASS = "partitionerClass";
     public static final String FILTER_VALUE_COLUMN = "filterValueColumn";
@@ -159,6 +162,9 @@ public final class ConnectorOptions implements Serializable {
     private final Long batchPublishingDelayMs;
     private final CompressionType compression;
     private final Integer subEntrySize;
+    private final Boolean retryOnRecovery;
+    private final Boolean dynamicBatch;
+    private final String compressionCodecFactoryClass;
     private final RoutingStrategyType routingStrategy;
     private final String partitionerClass;
     private final String filterValueColumn;
@@ -236,6 +242,9 @@ public final class ConnectorOptions implements Serializable {
         this.compression = parseEnum(options, COMPRESSION,
                 CompressionType::fromString, DEFAULT_COMPRESSION);
         this.subEntrySize = getInteger(options, SUB_ENTRY_SIZE);
+        this.retryOnRecovery = getNullableBoolean(options, RETRY_ON_RECOVERY);
+        this.dynamicBatch = getNullableBoolean(options, DYNAMIC_BATCH);
+        this.compressionCodecFactoryClass = getString(options, COMPRESSION_CODEC_FACTORY_CLASS);
         this.routingStrategy = parseEnum(options, ROUTING_STRATEGY,
                 RoutingStrategyType::fromString, DEFAULT_ROUTING_STRATEGY);
         this.partitionerClass = getString(options, PARTITIONER_CLASS);
@@ -293,6 +302,11 @@ public final class ConnectorOptions implements Serializable {
         if (observationCollectorClass != null && !observationCollectorClass.isEmpty()) {
             ExtensionLoader.load(observationCollectorClass, ConnectorObservationCollectorFactory.class,
                     OBSERVATION_COLLECTOR_CLASS);
+        }
+        if (compressionCodecFactoryClass != null && !compressionCodecFactoryClass.isEmpty()) {
+            ExtensionLoader.load(compressionCodecFactoryClass,
+                    ConnectorCompressionCodecFactory.class,
+                    COMPRESSION_CODEC_FACTORY_CLASS);
         }
         if (rpcTimeoutMs != null && rpcTimeoutMs <= 0) {
             throw new IllegalArgumentException(
@@ -537,6 +551,9 @@ public final class ConnectorOptions implements Serializable {
     public Long getBatchPublishingDelayMs() { return batchPublishingDelayMs; }
     public CompressionType getCompression() { return compression; }
     public Integer getSubEntrySize() { return subEntrySize; }
+    public Boolean getRetryOnRecovery() { return retryOnRecovery; }
+    public Boolean getDynamicBatch() { return dynamicBatch; }
+    public String getCompressionCodecFactoryClass() { return compressionCodecFactoryClass; }
     public RoutingStrategyType getRoutingStrategy() { return routingStrategy; }
     public String getPartitionerClass() { return partitionerClass; }
     public String getFilterValueColumn() { return filterValueColumn; }

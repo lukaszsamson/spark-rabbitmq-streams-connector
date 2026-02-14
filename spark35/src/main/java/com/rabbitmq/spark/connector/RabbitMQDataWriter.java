@@ -286,6 +286,12 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
                     Duration.ofMillis(options.getPublisherConfirmTimeoutMs()));
         }
         builder.enqueueTimeout(Duration.ofMillis(options.getEnqueueTimeoutMs()));
+        if (options.getRetryOnRecovery() != null) {
+            builder.retryOnRecovery(options.getRetryOnRecovery());
+        }
+        if (options.getDynamicBatch() != null) {
+            builder.dynamicBatch(options.getDynamicBatch());
+        }
 
         // State listener for RECOVERING/CLOSED transitions
         builder.listeners(context -> {
