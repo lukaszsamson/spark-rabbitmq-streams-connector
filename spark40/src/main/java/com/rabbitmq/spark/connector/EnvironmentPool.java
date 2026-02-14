@@ -81,14 +81,13 @@ final class EnvironmentPool {
 
     private final ConcurrentHashMap<EnvironmentKey, PooledEntry> pool = new ConcurrentHashMap<>();
 
-    private final ScheduledExecutorService evictionScheduler =
-            Executors.newSingleThreadScheduledExecutor(r -> {
-                Thread t = new Thread(r, "rmq-env-pool-evictor");
-                t.setDaemon(true);
-                return t;
-            });
+    private final Object evictionSchedulerLock = new Object();
+    private volatile ScheduledExecutorService evictionScheduler = createEvictionScheduler();
 
-    private EnvironmentPool() {}
+    private EnvironmentPool() {
+        Runtime.getRuntime().addShutdownHook(new Thread(this::shutdownEvictionScheduler,
+                "rmq-env-pool-shutdown"));
+    }
 
     /**
      * Acquire an Environment for the given options. If a pooled environment
@@ -167,7 +166,7 @@ final class EnvironmentPool {
             long idleTimeoutMs = options.getEnvironmentIdleTimeoutMs();
             LOG.debug("Scheduling eviction for environment key {} in {}ms",
                     key.endpoints(), idleTimeoutMs);
-            entry.evictionTask = evictionScheduler.schedule(
+            entry.evictionTask = getOrCreateEvictionScheduler().schedule(
                     () -> evict(key, entry), idleTimeoutMs, TimeUnit.MILLISECONDS);
         }
     }
@@ -210,5 +209,38 @@ final class EnvironmentPool {
             }
         });
         pool.clear();
+    }
+
+    // Visible for tests
+    void shutdownEvictionScheduler() {
+        synchronized (evictionSchedulerLock) {
+            evictionScheduler.shutdownNow();
+        }
+    }
+
+    // Visible for tests
+    boolean isEvictionSchedulerShutdown() {
+        return evictionScheduler.isShutdown();
+    }
+
+    private ScheduledExecutorService getOrCreateEvictionScheduler() {
+        ScheduledExecutorService scheduler = evictionScheduler;
+        if (!scheduler.isShutdown()) {
+            return scheduler;
+        }
+        synchronized (evictionSchedulerLock) {
+            if (evictionScheduler.isShutdown()) {
+                evictionScheduler = createEvictionScheduler();
+            }
+            return evictionScheduler;
+        }
+    }
+
+    private static ScheduledExecutorService createEvictionScheduler() {
+        return Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "rmq-env-pool-evictor");
+            t.setDaemon(true);
+            return t;
+        });
     }
 }

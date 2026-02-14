@@ -13,6 +13,7 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.time.Duration;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -46,6 +47,7 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
     private final AtomicReference<Throwable> sendError = new AtomicReference<>();
     private final AtomicLong outstandingConfirms = new AtomicLong(0);
     private final Object confirmMonitor = new Object();
+    private final AtomicBoolean closeCalled = new AtomicBoolean(false);
 
     // Deduplication: monotonic publishing ID
     private long nextPublishingId = -1;
@@ -200,6 +202,9 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
 
     @Override
     public void close() throws IOException {
+        if (!closeCalled.compareAndSet(false, true)) {
+            return;
+        }
         try {
             if (producer != null) {
                 producer.close();

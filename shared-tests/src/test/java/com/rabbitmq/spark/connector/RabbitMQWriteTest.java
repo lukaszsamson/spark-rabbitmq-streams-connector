@@ -425,6 +425,19 @@ class RabbitMQWriteTest {
         }
 
         @Test
+        void closeIsOneShotEvenWhenProducerCloseFails() throws Exception {
+            RabbitMQDataWriter writer = new RabbitMQDataWriter(
+                    minimalSinkOptions(), minimalSinkSchema(), 0, 1, -1);
+            ThrowingCloseProducer producer = new ThrowingCloseProducer();
+            setPrivateField(writer, "producer", producer);
+
+            writer.close();
+            writer.close();
+
+            assertThat(producer.closeCalls).isEqualTo(1);
+        }
+
+        @Test
         void metricsStartAtZero() {
             RabbitMQDataWriter writer = new RabbitMQDataWriter(
                     minimalSinkOptions(), minimalSinkSchema(), 0, 1, -1);
@@ -971,6 +984,34 @@ class RabbitMQWriteTest {
 
         @Override
         public void close() {
+        }
+    }
+
+    private static final class ThrowingCloseProducer implements com.rabbitmq.stream.Producer {
+        private static final com.rabbitmq.stream.codec.QpidProtonCodec CODEC =
+                new com.rabbitmq.stream.codec.QpidProtonCodec();
+        private int closeCalls;
+
+        @Override
+        public com.rabbitmq.stream.MessageBuilder messageBuilder() {
+            return CODEC.messageBuilder();
+        }
+
+        @Override
+        public long getLastPublishingId() {
+            return 0L;
+        }
+
+        @Override
+        public void send(com.rabbitmq.stream.Message message,
+                         com.rabbitmq.stream.ConfirmationHandler confirmationHandler) {
+            confirmationHandler.handle(new com.rabbitmq.stream.ConfirmationStatus(message, true, (short) 0));
+        }
+
+        @Override
+        public void close() {
+            closeCalls++;
+            throw new RuntimeException("boom");
         }
     }
 
