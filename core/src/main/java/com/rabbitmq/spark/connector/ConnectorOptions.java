@@ -417,9 +417,9 @@ public final class ConnectorOptions implements Serializable {
             throw new IllegalArgumentException(
                     "'" + MAX_IN_FLIGHT + "' must be > 0, got: " + maxInFlight);
         }
-        if (enqueueTimeoutMs <= 0) {
+        if (enqueueTimeoutMs < 0) {
             throw new IllegalArgumentException(
-                    "'" + ENQUEUE_TIMEOUT_MS + "' must be > 0, got: " + enqueueTimeoutMs);
+                    "'" + ENQUEUE_TIMEOUT_MS + "' must be >= 0, got: " + enqueueTimeoutMs);
         }
         if (batchSize != null && batchSize <= 0) {
             throw new IllegalArgumentException(
@@ -429,9 +429,9 @@ public final class ConnectorOptions implements Serializable {
             throw new IllegalArgumentException(
                     "'" + SUB_ENTRY_SIZE + "' must be > 0, got: " + subEntrySize);
         }
-        if (publisherConfirmTimeoutMs != null && publisherConfirmTimeoutMs <= 0) {
+        if (publisherConfirmTimeoutMs != null && publisherConfirmTimeoutMs < 0) {
             throw new IllegalArgumentException(
-                    "'" + PUBLISHER_CONFIRM_TIMEOUT_MS + "' must be > 0, got: " +
+                    "'" + PUBLISHER_CONFIRM_TIMEOUT_MS + "' must be >= 0, got: " +
                             publisherConfirmTimeoutMs);
         }
         if (batchPublishingDelayMs != null && batchPublishingDelayMs < 0) {

@@ -526,7 +526,7 @@ class RabbitMQWriteTest {
         }
 
         @Test
-        void deriveProducerNameReturnsNonEmptyString() throws Exception {
+        void deriveProducerNameIsStableAcrossTaskAttempts() throws Exception {
             Map<String, String> opts = minimalSinkMap();
             opts.put("producerName", "dedup");
             ConnectorOptions options = new ConnectorOptions(opts);
@@ -538,7 +538,7 @@ class RabbitMQWriteTest {
 
             writer.write(new GenericInternalRow(new Object[]{"x".getBytes()}));
 
-            assertThat(builder.name).isEqualTo("dedup-p2-t7");
+            assertThat(builder.name).isEqualTo("dedup-p2");
         }
 
         @Test
@@ -663,6 +663,7 @@ class RabbitMQWriteTest {
             Map<String, String> opts = minimalSinkMap();
             opts.put("maxInFlight", "7");
             opts.put("publisherConfirmTimeoutMs", "1234");
+            opts.put("enqueueTimeoutMs", "0");
             opts.put("batchSize", "5");
             opts.put("batchPublishingDelayMs", "9");
             ConnectorOptions options = new ConnectorOptions(opts);
@@ -676,6 +677,7 @@ class RabbitMQWriteTest {
 
             assertThat(builder.maxInFlight).isEqualTo(7);
             assertThat(builder.confirmTimeoutMs).isEqualTo(1234L);
+            assertThat(builder.enqueueTimeoutMs).isEqualTo(0L);
             assertThat(builder.batchSize).isEqualTo(5);
             assertThat(builder.batchDelayMs).isEqualTo(9L);
         }
@@ -1049,6 +1051,7 @@ class RabbitMQWriteTest {
     private static final class CapturingProducerBuilder implements com.rabbitmq.stream.ProducerBuilder {
         private int maxInFlight;
         private long confirmTimeoutMs;
+        private long enqueueTimeoutMs;
         private int batchSize;
         private long batchDelayMs;
         private com.rabbitmq.stream.Resource.StateListener listener;
@@ -1106,6 +1109,7 @@ class RabbitMQWriteTest {
 
         @Override
         public com.rabbitmq.stream.ProducerBuilder enqueueTimeout(java.time.Duration timeout) {
+            this.enqueueTimeoutMs = timeout.toMillis();
             return this;
         }
 

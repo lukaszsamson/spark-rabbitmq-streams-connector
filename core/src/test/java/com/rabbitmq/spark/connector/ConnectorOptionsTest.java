@@ -1127,9 +1127,17 @@ class ConnectorOptionsTest {
         }
 
         @Test
-        void rejectsNonPositiveEnqueueTimeoutMs() {
+        void acceptsZeroEnqueueTimeoutMs() {
             var map = minimalStreamOptions();
             map.put("enqueueTimeoutMs", "0");
+            var opts = new ConnectorOptions(map);
+            assertThatCode(opts::validateForSink).doesNotThrowAnyException();
+        }
+
+        @Test
+        void rejectsNegativeEnqueueTimeoutMs() {
+            var map = minimalStreamOptions();
+            map.put("enqueueTimeoutMs", "-1");
             var opts = new ConnectorOptions(map);
             assertThatThrownBy(opts::validateForSink)
                     .isInstanceOf(IllegalArgumentException.class)
@@ -1157,9 +1165,17 @@ class ConnectorOptionsTest {
         }
 
         @Test
-        void rejectsNonPositivePublisherConfirmTimeout() {
+        void acceptsZeroPublisherConfirmTimeout() {
             var map = minimalStreamOptions();
             map.put("publisherConfirmTimeoutMs", "0");
+            var opts = new ConnectorOptions(map);
+            assertThatCode(opts::validateForSink).doesNotThrowAnyException();
+        }
+
+        @Test
+        void rejectsNegativePublisherConfirmTimeout() {
+            var map = minimalStreamOptions();
+            map.put("publisherConfirmTimeoutMs", "-1");
             var opts = new ConnectorOptions(map);
             assertThatThrownBy(opts::validateForSink)
                     .isInstanceOf(IllegalArgumentException.class)

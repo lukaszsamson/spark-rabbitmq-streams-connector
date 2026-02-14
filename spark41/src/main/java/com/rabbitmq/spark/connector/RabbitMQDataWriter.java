@@ -360,8 +360,8 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
     /**
      * Derive the producer name for deduplication.
      *
-     * <p>For streaming writes: {@code producerName-p{partitionId}-t{taskId}}.
-     * For batch writes: {@code producerName-p{partitionId}-t{taskId}}.
+     * <p>Uses a stable logical name scoped to the Spark partition so retries
+     * and re-executions can resume dedup state with the same producer identity.
      *
      * @return the derived name, or null if dedup is not enabled
      */
@@ -370,7 +370,7 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
         if (baseName == null || baseName.isEmpty()) {
             return null;
         }
-        return baseName + "-p" + partitionId + "-t" + taskId;
+        return baseName + "-p" + partitionId;
     }
 
     /**
