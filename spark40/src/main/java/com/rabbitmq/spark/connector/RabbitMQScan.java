@@ -200,13 +200,46 @@ final class RabbitMQScan implements Scan {
             case EARLIEST -> firstAvailable;
             case LATEST -> resolveEndOffset(env, stream, stats);
             case OFFSET -> options.getStartingOffset();
-            case TIMESTAMP -> {
-                // For timestamp mode, start from the beginning and let the broker seek.
-                // The consumer uses OffsetSpecification.timestamp() for efficient seeking.
-                // For partition planning purposes, use firstAvailable as a lower bound.
-                yield firstAvailable;
-            }
+            case TIMESTAMP -> resolveTimestampStartingOffset(env, stream, firstAvailable, stats);
         };
+    }
+
+    private long resolveTimestampStartingOffset(
+            Environment env, String stream, long firstAvailable, StreamStats stats) {
+        BlockingQueue<Long> observedOffsets = new LinkedBlockingQueue<>();
+        com.rabbitmq.stream.Consumer probe = null;
+        try {
+            probe = env.consumerBuilder()
+                    .stream(stream)
+                    .offset(com.rabbitmq.stream.OffsetSpecification.timestamp(
+                            options.getStartingTimestamp()))
+                    .noTrackingStrategy()
+                    .messageHandler((context, message) -> observedOffsets.offer(context.offset()))
+                    .build();
+
+            Long observed = observedOffsets.poll(250, TimeUnit.MILLISECONDS);
+            if (observed != null) {
+                return Math.max(firstAvailable, observed);
+            }
+            return Math.max(firstAvailable, resolveEndOffset(env, stream, stats));
+        } catch (NoOffsetException e) {
+            return firstAvailable;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return firstAvailable;
+        } catch (Exception e) {
+            LOG.warn("Failed to resolve timestamp start offset for stream '{}': {}",
+                    stream, e.getMessage());
+            return firstAvailable;
+        } finally {
+            if (probe != null) {
+                try {
+                    probe.close();
+                } catch (Exception e) {
+                    LOG.debug("Error closing timestamp-start probe consumer for stream '{}'", stream, e);
+                }
+            }
+        }
     }
 
     private long resolveEndOffset(Environment env, String stream, StreamStats stats) {

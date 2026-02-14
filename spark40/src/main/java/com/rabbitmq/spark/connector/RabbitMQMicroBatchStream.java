@@ -713,12 +713,57 @@ final class RabbitMQMicroBatchStream
             case EARLIEST -> resolveFirstAvailable(stream);
             case LATEST -> queryStreamTailOffsetForLatest(getEnvironment(), stream);
             case OFFSET -> options.getStartingOffset();
-            case TIMESTAMP -> {
-                // For timestamp mode, use firstAvailable as offset-planning lower bound.
-                // The consumer uses OffsetSpecification.timestamp() for efficient seeking.
-                yield resolveFirstAvailable(stream);
-            }
+            case TIMESTAMP -> resolveTimestampStartingOffset(getEnvironment(), stream);
         };
+    }
+
+    /**
+     * Resolve a stable planning start offset for timestamp mode by probing the broker with
+     * {@link com.rabbitmq.stream.OffsetSpecification#timestamp(long)}.
+     *
+     * <p>Using firstAvailable as a planning lower bound causes empty early split ranges
+     * when the timestamp maps much later in the stream. This method aligns planning with
+     * broker timestamp seek behavior.
+     */
+    private long resolveTimestampStartingOffset(Environment env, String stream) {
+        long firstAvailable = resolveFirstAvailable(stream);
+        BlockingQueue<Long> observedOffsets = new LinkedBlockingQueue<>();
+        com.rabbitmq.stream.Consumer probe = null;
+        try {
+            probe = env.consumerBuilder()
+                    .stream(stream)
+                    .offset(com.rabbitmq.stream.OffsetSpecification.timestamp(
+                            options.getStartingTimestamp()))
+                    .noTrackingStrategy()
+                    .messageHandler((context, message) -> observedOffsets.offer(context.offset()))
+                    .build();
+
+            Long observed = observedOffsets.poll(250, TimeUnit.MILLISECONDS);
+            if (observed != null) {
+                return Math.max(firstAvailable, observed);
+            }
+
+            // No records at/after timestamp: plan an empty range near the tail.
+            long tailExclusive = queryStreamTailOffsetForLatest(env, stream);
+            return Math.max(firstAvailable, tailExclusive);
+        } catch (NoOffsetException e) {
+            return firstAvailable;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return firstAvailable;
+        } catch (Exception e) {
+            LOG.warn("Failed to resolve timestamp start offset for stream '{}': {}",
+                    stream, e.getMessage());
+            return firstAvailable;
+        } finally {
+            if (probe != null) {
+                try {
+                    probe.close();
+                } catch (Exception e) {
+                    LOG.debug("Error closing timestamp-start probe consumer for stream '{}'", stream, e);
+                }
+            }
+        }
     }
 
     private long queryStreamTailOffsetForLatest(Environment env, String stream) {

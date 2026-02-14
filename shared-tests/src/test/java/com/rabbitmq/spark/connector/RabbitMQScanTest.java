@@ -72,15 +72,15 @@ class RabbitMQScanTest {
         }
 
         @Test
-        void timestampStartPlanningUsesFirstAvailableLowerBound() throws Exception {
+        void timestampStartPlanningUsesTimestampProbeOffset() throws Exception {
             Map<String, String> opts = baseOptions();
             opts.put("startingOffsets", "timestamp");
             opts.put("startingTimestamp", "1700000000000");
             RabbitMQScan scan = new RabbitMQScan(new ConnectorOptions(opts), schema());
             StreamStats stats = new Stats(10L, false, false, 20L);
 
-            long start = resolveStartOffset(scan, new ProbeNoOffsetEnvironment(), "s1", 10L, stats);
-            assertThat(start).isEqualTo(10L);
+            long start = resolveStartOffset(scan, new ProbeTailEnvironment(), "s1", 10L, stats);
+            assertThat(start).isEqualTo(11L);
         }
 
         @Test

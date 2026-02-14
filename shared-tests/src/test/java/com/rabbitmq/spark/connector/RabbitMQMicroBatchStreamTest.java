@@ -611,7 +611,7 @@ class RabbitMQMicroBatchStreamTest {
         }
 
         @Test
-        void resolveStartingOffsetTimestampUsesFirstAvailable() throws Exception {
+        void resolveStartingOffsetTimestampUsesTimestampProbeOffset() throws Exception {
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
             opts.put("stream", "test-stream");
@@ -619,10 +619,11 @@ class RabbitMQMicroBatchStreamTest {
             opts.put("startingTimestamp", "1700000000000");
 
             RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
-            setPrivateField(stream, "environment", new FirstOffsetEnvironment(10L));
+            setPrivateField(stream, "environment",
+                    new TimestampStartEnvironment(10L, java.util.List.of(42L)));
 
             RabbitMQStreamOffset offset = (RabbitMQStreamOffset) stream.initialOffset();
-            assertThat(offset.getStreamOffsets()).containsEntry("test-stream", 10L);
+            assertThat(offset.getStreamOffsets()).containsEntry("test-stream", 42L);
         }
     }
 
@@ -1323,6 +1324,60 @@ class RabbitMQMicroBatchStreamTest {
         @Override
         public com.rabbitmq.stream.ConsumerBuilder consumerBuilder() {
             throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void close() {
+        }
+    }
+
+    private static final class TimestampStartEnvironment implements com.rabbitmq.stream.Environment {
+        private final long firstOffset;
+        private final java.util.List<Long> probedOffsets;
+
+        private TimestampStartEnvironment(long firstOffset, java.util.List<Long> probedOffsets) {
+            this.firstOffset = firstOffset;
+            this.probedOffsets = probedOffsets;
+        }
+
+        @Override
+        public com.rabbitmq.stream.StreamCreator streamCreator() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void deleteStream(String stream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void deleteSuperStream(String superStream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public com.rabbitmq.stream.StreamStats queryStreamStats(String stream) {
+            return new FixedStreamStats(firstOffset);
+        }
+
+        @Override
+        public void storeOffset(String reference, String stream, long offset) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public boolean streamExists(String stream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public com.rabbitmq.stream.ProducerBuilder producerBuilder() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public com.rabbitmq.stream.ConsumerBuilder consumerBuilder() {
+            return new FixedOffsetProbeConsumerBuilder(probedOffsets);
         }
 
         @Override
