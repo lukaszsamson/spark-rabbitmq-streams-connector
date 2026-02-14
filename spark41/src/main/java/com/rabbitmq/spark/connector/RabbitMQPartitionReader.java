@@ -377,7 +377,12 @@ final class RabbitMQPartitionReader
                         options.getInitialCredits()))
                 .builder();
         if (options.isSingleActiveConsumer()) {
-            builder.name(options.getConsumerName()).singleActiveConsumer();
+            builder.name(resolveSingleActiveConsumerName())
+                    .singleActiveConsumer()
+                    // SAC with noTrackingStrategy needs an explicit update listener
+                    // to provide the activation offset.
+                    .consumerUpdateListener(context ->
+                            context.isActive() ? offsetSpec : OffsetSpecification.none());
         }
 
         // State listener for RECOVERING/CLOSED transitions
@@ -430,6 +435,17 @@ final class RabbitMQPartitionReader
             return OffsetSpecification.timestamp(options.getStartingTimestamp());
         }
         return OffsetSpecification.offset(startOffset);
+    }
+
+    private String resolveSingleActiveConsumerName() {
+        String consumerName = options.getConsumerName();
+        if (consumerName == null || consumerName.isEmpty()) {
+            return consumerName;
+        }
+        if (options.isSuperStreamMode()) {
+            return consumerName + "-" + stream;
+        }
+        return consumerName;
     }
 
     private boolean isBrokerFilterConfigured() {

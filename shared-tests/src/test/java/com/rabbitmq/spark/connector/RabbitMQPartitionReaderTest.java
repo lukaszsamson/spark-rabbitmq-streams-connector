@@ -529,6 +529,38 @@ class RabbitMQPartitionReaderTest {
         }
 
         @Test
+        void resolveSingleActiveConsumerNameUsesBaseNameForSingleStream() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("singleActiveConsumer", "true");
+            opts.put("consumerName", "sac-reader");
+
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 0, 100, new ConnectorOptions(opts), false);
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
+
+            String resolved = resolveSingleActiveConsumerName(reader);
+            assertThat(resolved).isEqualTo("sac-reader");
+        }
+
+        @Test
+        void resolveSingleActiveConsumerNameAppendsPartitionStreamForSuperstream() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("superstream", "orders");
+            opts.put("singleActiveConsumer", "true");
+            opts.put("consumerName", "sac-reader");
+
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "orders-2", 0, 100, new ConnectorOptions(opts), false);
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
+
+            String resolved = resolveSingleActiveConsumerName(reader);
+            assertThat(resolved).isEqualTo("sac-reader-orders-2");
+        }
+
+        @Test
         void createsConfiguredPostFilter() throws Exception {
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
@@ -664,6 +696,14 @@ class RabbitMQPartitionReaderTest {
         Method method = RabbitMQPartitionReader.class.getDeclaredMethod("resolveOffsetSpec");
         method.setAccessible(true);
         return (OffsetSpecification) method.invoke(reader);
+    }
+
+    private static String resolveSingleActiveConsumerName(RabbitMQPartitionReader reader)
+            throws Exception {
+        Method method = RabbitMQPartitionReader.class.getDeclaredMethod(
+                "resolveSingleActiveConsumerName");
+        method.setAccessible(true);
+        return (String) method.invoke(reader);
     }
 
     private static ConnectorPostFilter createPostFilter(ConnectorOptions options)

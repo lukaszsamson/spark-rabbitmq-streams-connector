@@ -204,6 +204,39 @@ class RealTimeModeIT extends AbstractRabbitMQIT {
     }
 
     @Test
+    void realTimeModeWithSingleActiveConsumer() throws Exception {
+        String consumerName = "rt-sac-" + System.currentTimeMillis();
+        publishMessages(sourceStream, 20, "rt-sac-");
+        Thread.sleep(2000);
+
+        StreamingQuery query = spark.readStream()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", sourceStream)
+                .option("startingOffsets", "earliest")
+                .option("singleActiveConsumer", "true")
+                .option("consumerName", consumerName)
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load()
+                .writeStream()
+                .outputMode("update")
+                .foreach(new RowCollector())
+                .option("checkpointLocation", checkpointDir.toString())
+                .trigger(createRealTimeTrigger("2 seconds"))
+                .start();
+
+        try {
+            awaitAtLeastRows(20, 30_000);
+        } finally {
+            query.stop();
+        }
+
+        assertThat(payloadsWithPrefix("rt-sac-")).hasSize(20);
+    }
+
+    @Test
     void realTimeModeCheckpointResume() throws Exception {
         // Phase 1: Publish and consume initial messages
         publishMessages(sourceStream, 30, "phase1-");

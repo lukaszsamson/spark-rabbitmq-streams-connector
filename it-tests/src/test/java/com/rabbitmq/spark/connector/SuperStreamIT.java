@@ -88,6 +88,44 @@ class SuperStreamIT extends AbstractRabbitMQIT {
     }
 
     @Test
+    void batchReadFromSuperStreamWithSingleActiveConsumerOption() throws Exception {
+        // Keep this case deterministic: verify SAC wiring on a superstream without
+        // introducing parallel partition-subscribe timing variability in CI.
+        deleteSuperStream(superStream);
+        createSuperStream(superStream, 1);
+
+        // Publish messages to each partition directly
+        for (int p = 0; p < 1; p++) {
+            String partitionStream = superStream + "-" + p;
+            publishMessages(partitionStream, 10, "sac-p" + p + "-msg-");
+        }
+
+        Thread.sleep(2000);
+
+        Dataset<Row> df = spark.read()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("superstream", superStream)
+                .option("startingOffsets", "earliest")
+                .option("singleActiveConsumer", "true")
+                .option("consumerName", "ss-sac-" + System.currentTimeMillis())
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load();
+
+        List<Row> rows = df.collectAsList();
+        assertThat(rows).hasSize(10);
+
+        Set<String> streams = rows.stream()
+                .map(row -> row.getAs("stream").toString())
+                .collect(Collectors.toSet());
+        for (int p = 0; p < 1; p++) {
+            assertThat(streams).contains(superStream + "-" + p);
+        }
+    }
+
+    @Test
     void batchReadFromSuperStreamWithFiltering() {
         // Publish filtered messages to each partition stream
         for (int p = 0; p < PARTITION_COUNT; p++) {

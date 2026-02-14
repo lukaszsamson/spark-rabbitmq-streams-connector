@@ -105,6 +105,32 @@ class BatchReadIT extends AbstractRabbitMQIT {
     }
 
     @Test
+    void batchReadFromStreamWithSingleActiveConsumerOption() {
+        publishMessages(stream, 25, "sac-stream-");
+
+        Dataset<Row> df = spark.read()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("startingOffsets", "earliest")
+                .option("singleActiveConsumer", "true")
+                .option("consumerName", "stream-sac-" + System.currentTimeMillis())
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load();
+
+        List<Row> rows = df.collectAsList();
+        assertThat(rows).hasSize(25);
+
+        List<Long> offsets = rows.stream()
+                .map(row -> (Long) row.getAs("offset"))
+                .sorted()
+                .toList();
+        assertThat(offsets).isEqualTo(LongStream.range(0, 25).boxed().toList());
+    }
+
+    @Test
     void batchReadPreservesMessageContent() {
         publishMessages(stream, 10, "hello-");
 
