@@ -244,6 +244,29 @@ class BatchReadIT extends AbstractRabbitMQIT {
     }
 
     @Test
+    void batchReadObservationCollectorClassInvoked() {
+        publishMessages(stream, 15, "obs-read-");
+        TestObservationCollectorFactory.reset();
+
+        Dataset<Row> df = spark.read()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("startingOffsets", "earliest")
+                .option("metadataFields", "")
+                .option("observationCollectorClass",
+                        "com.rabbitmq.spark.connector.TestObservationCollectorFactory")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load();
+
+        List<Row> rows = df.collectAsList();
+        assertThat(rows).hasSize(15);
+        assertThat(TestObservationCollectorFactory.subscribeCount()).isGreaterThanOrEqualTo(1);
+        assertThat(TestObservationCollectorFactory.handleCount()).isGreaterThanOrEqualTo(15);
+    }
+
+    @Test
     void batchReadFailOnDataLossForDeletedStream() {
         // failOnDataLoss=true (default) should fail when stream is deleted
         publishMessages(stream, 10);

@@ -262,6 +262,34 @@ class BatchWriteIT extends AbstractRabbitMQIT {
     }
 
     @Test
+    void batchWriteObservationCollectorClassInvoked() {
+        StructType schema = new StructType()
+                .add("value", DataTypes.BinaryType, false);
+
+        List<Row> data = new ArrayList<>();
+        for (int i = 0; i < 12; i++) {
+            data.add(RowFactory.create(("obs-write-" + i).getBytes()));
+        }
+
+        TestObservationCollectorFactory.reset();
+
+        spark.createDataFrame(data, schema)
+                .write()
+                .format("rabbitmq_streams")
+                .mode("append")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("observationCollectorClass",
+                        "com.rabbitmq.spark.connector.TestObservationCollectorFactory")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .save();
+
+        assertThat(TestObservationCollectorFactory.prePublishCount()).isGreaterThanOrEqualTo(12);
+        assertThat(TestObservationCollectorFactory.publishedCount()).isGreaterThanOrEqualTo(12);
+    }
+
+    @Test
     void batchWriteThenBatchRead() {
         // Write via connector
         StructType schema = new StructType()
