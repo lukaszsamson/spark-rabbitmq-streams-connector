@@ -19,7 +19,16 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class SuperStreamPartitionDiscoveryTest {
 
     @Test
-    void discoversPartitionsViaEnvironmentLocatorOperation() {
+    void discoversPartitionsViaEnvironmentLocatorClient() {
+        StubLocatorEnvironment env = new StubLocatorEnvironment(List.of("super-0", "super-1"));
+
+        List<String> partitions = SuperStreamPartitionDiscovery.discoverPartitions(env, "super");
+
+        assertThat(partitions).containsExactly("super-0", "super-1");
+    }
+
+    @Test
+    void fallsBackToLocatorOperationWhenLocatorClientApiUnavailable() {
         StubEnvironment env = new StubEnvironment(List.of("super-0", "super-1"));
 
         List<String> partitions = SuperStreamPartitionDiscovery.discoverPartitions(env, "super");
@@ -53,6 +62,29 @@ class SuperStreamPartitionDiscoveryTest {
         @SuppressWarnings("unused")
         Object locatorOperation(Function<com.rabbitmq.stream.impl.Client, List<String>> operation) {
             return this.partitions;
+        }
+    }
+
+    private static final class StubLocatorEnvironment extends MinimalEnvironment {
+        private final List<String> partitions;
+
+        private StubLocatorEnvironment(List<String> partitions) {
+            this.partitions = partitions;
+        }
+
+        @SuppressWarnings("unused")
+        Object locator() {
+            return new Object() {
+                @SuppressWarnings("unused")
+                Object client() {
+                    return new Object() {
+                        @SuppressWarnings("unused")
+                        List<String> partitions(String superStream) {
+                            return partitions;
+                        }
+                    };
+                }
+            };
         }
     }
 
