@@ -88,6 +88,46 @@ class SuperStreamIT extends AbstractRabbitMQIT {
     }
 
     @Test
+    void batchReadFromSuperStreamWithFiltering() {
+        // Publish filtered messages to each partition stream
+        for (int p = 0; p < PARTITION_COUNT; p++) {
+            String partitionStream = superStream + "-" + p;
+            publishMessagesWithFilterValue(partitionStream, 5, "alpha-p" + p + "-", "alpha");
+            publishMessagesWithFilterValue(partitionStream, 5, "beta-p" + p + "-", "beta");
+        }
+
+        Dataset<Row> df = spark.read()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("superstream", superStream)
+                .option("startingOffsets", "earliest")
+                .option("filterValues", "alpha")
+                .option("filterValueColumn", "filter")
+                .option("filterMatchUnfiltered", "false")
+                .option("pollTimeoutMs", "500")
+                .option("maxWaitMs", "10000")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load();
+
+        List<Row> rows = df.collectAsList();
+        List<String> values = rows.stream()
+                .map(row -> new String((byte[]) row.getAs("value"), StandardCharsets.UTF_8))
+                .toList();
+
+        assertThat(values).hasSize(5 * PARTITION_COUNT);
+        assertThat(values).allMatch(v -> v.startsWith("alpha-"));
+
+        Set<String> streams = rows.stream()
+                .map(row -> row.getAs("stream").toString())
+                .collect(Collectors.toSet());
+        for (int p = 0; p < PARTITION_COUNT; p++) {
+            assertThat(streams).contains(superStream + "-" + p);
+        }
+    }
+
+    @Test
     void batchReadNonExistentSuperStreamFailsFast() {
         String missing = "missing-super-" + System.currentTimeMillis();
 

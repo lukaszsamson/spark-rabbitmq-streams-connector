@@ -11,6 +11,7 @@ import org.junit.jupiter.api.Test;
 
 import java.io.*;
 import java.lang.reflect.Field;
+import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -440,6 +441,80 @@ class RealTimeModeTest {
             assertThat(status.hasRecord()).isTrue();
             assertThat(reader.get().getLong(2)).isEqualTo(10L);
         }
+
+        @Test
+        void nextWithTimeoutAppliesConfiguredPostFilter() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("filterPostFilterClass", KeepPrefixPostFilter.class.getName());
+            opts.put("filterWarningOnMismatch", "false");
+            ConnectorOptions options = new ConnectorOptions(opts);
+
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 0, Long.MAX_VALUE, options);
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(
+                    partition, partition.getOptions());
+
+            BlockingQueue<RabbitMQPartitionReader.QueuedMessage> queue = new LinkedBlockingQueue<>();
+            queue.add(new RabbitMQPartitionReader.QueuedMessage(
+                    CODEC.messageBuilder().addData("drop-1".getBytes(StandardCharsets.UTF_8)).build(),
+                    1L, 0L, new NoopContext()));
+            queue.add(new RabbitMQPartitionReader.QueuedMessage(
+                    CODEC.messageBuilder().addData("keep-1".getBytes(StandardCharsets.UTF_8)).build(),
+                    2L, 0L, new NoopContext()));
+
+            setPrivateField(reader, "consumer", new NoopConsumer());
+            setPrivateField(reader, "queue", queue);
+
+            SupportsRealTimeRead.RecordStatus status = reader.nextWithTimeout(5000L);
+            assertThat(status.hasRecord()).isTrue();
+            InternalRow row = reader.get();
+            assertThat(new String(row.getBinary(0), StandardCharsets.UTF_8)).isEqualTo("keep-1");
+            assertThat(row.getLong(2)).isEqualTo(2L);
+        }
+
+        @Test
+        void nextWithTimeoutAppliesDerivedFilterValuesPostFilter() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("filterValues", "alpha");
+            opts.put("filterValueColumn", "filter");
+            opts.put("filterWarningOnMismatch", "false");
+            ConnectorOptions options = new ConnectorOptions(opts);
+
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 0, Long.MAX_VALUE, options);
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(
+                    partition, partition.getOptions());
+
+            Message gamma = CODEC.messageBuilder()
+                    .addData("gamma".getBytes(StandardCharsets.UTF_8))
+                    .applicationProperties()
+                    .entry("filter", "gamma")
+                    .messageBuilder()
+                    .build();
+            Message alpha = CODEC.messageBuilder()
+                    .addData("alpha".getBytes(StandardCharsets.UTF_8))
+                    .applicationProperties()
+                    .entry("filter", "alpha")
+                    .messageBuilder()
+                    .build();
+
+            BlockingQueue<RabbitMQPartitionReader.QueuedMessage> queue = new LinkedBlockingQueue<>();
+            queue.add(new RabbitMQPartitionReader.QueuedMessage(gamma, 3L, 0L, new NoopContext()));
+            queue.add(new RabbitMQPartitionReader.QueuedMessage(alpha, 4L, 0L, new NoopContext()));
+
+            setPrivateField(reader, "consumer", new NoopConsumer());
+            setPrivateField(reader, "queue", queue);
+
+            SupportsRealTimeRead.RecordStatus status = reader.nextWithTimeout(5000L);
+            assertThat(status.hasRecord()).isTrue();
+            InternalRow row = reader.get();
+            assertThat(new String(row.getBinary(0), StandardCharsets.UTF_8)).isEqualTo("alpha");
+            assertThat(row.getLong(2)).isEqualTo(4L);
+        }
     }
 
     // ======================================================================
@@ -587,6 +662,13 @@ class RealTimeModeTest {
         @Override
         public Consumer consumer() {
             return null;
+        }
+    }
+
+    public static class KeepPrefixPostFilter implements ConnectorPostFilter {
+        @Override
+        public boolean accept(byte[] messageBody, Map<String, String> applicationProperties) {
+            return new String(messageBody, StandardCharsets.UTF_8).startsWith("keep-");
         }
     }
 }

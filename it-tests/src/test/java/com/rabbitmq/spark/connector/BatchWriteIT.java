@@ -16,6 +16,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -107,6 +108,106 @@ class BatchWriteIT extends AbstractRabbitMQIT {
         assertThat(msg.getApplicationProperties())
                 .containsEntry("color", "blue")
                 .containsEntry("priority", "high");
+    }
+
+    @Test
+    void batchWriteFilterValueColumnRoundTripWithConsumerFilter() {
+        StructType schema = new StructType()
+                .add("value", DataTypes.BinaryType, false)
+                .add("application_properties",
+                        DataTypes.createMapType(DataTypes.StringType, DataTypes.StringType),
+                        true);
+
+        List<Row> data = new ArrayList<>();
+        for (int i = 0; i < 20; i++) {
+            data.add(RowFactory.create(("alpha-" + i).getBytes(), Map.of("region", "alpha")));
+            data.add(RowFactory.create(("beta-" + i).getBytes(), Map.of("region", "beta")));
+        }
+
+        Dataset<Row> writeDf = spark.createDataFrame(data, schema);
+        writeDf.write()
+                .format("rabbitmq_streams")
+                .mode("append")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("filterValueColumn", "region")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .save();
+
+        Dataset<Row> readDf = spark.read()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("startingOffsets", "earliest")
+                .option("filterValues", "alpha")
+                .option("filterValueColumn", "region")
+                .option("filterMatchUnfiltered", "false")
+                .option("pollTimeoutMs", "500")
+                .option("maxWaitMs", "10000")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load();
+
+        List<String> values = readDf.collectAsList().stream()
+                .map(row -> new String((byte[]) row.getAs("value")))
+                .sorted()
+                .toList();
+
+        assertThat(values).hasSize(20);
+        assertThat(values).allMatch(v -> v.startsWith("alpha-"));
+    }
+
+    @Test
+    void batchWriteFilterValueColumnRoundTripMatchUnfiltered() {
+        StructType schema = new StructType()
+                .add("value", DataTypes.BinaryType, false)
+                .add("application_properties",
+                        DataTypes.createMapType(DataTypes.StringType, DataTypes.StringType),
+                        true);
+
+        List<Row> data = new ArrayList<>();
+        for (int i = 0; i < 10; i++) {
+            data.add(RowFactory.create(("alpha-" + i).getBytes(), Map.of("region", "alpha")));
+            data.add(RowFactory.create(("unfiltered-" + i).getBytes(), Map.of("category", "misc")));
+        }
+
+        Dataset<Row> writeDf = spark.createDataFrame(data, schema);
+        writeDf.write()
+                .format("rabbitmq_streams")
+                .mode("append")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("filterValueColumn", "region")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .save();
+
+        Dataset<Row> readDf = spark.read()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("startingOffsets", "earliest")
+                .option("filterValues", "alpha")
+                .option("filterValueColumn", "region")
+                .option("filterMatchUnfiltered", "true")
+                .option("pollTimeoutMs", "500")
+                .option("maxWaitMs", "10000")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load();
+
+        List<String> values = readDf.collectAsList().stream()
+                .map(row -> new String((byte[]) row.getAs("value")))
+                .toList();
+
+        long alphaCount = values.stream().filter(v -> v.startsWith("alpha-")).count();
+        long unfilteredCount = values.stream().filter(v -> v.startsWith("unfiltered-")).count();
+
+        assertThat(alphaCount).isEqualTo(10);
+        assertThat(unfilteredCount).isEqualTo(10);
     }
 
     @Test

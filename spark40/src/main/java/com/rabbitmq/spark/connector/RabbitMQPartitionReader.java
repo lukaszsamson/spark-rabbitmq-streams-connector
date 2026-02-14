@@ -8,8 +8,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -301,11 +303,23 @@ final class RabbitMQPartitionReader implements PartitionReader<InternalRow> {
 
         // Configure filtering if specified
         if (options.getFilterValues() != null && !options.getFilterValues().isEmpty()) {
+            ConnectorPostFilter brokerPostFilter = postFilter;
+            if (brokerPostFilter == null) {
+                LOG.warn("Broker-side filter configured on stream '{}' without deterministic " +
+                                "client post-filter. Bloom-filter false positives may be emitted. " +
+                                "Configure '{}' or '{}' to enable deterministic filtering.",
+                        stream,
+                        ConnectorOptions.FILTER_POST_FILTER_CLASS,
+                        ConnectorOptions.FILTER_VALUE_COLUMN);
+            }
             builder.filter()
                     .values(options.getFilterValues().toArray(new String[0]))
                     .matchUnfiltered(options.isFilterMatchUnfiltered())
                     // RabbitMQ stream client requires both filter values and post-filter logic.
-                    .postFilter(msg -> true)
+                    // Keep this consistent with the connector-level post-filter used in next().
+                    .postFilter(msg -> brokerPostFilter == null || brokerPostFilter.accept(
+                            msg.getBodyAsBinary(),
+                            coerceMapToStrings(msg.getApplicationProperties())))
                     .builder();
         }
 
@@ -380,11 +394,21 @@ final class RabbitMQPartitionReader implements PartitionReader<InternalRow> {
 
     private static ConnectorPostFilter createPostFilter(ConnectorOptions options) {
         String className = options.getFilterPostFilterClass();
-        if (className == null || className.isEmpty()) {
+        if (className != null && !className.isEmpty()) {
+            return ExtensionLoader.load(className, ConnectorPostFilter.class,
+                    ConnectorOptions.FILTER_POST_FILTER_CLASS);
+        }
+        if (options.getFilterValues() == null || options.getFilterValues().isEmpty()) {
             return null;
         }
-        return ExtensionLoader.load(className, ConnectorPostFilter.class,
-                ConnectorOptions.FILTER_POST_FILTER_CLASS);
+        String filterValueColumn = options.getFilterValueColumn();
+        if (filterValueColumn == null || filterValueColumn.isEmpty()) {
+            return null;
+        }
+        return new FilterValuesPostFilter(
+                filterValueColumn,
+                options.getFilterValues(),
+                options.isFilterMatchUnfiltered());
     }
 
     private static Map<String, String> coerceMapToStrings(Map<String, Object> source) {
@@ -396,5 +420,33 @@ final class RabbitMQPartitionReader implements PartitionReader<InternalRow> {
             out.put(entry.getKey(), entry.getValue() != null ? entry.getValue().toString() : null);
         }
         return out;
+    }
+
+    private static final class FilterValuesPostFilter implements ConnectorPostFilter {
+        private final String propertyName;
+        private final Set<String> allowedValues;
+        private final boolean matchUnfiltered;
+
+        private FilterValuesPostFilter(String propertyName, Iterable<String> filterValues,
+                                       boolean matchUnfiltered) {
+            this.propertyName = propertyName;
+            Set<String> values = new HashSet<>();
+            for (String value : filterValues) {
+                if (value != null) {
+                    values.add(value);
+                }
+            }
+            this.allowedValues = Set.copyOf(values);
+            this.matchUnfiltered = matchUnfiltered;
+        }
+
+        @Override
+        public boolean accept(byte[] messageBody, Map<String, String> applicationProperties) {
+            String value = applicationProperties == null ? null : applicationProperties.get(propertyName);
+            if (value == null) {
+                return matchUnfiltered;
+            }
+            return allowedValues.contains(value);
+        }
     }
 }

@@ -538,6 +538,47 @@ class RabbitMQPartitionReaderTest {
             ConnectorPostFilter postFilter = createPostFilter(new ConnectorOptions(opts));
             assertThat(postFilter).isInstanceOf(AcceptAllPostFilter.class);
         }
+
+        @Test
+        void derivesPostFilterFromFilterValuesAndFilterValueColumn() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("filterValues", "alpha,beta");
+            opts.put("filterValueColumn", "region");
+
+            ConnectorPostFilter postFilter = createPostFilter(new ConnectorOptions(opts));
+            assertThat(postFilter).isNotNull();
+            assertThat(postFilter.accept(new byte[0], Map.of("region", "alpha"))).isTrue();
+            assertThat(postFilter.accept(new byte[0], Map.of("region", "gamma"))).isFalse();
+            assertThat(postFilter.accept(new byte[0], Map.of())).isFalse();
+        }
+
+        @Test
+        void derivedPostFilterCanMatchUnfilteredMessages() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("filterValues", "alpha");
+            opts.put("filterValueColumn", "region");
+            opts.put("filterMatchUnfiltered", "true");
+
+            ConnectorPostFilter postFilter = createPostFilter(new ConnectorOptions(opts));
+            assertThat(postFilter).isNotNull();
+            assertThat(postFilter.accept(new byte[0], Map.of())).isTrue();
+            assertThat(postFilter.accept(new byte[0], null)).isTrue();
+        }
+
+        @Test
+        void doesNotDerivePostFilterWithoutFilterValueColumn() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("filterValues", "alpha,beta");
+
+            ConnectorPostFilter postFilter = createPostFilter(new ConnectorOptions(opts));
+            assertThat(postFilter).isNull();
+        }
     }
 
     // ======================================================================
