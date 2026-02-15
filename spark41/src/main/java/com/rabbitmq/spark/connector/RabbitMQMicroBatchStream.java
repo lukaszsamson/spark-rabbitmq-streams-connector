@@ -48,10 +48,10 @@ final class RabbitMQMicroBatchStream
     private final ExecutorService brokerCommitExecutor;
 
     /** Discovered streams (lazily initialized). */
-    private List<String> streams;
+    private volatile List<String> streams;
 
     /** Driver-side Environment for broker queries (lazily initialized). */
-    private Environment environment;
+    private volatile Environment environment;
 
     /** Cached latest offset for reportLatestOffset(). */
     private volatile RabbitMQStreamOffset cachedLatestOffset;
@@ -497,6 +497,15 @@ final class RabbitMQMicroBatchStream
 
     @Override
     public void prepareForRealTimeMode() {
+        Integer minPartitions = options.getMinPartitions();
+        if (minPartitions != null) {
+            throw new IllegalArgumentException(
+                    "minPartitions is not supported in real-time mode");
+        }
+        if (options.getMaxRecordsPerTrigger() != null || options.getMaxBytesPerTrigger() != null) {
+            throw new IllegalArgumentException(
+                    "maxRecordsPerTrigger and maxBytesPerTrigger are not supported in real-time mode");
+        }
         this.realTimeMode = true;
         LOG.info("Real-time mode activated");
     }
@@ -624,7 +633,7 @@ final class RabbitMQMicroBatchStream
 
     // ---- Internal helpers ----
 
-    private List<String> discoverStreams() {
+    private synchronized List<String> discoverStreams() {
         if (options.isStreamMode()) {
             if (streams == null) {
                 streams = List.of(options.getStream());
@@ -667,10 +676,18 @@ final class RabbitMQMicroBatchStream
     }
 
     private Environment getEnvironment() {
-        if (environment == null) {
-            environment = EnvironmentBuilderHelper.buildEnvironment(options);
+        Environment env = environment;
+        if (env != null) {
+            return env;
         }
-        return environment;
+        synchronized (this) {
+            env = environment;
+            if (env == null) {
+                env = EnvironmentBuilderHelper.buildEnvironment(options);
+                environment = env;
+            }
+        }
+        return env;
     }
 
     /**

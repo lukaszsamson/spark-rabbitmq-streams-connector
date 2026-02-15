@@ -4,6 +4,7 @@ import org.apache.spark.sql.connector.metric.CustomMetric;
 import org.apache.spark.sql.connector.metric.CustomSumMetric;
 import org.apache.spark.sql.connector.read.InputPartition;
 import org.apache.spark.sql.connector.read.streaming.*;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
@@ -131,6 +132,39 @@ class RabbitMQMicroBatchStreamTest {
             }
             assertThat(names).containsExactlyInAnyOrder(
                     "recordsRead", "bytesRead", "readLatencyMs");
+        }
+    }
+
+    @Nested
+    class RealTimeModeValidation {
+
+        @Test
+        void prepareForRealTimeModeRejectsMinPartitions() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("minPartitions", "2");
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+
+            Assumptions.assumeTrue(hasPrepareForRealTimeMode(stream));
+            assertThatThrownBy(() -> invokePrepareForRealTimeMode(stream))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("minPartitions");
+        }
+
+        @Test
+        void prepareForRealTimeModeRejectsReadLimits() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("maxRecordsPerTrigger", "100");
+            opts.put("maxBytesPerTrigger", "4096");
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+
+            Assumptions.assumeTrue(hasPrepareForRealTimeMode(stream));
+            assertThatThrownBy(() -> invokePrepareForRealTimeMode(stream))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("real-time mode");
         }
     }
 
@@ -1236,6 +1270,27 @@ class RabbitMQMicroBatchStreamTest {
         Method method = RabbitMQMicroBatchStream.class.getDeclaredMethod(methodName, parameterTypes);
         method.setAccessible(true);
         return method.invoke(null, args);
+    }
+
+    private static boolean hasPrepareForRealTimeMode(RabbitMQMicroBatchStream stream) {
+        try {
+            stream.getClass().getMethod("prepareForRealTimeMode");
+            return true;
+        } catch (NoSuchMethodException e) {
+            return false;
+        }
+    }
+
+    private static void invokePrepareForRealTimeMode(RabbitMQMicroBatchStream stream) throws Exception {
+        Method method = stream.getClass().getMethod("prepareForRealTimeMode");
+        try {
+            method.invoke(stream);
+        } catch (java.lang.reflect.InvocationTargetException e) {
+            if (e.getCause() instanceof Exception exception) {
+                throw exception;
+            }
+            throw e;
+        }
     }
 
     private static long invokeProbe(RabbitMQMicroBatchStream stream,

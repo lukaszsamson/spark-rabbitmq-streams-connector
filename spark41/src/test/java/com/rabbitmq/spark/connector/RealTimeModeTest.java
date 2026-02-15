@@ -17,6 +17,7 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Unit tests for the SupportsRealTimeMode and SupportsRealTimeRead
@@ -63,6 +64,32 @@ class RealTimeModeTest {
 
             stream.prepareForRealTimeMode();
             assertThat(getPrivateField(stream, "realTimeMode")).isEqualTo(true);
+        }
+
+        @Test
+        void prepareForRealTimeModeRejectsMinPartitions() {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("minPartitions", "2");
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+
+            assertThatThrownBy(stream::prepareForRealTimeMode)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("minPartitions");
+        }
+
+        @Test
+        void prepareForRealTimeModeRejectsReadLimits() {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("maxRecordsPerTrigger", "100");
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+
+            assertThatThrownBy(stream::prepareForRealTimeMode)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("real-time mode");
         }
     }
 

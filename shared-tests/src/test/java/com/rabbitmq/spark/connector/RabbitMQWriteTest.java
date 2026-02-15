@@ -238,10 +238,10 @@ class RabbitMQWriteTest {
         }
 
         @Test
-        void useCommitCoordinatorIsTrue() {
+        void useCommitCoordinatorIsFalse() {
             Write write = buildWrite();
             StreamingWrite streamingWrite = write.toStreaming();
-            assertThat(streamingWrite.useCommitCoordinator()).isTrue();
+            assertThat(streamingWrite.useCommitCoordinator()).isFalse();
         }
 
         @Test

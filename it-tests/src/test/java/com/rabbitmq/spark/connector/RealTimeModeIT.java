@@ -164,6 +164,68 @@ class RealTimeModeIT extends AbstractRabbitMQIT {
     }
 
     @Test
+    void realTimeModeRejectsMinPartitions() throws Exception {
+        StreamingQuery query = spark.readStream()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", sourceStream)
+                .option("startingOffsets", "earliest")
+                .option("minPartitions", "2")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load()
+                .writeStream()
+                .outputMode("update")
+                .foreach(new RowCollector())
+                .option("checkpointLocation", checkpointDir.toString())
+                .trigger(createRealTimeTrigger("2 seconds"))
+                .start();
+        try {
+            awaitQueryFailure(query, 10_000);
+            scala.Option<org.apache.spark.sql.streaming.StreamingQueryException> exception =
+                    query.exception();
+            assertThat(exception.isDefined()).isTrue();
+            assertThat(exception.get().getMessage()).contains("minPartitions");
+        } finally {
+            if (query.isActive()) {
+                query.stop();
+            }
+        }
+    }
+
+    @Test
+    void realTimeModeRejectsReadLimitOptions() throws Exception {
+        StreamingQuery query = spark.readStream()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", sourceStream)
+                .option("startingOffsets", "earliest")
+                .option("maxRecordsPerTrigger", "100")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load()
+                .writeStream()
+                .outputMode("update")
+                .foreach(new RowCollector())
+                .option("checkpointLocation", checkpointDir.toString())
+                .trigger(createRealTimeTrigger("2 seconds"))
+                .start();
+        try {
+            awaitQueryFailure(query, 10_000);
+            scala.Option<org.apache.spark.sql.streaming.StreamingQueryException> exception =
+                    query.exception();
+            assertThat(exception.isDefined()).isTrue();
+            assertThat(exception.get().getMessage()).contains("real-time mode");
+        } finally {
+            if (query.isActive()) {
+                query.stop();
+            }
+        }
+    }
+
+    @Test
     void realTimeModeServerSideOffsetTracking() throws Exception {
         String consumerName = "rt-consumer-" + System.currentTimeMillis();
         publishMessages(sourceStream, 40);
@@ -629,6 +691,16 @@ class RealTimeModeIT extends AbstractRabbitMQIT {
         long deadline = System.currentTimeMillis() + timeoutMs;
         while (COLLECTED_ROWS.size() < expectedMinRows && System.currentTimeMillis() < deadline) {
             Thread.sleep(200);
+        }
+    }
+
+    private static void awaitQueryFailure(StreamingQuery query, long timeoutMs) throws Exception {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (System.currentTimeMillis() < deadline) {
+            if (query.exception().isDefined() || !query.isActive()) {
+                return;
+            }
+            Thread.sleep(100);
         }
     }
 

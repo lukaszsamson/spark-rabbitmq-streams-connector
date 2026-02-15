@@ -35,7 +35,7 @@ final class RabbitMQStreamingWrite implements StreamingWrite {
 
     @Override
     public boolean useCommitCoordinator() {
-        return true;
+        return false;
     }
 
     @Override
