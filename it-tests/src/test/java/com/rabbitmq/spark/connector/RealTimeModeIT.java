@@ -225,6 +225,123 @@ class RealTimeModeIT extends AbstractRabbitMQIT {
         }
     }
 
+    // ---- IT-RT-007: incompatible options validation ----
+
+    @Test
+    void realTimeModeRejectsIncompatibleOptions() throws Exception {
+        String[] options = {"maxRecordsPerTrigger", "maxBytesPerTrigger", "minPartitions"};
+
+        for (String opt : options) {
+            StreamingQuery query = spark.readStream()
+                    .format("rabbitmq_streams")
+                    .option("endpoints", streamEndpoint())
+                    .option("stream", sourceStream)
+                    .option("startingOffsets", "earliest")
+                    .option(opt, "5")
+                    .option("metadataFields", "")
+                    .option("addressResolverClass",
+                            "com.rabbitmq.spark.connector.TestAddressResolver")
+                    .load()
+                    .writeStream()
+                    .outputMode("update")
+                    .foreach(new RowCollector())
+                    .option("checkpointLocation", checkpointDir.toString())
+                    .trigger(createRealTimeTrigger("2 seconds"))
+                    .start();
+
+            try {
+                awaitQueryFailure(query, 10_000);
+                scala.Option<org.apache.spark.sql.streaming.StreamingQueryException> exception =
+                        query.exception();
+                assertThat(exception.isDefined()).isTrue();
+                assertThat(exception.get().getMessage())
+                        .containsIgnoringCase(opt);
+            } finally {
+                if (query.isActive()) {
+                    query.stop();
+                }
+            }
+        }
+    }
+
+    // ---- IT-RT-008: empty batches during running query ----
+
+    @Test
+    void realTimeModeHandlesEmptyBatchesWhileRunning() throws Exception {
+        StreamingQuery query = spark.readStream()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", sourceStream)
+                .option("startingOffsets", "earliest")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load()
+                .writeStream()
+                .outputMode("update")
+                .foreach(new RowCollector())
+                .option("checkpointLocation", checkpointDir.toString())
+                .trigger(createRealTimeTrigger("2 seconds"))
+                .start();
+
+        try {
+            Thread.sleep(6000);
+            assertThat(query.isActive()).isTrue();
+            assertThat(query.exception().isDefined()).isFalse();
+        } finally {
+            query.stop();
+        }
+    }
+
+    // ---- IT-RT-009: union of multiple streams ----
+
+    @Test
+    void realTimeModeUnionMultipleStreams() throws Exception {
+        String otherStream = uniqueStreamName();
+        createStream(otherStream);
+        try {
+            publishMessages(sourceStream, 8, "rtm-a-");
+            publishMessages(otherStream, 7, "rtm-b-");
+            Thread.sleep(2000);
+
+            StreamingQuery query = spark.readStream()
+                    .format("rabbitmq_streams")
+                    .option("endpoints", streamEndpoint())
+                    .option("stream", sourceStream)
+                    .option("startingOffsets", "earliest")
+                    .option("metadataFields", "")
+                    .option("addressResolverClass",
+                            "com.rabbitmq.spark.connector.TestAddressResolver")
+                    .load()
+                    .union(spark.readStream()
+                            .format("rabbitmq_streams")
+                            .option("endpoints", streamEndpoint())
+                            .option("stream", otherStream)
+                            .option("startingOffsets", "earliest")
+                            .option("metadataFields", "")
+                            .option("addressResolverClass",
+                                    "com.rabbitmq.spark.connector.TestAddressResolver")
+                            .load())
+                    .writeStream()
+                    .outputMode("update")
+                    .foreach(new RowCollector())
+                    .option("checkpointLocation", checkpointDir.toString())
+                    .trigger(createRealTimeTrigger("2 seconds"))
+                    .start();
+
+            try {
+                awaitAtLeastRows(15, 30_000);
+            } finally {
+                query.stop();
+            }
+
+            assertThat(payloadsWithPrefix("rtm-a-")).hasSize(8);
+            assertThat(payloadsWithPrefix("rtm-b-")).hasSize(7);
+        } finally {
+            deleteStream(otherStream);
+        }
+    }
+
     @Test
     void realTimeModeServerSideOffsetTracking() throws Exception {
         String consumerName = "rt-consumer-" + System.currentTimeMillis();

@@ -2,13 +2,24 @@ package com.rabbitmq.spark.connector;
 
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
+import org.apache.logging.log4j.Level;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.core.appender.AbstractAppender;
+import org.apache.logging.log4j.core.LogEvent;
+import org.apache.logging.log4j.core.LoggerContext;
+import org.apache.logging.log4j.core.config.Configuration;
+import org.apache.logging.log4j.core.config.LoggerConfig;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.nio.file.Files;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -1061,5 +1072,393 @@ class BatchReadIT extends AbstractRabbitMQIT {
             assertThat(ex.getMessage()).contains("startingOffset");
             assertThat(ex.getMessage()).contains("required");
         });
+    }
+
+    // ---- IT-SCHEMA-003: self-join generates correct metrics ----
+
+    @Test
+    void batchReadSelfJoinCountsMatch() {
+        publishMessages(stream, 8, "join-");
+
+        Dataset<Row> df = spark.read()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("startingOffsets", "earliest")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load()
+                .selectExpr("CAST(value AS STRING) AS value");
+
+        Dataset<Row> left = df.withColumn("key", df.col("value"));
+        Dataset<Row> right = df.withColumn("key", df.col("value"));
+        long joinedCount = left.join(right, "key").count();
+
+        assertThat(joinedCount).isEqualTo(8L);
+    }
+
+    // ---- IT-METRIC-001: source custom metrics reported ----
+
+    @Test
+    void batchReadReportsSourceCustomMetrics() {
+        publishMessages(stream, 15, "metric-");
+
+        Dataset<Row> df = spark.read()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("startingOffsets", "earliest")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load();
+
+        df.collectAsList();
+
+        scala.collection.Iterator<org.apache.spark.sql.execution.metric.SQLMetric> iterator =
+                df.queryExecution().executedPlan().metrics().valuesIterator();
+        List<String> metrics = new java.util.ArrayList<>();
+        while (iterator.hasNext()) {
+            scala.Option<String> name = iterator.next().name();
+            if (name != null && name.isDefined()) {
+                metrics.add(name.get());
+            }
+        }
+
+        assertThat(metrics.stream().distinct().toList())
+                .contains("recordsRead", "bytesRead", "readLatencyMs");
+    }
+
+    // ---- IT-OFFSET-009: checkpoint forward compatibility (Spark 3.5 -> 4.x) ----
+
+    @Test
+    void batchReadCheckpointForwardCompatibilitySpark35() throws Exception {
+        String baseSpark35 = System.getProperty("spark.distribution.35",
+                "/Users/lukaszsamson/claude_fun/spark-3.5.4-bin-hadoop3");
+        String baseSpark40 = System.getProperty("spark.distribution.40",
+                "/Users/lukaszsamson/claude_fun/spark-4.0.1-bin-hadoop3");
+        String baseSpark41 = System.getProperty("spark.distribution.41",
+                "/Users/lukaszsamson/claude_fun/spark-4.1.1-bin-hadoop3");
+
+        String submit35 = baseSpark35 + "/bin/spark-submit";
+        String submit40 = baseSpark40 + "/bin/spark-submit";
+        String submit41 = baseSpark41 + "/bin/spark-submit";
+
+        String checkpointDir = Files.createTempDirectory("spark35-ckpt-").toString();
+        String outputDir = Files.createTempDirectory("spark35-output-").toString();
+
+        String consumerName = "ckpt-" + UUID.randomUUID();
+        publishMessages(stream, 12, "ckpt-");
+        Thread.sleep(1500);
+
+        String connectorJar35 = System.getProperty("connector.jar.spark35");
+        String sparkSqlJar35 = System.getProperty("spark.sql.jar.spark35");
+        String connectorJar40 = System.getProperty("connector.jar.spark40");
+        String sparkSqlJar40 = System.getProperty("spark.sql.jar.spark40");
+        String connectorJar41 = System.getProperty("connector.jar.spark41");
+        String sparkSqlJar41 = System.getProperty("spark.sql.jar.spark41");
+
+        Assumptions.assumeTrue(connectorJar35 != null && !connectorJar35.isBlank(),
+                "connector.jar.spark35 system property must be set");
+        Assumptions.assumeTrue(sparkSqlJar35 != null && !sparkSqlJar35.isBlank(),
+                "spark.sql.jar.spark35 system property must be set");
+        Assumptions.assumeTrue(connectorJar40 != null && !connectorJar40.isBlank(),
+                "connector.jar.spark40 system property must be set");
+        Assumptions.assumeTrue(sparkSqlJar40 != null && !sparkSqlJar40.isBlank(),
+                "spark.sql.jar.spark40 system property must be set");
+        Assumptions.assumeTrue(connectorJar41 != null && !connectorJar41.isBlank(),
+                "connector.jar.spark41 system property must be set");
+        Assumptions.assumeTrue(sparkSqlJar41 != null && !sparkSqlJar41.isBlank(),
+                "spark.sql.jar.spark41 system property must be set");
+
+        String classpath35 = connectorJar35 + ":" + sparkSqlJar35;
+        String classpath40 = connectorJar40 + ":" + sparkSqlJar40;
+        String classpath41 = connectorJar41 + ":" + sparkSqlJar41;
+
+        runExternalQuery(
+                submit35,
+                classpath35,
+                checkpointDir,
+                outputDir,
+                consumerName
+        );
+
+        long storedOffset = queryStoredOffset(consumerName, stream);
+        assertThat(storedOffset).isGreaterThanOrEqualTo(0L);
+
+        publishMessages(stream, 5, "ckpt2-");
+        Thread.sleep(1000);
+
+        runExternalQuery(
+                submit40,
+                classpath40,
+                checkpointDir,
+                outputDir,
+                consumerName
+        );
+
+        runExternalQuery(
+                submit41,
+                classpath41,
+                checkpointDir,
+                outputDir,
+                consumerName
+        );
+    }
+
+    private void runExternalQuery(
+            String submitScript,
+            String classpath,
+            String checkpointDir,
+            String outputDir,
+            String consumerName) throws Exception {
+        ProcessBuilder processBuilder = new ProcessBuilder(
+                submitScript,
+                "--class", "org.apache.spark.sql.execution.streaming.StreamingQueryRunner",
+                "--master", "local[2]",
+                "--conf", "spark.ui.enabled=false",
+                "--conf", "spark.sql.shuffle.partitions=2",
+                "--conf", "spark.jars=" + classpath,
+                "--conf", "spark.driver.extraClassPath=" + classpath,
+                "--conf", "spark.executor.extraClassPath=" + classpath,
+                "--conf", "spark.rmq.appName=ckpt",
+                "--conf", "spark.rmq.format=rabbitmq_streams",
+                "--conf", "spark.rmq.endpoints=" + streamEndpoint(),
+                "--conf", "spark.rmq.stream=" + stream,
+                "--conf", "spark.rmq.startingOffsets=earliest",
+                "--conf", "spark.rmq.metadataFields=",
+                "--conf", "spark.rmq.consumerName=" + consumerName,
+                "--conf", "spark.rmq.addressResolverClass=com.rabbitmq.spark.connector.TestAddressResolver",
+                "--conf", "spark.rmq.outputPath=" + outputDir,
+                "--conf", "spark.rmq.checkpointLocation=" + checkpointDir,
+                "--conf", "spark.rmq.trigger=AvailableNow"
+        );
+
+        processBuilder.environment().put("JAVA_HOME",
+                "/opt/homebrew/Cellar/openjdk@21/21.0.10/libexec/openjdk.jdk/Contents/Home");
+        processBuilder.environment().put("SPARK_LOG_DIR", checkpointDir);
+
+        Process process = processBuilder.start();
+        int exit = process.waitFor();
+        assertThat(exit).isEqualTo(0);
+    }
+
+    // ---- IT-OFFSET-010: mixed timestamp starting + numeric ending offset ----
+
+    @Test
+    void batchReadStartingTimestampWithNumericEndingOffset() throws Exception {
+        publishMessages(stream, 20, "pre-");
+        Thread.sleep(1500);
+        long boundaryTimestamp = System.currentTimeMillis();
+        Thread.sleep(1000);
+        publishMessages(stream, 30, "post-");
+
+        Dataset<Row> df = spark.read()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("startingOffsets", "timestamp")
+                .option("startingTimestamp", String.valueOf(boundaryTimestamp))
+                .option("endingOffsets", "offset")
+                .option("endingOffset", "35")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load();
+
+        List<Row> rows = df.collectAsList();
+        assertThat(rows).isNotEmpty();
+
+        long maxOffset = rows.stream()
+                .mapToLong(row -> row.getAs("offset"))
+                .max().orElse(-1);
+        assertThat(maxOffset).isLessThan(35L);
+
+        List<String> values = rows.stream()
+                .map(row -> new String((byte[]) row.getAs("value")))
+                .toList();
+        assertThat(values).anyMatch(v -> v.startsWith("post-"));
+    }
+
+    // ---- IT-DATALOSS-007: failOnDataLoss=false no duplicates in batch ----
+
+    @Test
+    void batchReadFailOnDataLossFalseNoDuplicates() throws Exception {
+        String truncStream = uniqueStreamName();
+        deleteStream(truncStream);
+        createStreamWithRetention(truncStream, 1000, 500);
+
+        try {
+            for (int batch = 0; batch < 10; batch++) {
+                publishMessages(truncStream, 50, "trunc-batch" + batch + "-");
+                Thread.sleep(500);
+            }
+
+            long firstOffset = waitForTruncation(truncStream, 30_000);
+            Assumptions.assumeTrue(firstOffset > 0,
+                    "Retention truncation did not occur in time");
+
+            Dataset<Row> df = spark.read()
+                    .format("rabbitmq_streams")
+                    .option("endpoints", streamEndpoint())
+                    .option("stream", truncStream)
+                    .option("startingOffsets", "offset")
+                    .option("startingOffset", "0")
+                    .option("failOnDataLoss", "false")
+                    .option("metadataFields", "")
+                    .option("addressResolverClass",
+                            "com.rabbitmq.spark.connector.TestAddressResolver")
+                    .load();
+
+            List<Row> rows = df.collectAsList();
+            assertThat(rows).isNotEmpty();
+
+            Set<Long> offsets = rows.stream()
+                    .map(row -> (Long) row.getAs("offset"))
+                    .collect(Collectors.toSet());
+            assertThat(offsets).hasSize(rows.size());
+
+            long minReadOffset = offsets.stream()
+                    .mapToLong(Long::longValue).min().orElse(-1);
+            assertThat(minReadOffset).isGreaterThanOrEqualTo(firstOffset);
+        } finally {
+            deleteStream(truncStream);
+        }
+    }
+
+    // ---- IT-OPT-001: case-insensitive options ----
+
+    @Test
+    void batchReadAcceptsCaseInsensitiveOptions() {
+        publishMessages(stream, 10);
+
+        Dataset<Row> df = spark.read()
+                .format("rabbitmq_streams")
+                .option("EnDpOiNtS", streamEndpoint())
+                .option("StReAm", stream)
+                .option("StArTiNgOfFsEtS", "earliest")
+                .option("MeTaDaTaFiElDs", "")
+                .option("AdDrEsSReSoLvErClAsS",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load();
+
+        assertThat(df.collectAsList()).hasSize(10);
+    }
+
+    // ---- IT-SCHEMA-002: DataFrame reuse in batch query ----
+
+    @Test
+    void batchReadDataFrameReuseUnion() {
+        publishMessages(stream, 12, "reuse-");
+
+        Dataset<Row> df = spark.read()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("startingOffsets", "earliest")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load();
+
+        Dataset<Row> union = df.union(df);
+        assertThat(union.count()).isEqualTo(24L);
+    }
+
+    // ---- IT-FILTER-004: filterWarningOnMismatch log behavior ----
+
+    @Test
+    void batchReadFilterWarningOnMismatchLogs() {
+        publishMessagesWithFilterValue(stream, 10, "drop-", "alpha");
+
+        LoggerContext context = (LoggerContext) LogManager.getContext(false);
+        Configuration configuration = context.getConfiguration();
+        LoggerConfig loggerConfig = configuration.getLoggerConfig(
+                "com.rabbitmq.spark.connector.RabbitMQPartitionReader");
+        MemoryAppender appender = new MemoryAppender("filterMismatchAppender");
+        appender.start();
+        loggerConfig.addAppender(appender, Level.WARN, null);
+        context.updateLoggers();
+
+        try {
+            Dataset<Row> df = spark.read()
+                    .format("rabbitmq_streams")
+                    .option("endpoints", streamEndpoint())
+                    .option("stream", stream)
+                    .option("startingOffsets", "earliest")
+                    .option("filterValues", "alpha")
+                    .option("filterValueColumn", "filter")
+                    .option("filterPostFilterClass",
+                            "com.rabbitmq.spark.connector.TestPostFilter")
+                    .option("filterWarningOnMismatch", "true")
+                    .option("pollTimeoutMs", "200")
+                    .option("maxWaitMs", "10000")
+                    .option("metadataFields", "")
+                    .option("addressResolverClass",
+                            "com.rabbitmq.spark.connector.TestAddressResolver")
+                    .load();
+
+            List<Row> rows = df.collectAsList();
+            assertThat(rows).isEmpty();
+
+            List<LogEvent> warnings = appender.getEvents().stream()
+                    .filter(event -> event.getMessage().getFormattedMessage()
+                            .contains("Post-filter dropped message"))
+                    .toList();
+            assertThat(warnings).isNotEmpty();
+
+            appender.clear();
+
+            Dataset<Row> dfNoWarn = spark.read()
+                    .format("rabbitmq_streams")
+                    .option("endpoints", streamEndpoint())
+                    .option("stream", stream)
+                    .option("startingOffsets", "earliest")
+                    .option("filterValues", "alpha")
+                    .option("filterValueColumn", "filter")
+                    .option("filterPostFilterClass",
+                            "com.rabbitmq.spark.connector.TestPostFilter")
+                    .option("filterWarningOnMismatch", "false")
+                    .option("pollTimeoutMs", "200")
+                    .option("maxWaitMs", "10000")
+                    .option("metadataFields", "")
+                    .option("addressResolverClass",
+                            "com.rabbitmq.spark.connector.TestAddressResolver")
+                    .load();
+
+            assertThat(dfNoWarn.collectAsList()).isEmpty();
+
+            List<LogEvent> warningsDisabled = appender.getEvents().stream()
+                    .filter(event -> event.getMessage().getFormattedMessage()
+                            .contains("Post-filter dropped message"))
+                    .toList();
+            assertThat(warningsDisabled).isEmpty();
+        } finally {
+            loggerConfig.removeAppender("filterMismatchAppender");
+            appender.stop();
+            context.updateLoggers();
+        }
+    }
+
+    private static final class MemoryAppender extends AbstractAppender {
+        private final List<LogEvent> events = new CopyOnWriteArrayList<>();
+
+        private MemoryAppender(String name) {
+            super(name, null, null, false, null);
+        }
+
+        @Override
+        public void append(LogEvent event) {
+            events.add(event.toImmutable());
+        }
+
+        private List<LogEvent> getEvents() {
+            return events;
+        }
+
+        private void clear() {
+            events.clear();
+        }
     }
 }

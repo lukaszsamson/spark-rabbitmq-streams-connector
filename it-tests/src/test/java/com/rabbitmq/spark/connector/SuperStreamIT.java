@@ -24,6 +24,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
@@ -1010,6 +1011,40 @@ class SuperStreamIT extends AbstractRabbitMQIT {
         assertThat(countsByStream).doesNotContainKey(superStream + "-2");
     }
 
+    // ---- IT-RL-005: AvailableNow batch count matches rate limit (superstream) ----
+
+    @Test
+    void triggerAvailableNowBatchCountMatchesMaxRecordsPerTriggerSuperStream() throws Exception {
+        for (int p = 0; p < PARTITION_COUNT; p++) {
+            publishMessages(superStream + "-" + p, 9, "rate-p" + p + "-");
+        }
+        Thread.sleep(2000);
+
+        AtomicInteger batchCount = new AtomicInteger(0);
+        Path checkpointDir = Files.createTempDirectory("spark-checkpoint-ss-rl-");
+
+        StreamingQuery query = spark.readStream()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("superstream", superStream)
+                .option("startingOffsets", "earliest")
+                .option("maxRecordsPerTrigger", "10")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load()
+                .writeStream()
+                .foreachBatch((org.apache.spark.api.java.function.VoidFunction2<Dataset<Row>, Long>)
+                        (batch, batchId) -> batchCount.incrementAndGet())
+                .option("checkpointLocation", checkpointDir.toString())
+                .trigger(Trigger.AvailableNow())
+                .start();
+
+        query.awaitTermination(120_000);
+
+        assertThat(batchCount.get()).isEqualTo(3);
+    }
+
     // ---- IT-ORDER-002: per-partition offsets monotonic ----
 
     @Test
@@ -1055,6 +1090,181 @@ class SuperStreamIT extends AbstractRabbitMQIT {
                         .as("Offset at index " + i + " in partition " + entry.getKey())
                         .isEqualTo((long) i);
             }
+        }
+    }
+
+    // ---- IT-ORDER-003: add superstream partition while query is running ----
+
+    @Test
+    void streamingSuperStreamAddsPartitionDuringRun() throws Exception {
+        for (int p = 0; p < PARTITION_COUNT; p++) {
+            publishMessages(superStream + "-" + p, 10, "pre-p" + p + "-");
+        }
+        Thread.sleep(2000);
+
+        Path checkpointDir = Files.createTempDirectory("spark-checkpoint-ss-add-");
+        Path outputDir = Files.createTempDirectory("spark-output-ss-add-");
+        AtomicBoolean added = new AtomicBoolean(false);
+
+        StreamingQuery query = spark.readStream()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("superstream", superStream)
+                .option("startingOffsets", "earliest")
+                .option("maxRecordsPerTrigger", "5")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load()
+                .writeStream()
+                .foreachBatch((batch, batchId) -> {
+                    batch.write()
+                            .mode("append")
+                            .format("parquet")
+                            .save(outputDir.toString());
+                    if (batchId == 0L && added.compareAndSet(false, true)) {
+                        addSuperStreamPartitions(superStream, 1);
+                        publishMessages(superStream + "-3", 10, "new-p3-");
+                    }
+                })
+                .option("checkpointLocation", checkpointDir.toString())
+                .trigger(Trigger.AvailableNow())
+                .start();
+
+        query.awaitTermination(120_000);
+        assertThat(added.get()).isTrue();
+
+        List<Row> rows = spark.read().schema(MINIMAL_OUTPUT_SCHEMA)
+                .parquet(outputDir.toString())
+                .collectAsList();
+
+        Map<String, Long> countsByStream = rows.stream()
+                .collect(Collectors.groupingBy(
+                        row -> row.getAs("stream").toString(),
+                        Collectors.counting()));
+
+        assertThat(countsByStream).containsEntry(superStream + "-3", 10L);
+    }
+
+    // ---- IT-ORDER-004: remove then recreate partition stream with same name ----
+
+    @Test
+    void streamingSuperStreamRemoveAndRecreatePartition() throws Exception {
+        publishMessages(superStream + "-0", 20, "p0-");
+        publishMessages(superStream + "-1", 20, "p1-");
+        publishMessages(superStream + "-2", 20, "p2-");
+        Thread.sleep(2000);
+
+        Path checkpointDir = Files.createTempDirectory("spark-checkpoint-ss-recreate-");
+        Path outputDir = Files.createTempDirectory("spark-output-ss-recreate-");
+        AtomicBoolean recreated = new AtomicBoolean(false);
+
+        StreamingQuery query = spark.readStream()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("superstream", superStream)
+                .option("startingOffsets", "earliest")
+                .option("failOnDataLoss", "false")
+                .option("maxRecordsPerTrigger", "10")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load()
+                .writeStream()
+                .foreachBatch((batch, batchId) -> {
+                    batch.write()
+                            .mode("append")
+                            .format("parquet")
+                            .save(outputDir.toString());
+                    if (batchId == 0L && recreated.compareAndSet(false, true)) {
+                        deleteStream(superStream + "-2");
+                        Thread.sleep(500);
+                        createStream(superStream + "-2");
+                        publishMessages(superStream + "-2", 12, "p2-re-");
+                    }
+                })
+                .option("checkpointLocation", checkpointDir.toString())
+                .trigger(Trigger.AvailableNow())
+                .start();
+
+        query.awaitTermination(120_000);
+        assertThat(recreated.get()).isTrue();
+
+        List<Row> rows = spark.read().schema(MINIMAL_OUTPUT_SCHEMA)
+                .parquet(outputDir.toString())
+                .collectAsList();
+
+        List<String> values = rows.stream()
+                .map(row -> new String((byte[]) row.getAs("value")))
+                .toList();
+
+        assertThat(values).anyMatch(v -> v.startsWith("p2-re-"));
+    }
+
+    // ---- IT-STRESS-002: churn test with failOnDataLoss=false ----
+
+    @Test
+    void superStreamPartitionChurnDoesNotExplodeDuplicates() throws Exception {
+        for (int p = 0; p < PARTITION_COUNT; p++) {
+            publishMessages(superStream + "-" + p, 12, "churn-pre-p" + p + "-");
+        }
+        Thread.sleep(2000);
+
+        Path checkpointDir = Files.createTempDirectory("spark-checkpoint-ss-churn-");
+        Path outputDir = Files.createTempDirectory("spark-output-ss-churn-");
+        AtomicInteger churned = new AtomicInteger(0);
+
+        StreamingQuery query = spark.readStream()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("superstream", superStream)
+                .option("startingOffsets", "earliest")
+                .option("failOnDataLoss", "false")
+                .option("maxRecordsPerTrigger", "8")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load()
+                .writeStream()
+                .foreachBatch((batch, batchId) -> {
+                    batch.write()
+                            .mode("append")
+                            .format("parquet")
+                            .save(outputDir.toString());
+                    if (batchId < 3) {
+                        String target = superStream + "-" + (batchId % PARTITION_COUNT);
+                        deleteStream(target);
+                        Thread.sleep(300);
+                        createStream(target);
+                        publishMessages(target, 6, "churn-new-" + batchId + "-");
+                        churned.incrementAndGet();
+                    }
+                })
+                .option("checkpointLocation", checkpointDir.toString())
+                .trigger(Trigger.AvailableNow())
+                .start();
+
+        query.awaitTermination(120_000);
+        assertThat(churned.get()).isEqualTo(3);
+
+        List<Row> rows = spark.read().schema(MINIMAL_OUTPUT_SCHEMA)
+                .parquet(outputDir.toString())
+                .collectAsList();
+        assertThat(rows).isNotEmpty();
+
+        Map<String, List<Long>> offsetsByStream = rows.stream()
+                .collect(Collectors.groupingBy(
+                        row -> row.getAs("stream").toString(),
+                        Collectors.mapping(
+                                row -> (Long) row.getAs("offset"),
+                                Collectors.toList())));
+
+        for (Map.Entry<String, List<Long>> entry : offsetsByStream.entrySet()) {
+            List<Long> offsets = entry.getValue();
+            Set<Long> uniqueOffsets = Set.copyOf(offsets);
+            assertThat(uniqueOffsets)
+                    .as("No duplicate offsets in stream " + entry.getKey())
+                    .hasSize(offsets.size());
         }
     }
 

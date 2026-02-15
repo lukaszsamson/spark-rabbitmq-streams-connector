@@ -16,6 +16,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
+import java.util.stream.Collectors;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -606,6 +607,99 @@ class BatchWriteIT extends AbstractRabbitMQIT {
             assertThat(ex.getMessage()).containsIgnoringCase("partitionerClass");
             assertThat(ex.getMessage()).containsIgnoringCase("required");
         });
+    }
+
+    // ---- IT-SINK-009: sink schema type validation ----
+
+    @Test
+    void batchWriteSchemaTypeValidationFails() {
+        StructType schema = new StructType()
+                .add("value", DataTypes.StringType, false)
+                .add("stream", DataTypes.IntegerType, true)
+                .add("routing_key", DataTypes.IntegerType, true);
+
+        List<Row> data = List.of(RowFactory.create("bad-value", 1, 2));
+        Dataset<Row> df = spark.createDataFrame(data, schema);
+
+        assertThatThrownBy(() -> df.write()
+                .format("rabbitmq_streams")
+                .mode("append")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .save())
+                .hasMessageContaining("value")
+                .hasMessageContaining("binary");
+    }
+
+    // ---- IT-SINK-010: unsupported save modes ----
+
+    @Test
+    void batchWriteUnsupportedSaveModesFail() {
+        StructType schema = new StructType()
+                .add("value", DataTypes.BinaryType, false);
+        List<Row> data = List.of(RowFactory.create("mode-test".getBytes()));
+        Dataset<Row> df = spark.createDataFrame(data, schema);
+
+        assertThatThrownBy(() -> df.write()
+                .format("rabbitmq_streams")
+                .mode("overwrite")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .save())
+                .satisfies(ex -> assertThat(ex.getMessage())
+                        .containsIgnoringCase("overwrite"));
+
+        assertThatThrownBy(() -> df.write()
+                .format("rabbitmq_streams")
+                .mode("ignore")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .save())
+                .satisfies(ex -> assertThat(ex.getMessage())
+                        .containsIgnoringCase("ignore"));
+    }
+
+    // ---- IT-METRIC-002: sink custom metrics reported ----
+
+    @Test
+    void batchWriteReportsSinkCustomMetrics() {
+        StructType schema = new StructType()
+                .add("value", DataTypes.BinaryType, false);
+
+        List<Row> data = new ArrayList<>();
+        for (int i = 0; i < 10; i++) {
+            data.add(RowFactory.create(("metric-write-" + i).getBytes()));
+        }
+
+        Dataset<Row> df = spark.createDataFrame(data, schema);
+        df.write()
+                .format("rabbitmq_streams")
+                .mode("append")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .save();
+
+        scala.collection.Iterator<org.apache.spark.sql.execution.metric.SQLMetric> iterator =
+                df.queryExecution().executedPlan().metrics().valuesIterator();
+        List<String> metrics = new ArrayList<>();
+        while (iterator.hasNext()) {
+            scala.Option<String> name = iterator.next().name();
+            if (name != null && name.isDefined()) {
+                metrics.add(name.get());
+            }
+        }
+
+        assertThat(metrics.stream().distinct().toList())
+                .as("DataFrame metrics should be present after write")
+                .isNotEmpty();
     }
 
     @Test

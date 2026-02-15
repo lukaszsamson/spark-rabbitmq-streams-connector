@@ -152,6 +152,24 @@ abstract class AbstractRabbitMQIT {
         }
     }
 
+    /** Add partitions to an existing superstream via CLI. */
+    void addSuperStreamPartitions(String name, int partitionsToAdd) {
+        try {
+            var result = RABBIT.execInContainer(
+                    "rabbitmq-streams", "add_super_stream", name,
+                    "--partitions", String.valueOf(partitionsToAdd));
+            if (result.getExitCode() != 0) {
+                throw new RuntimeException(
+                        "Failed to add partitions to superstream '" + name + "': " + result.getStderr());
+            }
+            LOG.info("Added {} partitions to superstream '{}'", partitionsToAdd, name);
+        } catch (RuntimeException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to add partitions to superstream '" + name + "'", e);
+        }
+    }
+
     /** Delete a superstream via CLI (best-effort). */
     void deleteSuperStream(String name) {
         try {

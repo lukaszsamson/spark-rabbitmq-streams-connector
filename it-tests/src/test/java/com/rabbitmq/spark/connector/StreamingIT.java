@@ -10,6 +10,8 @@ import org.apache.spark.sql.streaming.StreamingQueryProgress;
 import org.apache.spark.sql.streaming.Trigger;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructType;
+import static org.apache.spark.sql.functions.col;
+import static org.apache.spark.sql.functions.window;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
@@ -26,7 +28,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 import java.util.stream.LongStream;
 
@@ -925,6 +931,72 @@ class StreamingIT extends AbstractRabbitMQIT {
         assertThat(values).allMatch(v -> v.startsWith("new-"));
     }
 
+    // ---- IT-OFFSET-008: earliest stop/restart picks up data added while stopped ----
+
+    @Test
+    void streamingStartingOffsetsEarliestRestartsPickUpStoppedData() throws Exception {
+        publishMessages(sourceStream, 20, "phase1-");
+        Thread.sleep(1500);
+
+        Path outputDir = Files.createTempDirectory("spark-output-restart-earliest-");
+
+        StreamingQuery first = spark.readStream()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", sourceStream)
+                .option("startingOffsets", "earliest")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load()
+                .writeStream()
+                .format("parquet")
+                .option("path", outputDir.toString())
+                .option("checkpointLocation", checkpointDir.toString())
+                .trigger(Trigger.AvailableNow())
+                .start();
+
+        first.awaitTermination(120_000);
+
+        long phase1Count = readOutputCount(outputDir);
+        assertThat(phase1Count).isEqualTo(20);
+
+        publishMessages(sourceStream, 15, "phase2-");
+        Thread.sleep(1500);
+
+        StreamingQuery second = spark.readStream()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", sourceStream)
+                .option("startingOffsets", "earliest")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load()
+                .writeStream()
+                .format("parquet")
+                .option("path", outputDir.toString())
+                .option("checkpointLocation", checkpointDir.toString())
+                .trigger(Trigger.AvailableNow())
+                .start();
+
+        second.awaitTermination(120_000);
+
+        List<Row> rows = readOutputRows(outputDir);
+        assertThat(rows).hasSize(35);
+
+        Set<Long> offsets = rows.stream()
+                .map(row -> (Long) row.getAs("offset"))
+                .collect(Collectors.toSet());
+        assertThat(offsets).hasSize(35);
+
+        List<String> values = rows.stream()
+                .map(row -> new String((byte[]) row.getAs("value")))
+                .toList();
+        assertThat(values).anyMatch(v -> v.startsWith("phase1-"));
+        assertThat(values).anyMatch(v -> v.startsWith("phase2-"));
+    }
+
     // ---- IT-AVNOW-001: publish during run excluded by snapshot ----
 
     @Test
@@ -1541,6 +1613,141 @@ class StreamingIT extends AbstractRabbitMQIT {
         assertThat(count).isEqualTo(200);
     }
 
+    // ---- IT-STRESS-001: soak with periodic restarts ----
+
+    @Test
+    void streamingSoakWithPeriodicRestarts() throws Exception {
+        Path outputDir = Files.createTempDirectory("spark-output-soak-");
+        Path soakCheckpoint = Files.createTempDirectory("spark-checkpoint-soak-");
+
+        int cycles = 3;
+        int perCycle = 20;
+
+        for (int cycle = 0; cycle < cycles; cycle++) {
+            publishMessages(sourceStream, perCycle, "soak-" + cycle + "-");
+            Thread.sleep(1500);
+
+            StreamingQuery query = spark.readStream()
+                    .format("rabbitmq_streams")
+                    .option("endpoints", streamEndpoint())
+                    .option("stream", sourceStream)
+                    .option("startingOffsets", "earliest")
+                    .option("metadataFields", "")
+                    .option("addressResolverClass",
+                            "com.rabbitmq.spark.connector.TestAddressResolver")
+                    .load()
+                    .writeStream()
+                    .format("parquet")
+                    .option("path", outputDir.toString())
+                    .option("checkpointLocation", soakCheckpoint.toString())
+                    .trigger(Trigger.AvailableNow())
+                    .start();
+
+            query.awaitTermination(120_000);
+        }
+
+        List<Row> rows = spark.read().schema(MINIMAL_OUTPUT_SCHEMA)
+                .parquet(outputDir.toString())
+                .collectAsList();
+
+        int expected = cycles * perCycle;
+        assertThat(rows).hasSize(expected);
+
+        Set<Long> offsets = rows.stream()
+                .map(row -> (Long) row.getAs("offset"))
+                .collect(Collectors.toSet());
+        assertThat(offsets).hasSize(expected);
+
+        long min = offsets.stream().mapToLong(Long::longValue).min().orElse(-1);
+        long max = offsets.stream().mapToLong(Long::longValue).max().orElse(-1);
+        assertThat(max - min).isEqualTo(expected - 1L);
+
+        List<String> values = rows.stream()
+                .map(row -> new String((byte[]) row.getAs("value")))
+                .toList();
+        for (int cycle = 0; cycle < cycles; cycle++) {
+            String prefix = "soak-" + cycle + "-";
+            assertThat(values).anyMatch(v -> v.startsWith(prefix));
+        }
+    }
+
+    // ---- IT-STRESS-004: environment pool eviction and reacquire ----
+
+    @Test
+    void environmentPoolEvictsAndReacquiresUnderConcurrentLoad() throws Exception {
+        EnvironmentPool.getInstance().closeAll();
+
+        int idleTimeoutMs = 200;
+        publishMessages(sourceStream, 20, "pool-");
+        Thread.sleep(1000);
+
+        StructType schema = new StructType()
+                .add("value", DataTypes.BinaryType, false);
+
+        List<Row> data = new ArrayList<>();
+        for (int i = 0; i < 10; i++) {
+            data.add(RowFactory.create(("pool-write-" + i).getBytes()));
+        }
+
+        Dataset<Row> writeDf = spark.createDataFrame(data, schema);
+
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Future<List<Row>> readFuture = executor.submit(() -> spark.read()
+                    .format("rabbitmq_streams")
+                    .option("endpoints", streamEndpoint())
+                    .option("stream", sourceStream)
+                    .option("startingOffsets", "earliest")
+                    .option("metadataFields", "")
+                    .option("environmentIdleTimeoutMs", String.valueOf(idleTimeoutMs))
+                    .option("addressResolverClass",
+                            "com.rabbitmq.spark.connector.TestAddressResolver")
+                    .load()
+                    .collectAsList());
+
+            Future<Void> writeFuture = executor.submit(() -> {
+                writeDf.write()
+                        .format("rabbitmq_streams")
+                        .mode("append")
+                        .option("endpoints", streamEndpoint())
+                        .option("stream", sinkStream)
+                        .option("environmentIdleTimeoutMs", String.valueOf(idleTimeoutMs))
+                        .option("addressResolverClass",
+                                "com.rabbitmq.spark.connector.TestAddressResolver")
+                        .save();
+                return null;
+            });
+
+            readFuture.get(60, TimeUnit.SECONDS);
+            writeFuture.get(60, TimeUnit.SECONDS);
+        } finally {
+            executor.shutdownNow();
+        }
+
+        long deadline = System.currentTimeMillis() + 5_000L;
+        while (System.currentTimeMillis() < deadline
+                && EnvironmentPool.getInstance().size() > 0) {
+            Thread.sleep(100);
+        }
+
+        assertThat(EnvironmentPool.getInstance().size()).isEqualTo(0);
+
+        List<Row> rows = spark.read()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", sourceStream)
+                .option("startingOffsets", "earliest")
+                .option("metadataFields", "")
+                .option("environmentIdleTimeoutMs", String.valueOf(idleTimeoutMs))
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load()
+                .collectAsList();
+
+        assertThat(rows).isNotEmpty();
+        EnvironmentPool.getInstance().closeAll();
+    }
+
     // ---- IT-RL-004: wrong initial estimatedMessageSizeBytes corrected over batches ----
 
     @Test
@@ -1581,6 +1788,70 @@ class StreamingIT extends AbstractRabbitMQIT {
         assertThat(count).isEqualTo(100);
     }
 
+    // ---- IT-RL-005: AvailableNow batch count matches rate limit ----
+
+    @Test
+    void triggerAvailableNowBatchCountMatchesMaxRecordsPerTrigger() throws Exception {
+        publishMessages(sourceStream, 25);
+        Thread.sleep(1500);
+
+        AtomicInteger batchCount = new AtomicInteger(0);
+
+        StreamingQuery query = spark.readStream()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", sourceStream)
+                .option("startingOffsets", "earliest")
+                .option("maxRecordsPerTrigger", "10")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load()
+                .writeStream()
+                .foreachBatch((org.apache.spark.api.java.function.VoidFunction2<Dataset<Row>, Long>)
+                        (batch, batchId) -> batchCount.incrementAndGet())
+                .option("checkpointLocation", checkpointDir.toString())
+                .trigger(Trigger.AvailableNow())
+                .start();
+
+        query.awaitTermination(120_000);
+
+        assertThat(batchCount.get()).isEqualTo(3);
+    }
+
+    // ---- IT-RL-006: maxRecordsPerTrigger=Long.MAX_VALUE does not overflow ----
+
+    @Test
+    void streamingMaxRecordsPerTriggerLongMaxValueCompletes() throws Exception {
+        publishMessages(sourceStream, 5);
+        Thread.sleep(1000);
+
+        Path outputDir = Files.createTempDirectory("spark-output-maxrecords-long-");
+
+        StreamingQuery query = spark.readStream()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", sourceStream)
+                .option("startingOffsets", "earliest")
+                .option("maxRecordsPerTrigger", String.valueOf(Long.MAX_VALUE))
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load()
+                .writeStream()
+                .format("parquet")
+                .option("path", outputDir.toString())
+                .option("checkpointLocation", checkpointDir.toString())
+                .trigger(Trigger.AvailableNow())
+                .start();
+
+        query.awaitTermination(120_000);
+
+        long count = spark.read().schema(MINIMAL_OUTPUT_SCHEMA)
+                .parquet(outputDir.toString()).count();
+        assertThat(count).isEqualTo(5);
+    }
+
     // ---- IT-CONT-001: continuous trigger not supported ----
 
     @Test
@@ -1610,6 +1881,70 @@ class StreamingIT extends AbstractRabbitMQIT {
             query.awaitTermination(30_000);
         }).satisfies(ex -> assertThat(ex.getMessage())
                 .containsIgnoringCase("ContinuousTrigger"));
+    }
+
+    // ---- IT-CONT-002: ensure micro-batch execution mode ----
+
+    @Test
+    void streamingReportsMicroBatchExecutionMode() throws Exception {
+        publishMessages(sourceStream, 10);
+        Thread.sleep(1500);
+
+        Path outputDir = Files.createTempDirectory("spark-output-microbatch-");
+
+        StreamingQuery query = spark.readStream()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", sourceStream)
+                .option("startingOffsets", "earliest")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load()
+                .writeStream()
+                .format("parquet")
+                .option("path", outputDir.toString())
+                .option("checkpointLocation", checkpointDir.toString())
+                .trigger(Trigger.AvailableNow())
+                .start();
+
+        query.awaitTermination(120_000);
+
+        String execName = query.getClass().getName().toLowerCase();
+        assertThat(execName).contains("microbatch");
+    }
+
+    // ---- IT-SCHEMA-001: watermark-based windowed aggregation ----
+
+    @Test
+    void streamingWatermarkAggregationOnChunkTimestamp() throws Exception {
+        publishMessages(sourceStream, 12, "wm-");
+        Thread.sleep(2000);
+
+        StreamingQuery query = spark.readStream()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", sourceStream)
+                .option("startingOffsets", "earliest")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load()
+                .withWatermark("chunk_timestamp", "5 seconds")
+                .groupBy(window(col("chunk_timestamp"), "5 seconds"))
+                .count()
+                .writeStream()
+                .format("memory")
+                .queryName("rabbitmq_watermark")
+                .outputMode("complete")
+                .trigger(Trigger.AvailableNow())
+                .start();
+
+        query.awaitTermination(120_000);
+
+        List<Row> rows = spark.table("rabbitmq_watermark").collectAsList();
+        long total = rows.stream().mapToLong(row -> row.getAs("count")).sum();
+        assertThat(total).isEqualTo(12L);
     }
 
     // ---- IT-ORDER-001: offsets strictly increasing across batches ----
@@ -1719,6 +2054,82 @@ class StreamingIT extends AbstractRabbitMQIT {
         assertThat(maxLag).isGreaterThanOrEqualTo(0);
         assertThat(avgLag).isGreaterThanOrEqualTo(0.0);
         assertThat(minLag).isLessThanOrEqualTo(maxLag);
+    }
+
+    // ---- IT-METRIC-004: numInputRows matches records read ----
+
+    @Test
+    void streamingNumInputRowsMatchesOutputCount() throws Exception {
+        publishMessages(sourceStream, 60);
+        Thread.sleep(2000);
+
+        Path outputDir = Files.createTempDirectory("spark-output-input-rows-");
+
+        StreamingQuery query = spark.readStream()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", sourceStream)
+                .option("startingOffsets", "earliest")
+                .option("maxRecordsPerTrigger", "15")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load()
+                .writeStream()
+                .format("parquet")
+                .option("path", outputDir.toString())
+                .option("checkpointLocation", checkpointDir.toString())
+                .trigger(Trigger.AvailableNow())
+                .start();
+
+        query.awaitTermination(120_000);
+
+        long outputCount = spark.read().schema(MINIMAL_OUTPUT_SCHEMA)
+                .parquet(outputDir.toString()).count();
+
+        long totalInputRows = Arrays.stream(query.recentProgress())
+                .mapToLong(StreamingQueryProgress::numInputRows)
+                .sum();
+
+        assertThat(outputCount).isEqualTo(60L);
+        assertThat(totalInputRows).isEqualTo(outputCount);
+    }
+
+    // ---- IT-SINK-011: streaming sink progress numOutputRows ----
+
+    @Test
+    void streamingSinkProgressReportsNumOutputRows() throws Exception {
+        StructType schema = new StructType()
+                .add("value", DataTypes.BinaryType, false);
+
+        List<Row> data = new ArrayList<>();
+        for (int i = 0; i < 12; i++) {
+            data.add(RowFactory.create(("sink-progress-" + i).getBytes()));
+        }
+
+        Path inputDir = Files.createTempDirectory("spark-input-sink-progress-").resolve("data");
+        Path sinkCheckpointDir = Files.createTempDirectory("spark-sink-progress-ckpt-");
+        spark.createDataFrame(data, schema).write().parquet(inputDir.toString());
+
+        StreamingQuery query = spark.readStream()
+                .schema(schema)
+                .parquet(inputDir.toString())
+                .writeStream()
+                .format("rabbitmq_streams")
+                .outputMode("append")
+                .option("endpoints", streamEndpoint())
+                .option("stream", sinkStream)
+                .option("checkpointLocation", sinkCheckpointDir.toString())
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .trigger(Trigger.AvailableNow())
+                .start();
+
+        query.awaitTermination(120_000);
+
+        boolean found = Arrays.stream(query.recentProgress())
+                .anyMatch(progress -> progress.sink().numOutputRows() == 12L);
+        assertThat(found).isTrue();
     }
 
     // ---- Helpers ----
