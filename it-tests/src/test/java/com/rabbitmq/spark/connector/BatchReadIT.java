@@ -9,6 +9,11 @@ import org.junit.jupiter.api.Test;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import java.util.stream.LongStream;
 
@@ -644,6 +649,55 @@ class BatchReadIT extends AbstractRabbitMQIT {
         assertThatThrownBy(df::collectAsList)
                 .hasMessageContaining("Timed out waiting for messages")
                 .hasMessageContaining("target end offset");
+    }
+
+    @Test
+    void batchReadFailsFastWhenStreamClosesEvenWithLargeMaxWait() throws Exception {
+        publishMessages(stream, 10);
+
+        Dataset<Row> df = spark.read()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("startingOffsets", "offset")
+                .option("startingOffset", "0")
+                .option("endingOffsets", "offset")
+                .option("endingOffset", "100")
+                .option("maxWaitMs", "60000")
+                .option("pollTimeoutMs", "200")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load();
+
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            long startMs = System.currentTimeMillis();
+            Future<List<Row>> future = executor.submit(df::collectAsList);
+            Thread.sleep(1000L);
+            deleteStream(stream);
+
+            assertThatThrownBy(() -> future.get(20, TimeUnit.SECONDS))
+                    .isInstanceOfAny(ExecutionException.class, java.util.concurrent.TimeoutException.class)
+                    .satisfies(ex -> {
+                        if (ex instanceof ExecutionException ee) {
+                            String message = ee.getCause() != null
+                                    ? ee.getCause().getMessage()
+                                    : ee.getMessage();
+                            assertThat(message).isNotNull();
+                            assertThat(
+                                    message.contains("closed before reaching target end offset")
+                                            || message.contains("does not exist")
+                                            || message.contains("Timed out waiting for messages"))
+                                    .isTrue();
+                        }
+                    });
+
+            long elapsedMs = System.currentTimeMillis() - startMs;
+            assertThat(elapsedMs).isLessThan(20000L);
+        } finally {
+            executor.shutdownNow();
+        }
     }
 
     @Test

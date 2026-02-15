@@ -199,6 +199,13 @@ final class RabbitMQMicroBatchStream
 
     @Override
     public void stop() {
+        if (options.isServerSideOffsetTracking(true)
+                && (lastStoredEndOffsets == null || lastStoredEndOffsets.isEmpty())
+                && cachedLatestOffset != null) {
+            // Some Spark execution paths can terminate without invoking commit(end).
+            // Persist a best-effort fallback so broker-side recovery remains functional.
+            persistBrokerOffsets(cachedLatestOffset.getStreamOffsets());
+        }
         brokerCommitExecutor.shutdownNow();
         if (environment != null) {
             try {
@@ -466,9 +473,13 @@ final class RabbitMQMicroBatchStream
         }
         if (!hasNewData) {
             LOG.debug("No new data available, returning stable start offsets");
-            RabbitMQStreamOffset stable = new RabbitMQStreamOffset(effectiveStartMap);
-            cachedLatestOffset = stable;
-            return stable;
+            if (effectiveStartMap.equals(startMap)) {
+                cachedLatestOffset = start;
+                return start;
+            }
+            RabbitMQStreamOffset expanded = new RabbitMQStreamOffset(effectiveStartMap);
+            cachedLatestOffset = expanded;
+            return expanded;
         }
 
         // Apply read limit budget

@@ -601,7 +601,9 @@ class RealTimeModeIT extends AbstractRabbitMQIT {
                     .format("rabbitmq_streams")
                     .option("endpoints", streamEndpoint())
                     .option("stream", sourceStream)
-                    .option("startingOffsets", "latest")
+                    // Use earliest to avoid a startup race where the first live message can
+                    // be published before the real-time source consumer is fully attached.
+                    .option("startingOffsets", "earliest")
                     .option("serverSideOffsetTracking", "false")
                     .option("metadataFields", "")
                     .option("addressResolverClass",
@@ -624,10 +626,18 @@ class RealTimeModeIT extends AbstractRabbitMQIT {
             try {
                 Thread.sleep(3000);
                 publishMessages(sourceStream, 10, "sink-live-");
-                List<Message> sinkMessages = consumeMessages(sinkStream, 10);
                 Set<String> payloads = new HashSet<>();
-                for (Message msg : sinkMessages) {
-                    payloads.add(new String(msg.getBodyAsBinary(), StandardCharsets.UTF_8));
+                long deadline = System.currentTimeMillis() + 30_000;
+                while (System.currentTimeMillis() < deadline) {
+                    payloads.clear();
+                    List<Message> sinkMessages = consumeMessages(sinkStream, 10);
+                    for (Message msg : sinkMessages) {
+                        payloads.add(new String(msg.getBodyAsBinary(), StandardCharsets.UTF_8));
+                    }
+                    if (payloads.size() == 10) {
+                        break;
+                    }
+                    Thread.sleep(200);
                 }
                 assertThat(payloads).hasSize(10);
                 assertThat(payloads).allMatch(v -> v.startsWith("sink-live-"));
