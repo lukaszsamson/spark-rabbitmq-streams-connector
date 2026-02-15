@@ -60,6 +60,11 @@ final class RabbitMQScan implements Scan {
 
     @Override
     public MicroBatchStream toMicroBatchStream(String checkpointLocation) {
+        if (options.getEndingOffsets() == EndingOffsetsMode.OFFSET) {
+            throw new IllegalArgumentException(
+                    "endingOffsets=offset is not supported for streaming queries. " +
+                            "Use endingOffsets only with batch reads.");
+        }
         return new RabbitMQMicroBatchStream(options, schema, checkpointLocation);
     }
 

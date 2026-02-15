@@ -199,13 +199,6 @@ final class RabbitMQMicroBatchStream
 
     @Override
     public void stop() {
-        // Fallback for execution paths that don't invoke commit() (e.g., single-batch
-        // AvailableNow in some Spark runtimes): persist final cached offsets best-effort.
-        RabbitMQStreamOffset finalOffset = cachedLatestOffset;
-        if (finalOffset != null) {
-            persistBrokerOffsets(finalOffset.getStreamOffsets());
-        }
-
         brokerCommitExecutor.shutdownNow();
         if (environment != null) {
             try {
@@ -234,7 +227,7 @@ final class RabbitMQMicroBatchStream
         for (Map.Entry<String, Long> entry : endOffset.getStreamOffsets().entrySet()) {
             String stream = entry.getKey();
             long endOff = entry.getValue();
-            long startOff = startOffset.getStreamOffsets().getOrDefault(stream, 0L);
+            long startOff = startOffset.getStreamOffsets().getOrDefault(stream, endOff);
 
             if (endOff <= startOff) {
                 continue;
@@ -472,8 +465,10 @@ final class RabbitMQMicroBatchStream
             }
         }
         if (!hasNewData) {
-            LOG.debug("No new data available, returning start offset");
-            return startOffset;
+            LOG.debug("No new data available, returning stable start offsets");
+            RabbitMQStreamOffset stable = new RabbitMQStreamOffset(effectiveStartMap);
+            cachedLatestOffset = stable;
+            return stable;
         }
 
         // Apply read limit budget
@@ -513,7 +508,8 @@ final class RabbitMQMicroBatchStream
 
         List<InputPartition> partitions = new ArrayList<>();
         for (String stream : streams) {
-            long startOff = startOffset.getStreamOffsets().getOrDefault(stream, 0L);
+            long startOff = startOffset.getStreamOffsets()
+                    .getOrDefault(stream, resolveStartingOffset(stream));
 
             // Validate against retention truncation
             startOff = validateStartOffset(stream, startOff, Long.MAX_VALUE);

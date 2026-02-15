@@ -380,10 +380,9 @@ class RabbitMQMicroBatchStreamTest {
         }
 
         @Test
-        void handlesNewStreamInEndNotInStart() {
+        void doesNotBackfillNewStreamWhenMissingFromStartOffset() {
             RabbitMQMicroBatchStream stream = createStream(minimalOptions());
 
-            // Start has no entry for "new-stream" → defaults to 0
             RabbitMQStreamOffset start = new RabbitMQStreamOffset(Map.of("s1", 10L));
             Map<String, Long> endMap = new LinkedHashMap<>();
             endMap.put("s1", 100L);
@@ -392,14 +391,14 @@ class RabbitMQMicroBatchStreamTest {
             InputPartition[] partitions = stream.planInputPartitions(
                     start, new RabbitMQStreamOffset(endMap));
 
-            assertThat(partitions).hasSize(2);
+            assertThat(partitions).hasSize(1);
             Map<String, long[]> seen = new LinkedHashMap<>();
             for (InputPartition partition : partitions) {
                 RabbitMQInputPartition rp = (RabbitMQInputPartition) partition;
                 seen.put(rp.getStream(), new long[]{rp.getStartOffset(), rp.getEndOffset()});
             }
             assertThat(seen).containsEntry("s1", new long[]{10L, 100L});
-            assertThat(seen).containsEntry("new-stream", new long[]{0L, 50L});
+            assertThat(seen).doesNotContainKey("new-stream");
         }
 
         @Test
@@ -599,7 +598,10 @@ class RabbitMQMicroBatchStreamTest {
             RabbitMQStreamOffset start = new RabbitMQStreamOffset(Map.of("s1", 10L));
             Offset latest = stream.latestOffset(start, ReadLimit.allAvailable());
 
-            assertThat(latest).isSameAs(start);
+            assertThat(latest).isNotSameAs(start);
+            assertThat(((RabbitMQStreamOffset) latest).getStreamOffsets())
+                    .containsEntry("s1", 10L)
+                    .containsEntry("s2", 5L);
         }
 
         @Test
@@ -761,7 +763,7 @@ class RabbitMQMicroBatchStreamTest {
     class CommitAndStopBehavior {
 
         @Test
-        void stopPersistsCachedOffsetsWhenCommitNotCalled() throws Exception {
+        void stopDoesNotPersistCachedOffsetsWhenCommitNotCalled() throws Exception {
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
             opts.put("stream", "test-stream");
@@ -774,7 +776,7 @@ class RabbitMQMicroBatchStreamTest {
 
             stream.stop();
 
-            assertThat(env.recordedOffsets).containsExactly(Map.entry("test-stream", 9L));
+            assertThat(env.recordedOffsets).isEmpty();
         }
 
         @Test

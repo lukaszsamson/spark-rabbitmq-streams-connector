@@ -3,6 +3,7 @@ package com.rabbitmq.spark.connector;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.RowFactory;
+import org.apache.spark.sql.connector.read.streaming.ReadLimit;
 import org.apache.spark.sql.streaming.SourceProgress;
 import org.apache.spark.sql.streaming.StreamingQuery;
 import org.apache.spark.sql.streaming.StreamingQueryProgress;
@@ -135,6 +136,93 @@ class StreamingIT extends AbstractRabbitMQIT {
 
         Dataset<Row> result = spark.read().schema(outputSchema).parquet(outputDir.toString());
         assertThat(result.count()).isEqualTo(50);
+    }
+
+    @Test
+    void streamingRejectsEndingOffsetsOption() throws Exception {
+        Path outputDir = Files.createTempDirectory("spark-output-ending-offsets-");
+
+        StreamingQuery query = spark.readStream()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", sourceStream)
+                .option("startingOffsets", "earliest")
+                .option("endingOffsets", "offset")
+                .option("endingOffset", "10")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load()
+                .writeStream()
+                .format("parquet")
+                .option("path", outputDir.toString())
+                .option("checkpointLocation", checkpointDir.toString())
+                .trigger(Trigger.AvailableNow())
+                .start();
+
+        assertThatThrownBy(() -> query.awaitTermination(30_000))
+                .isInstanceOf(org.apache.spark.sql.streaming.StreamingQueryException.class)
+                .hasMessageContaining("endingOffsets=offset is not supported for streaming queries");
+    }
+
+    @Test
+    void microBatchPlanInputPartitionsMissingStartDoesNotBackfillFromZero() throws Exception {
+        publishMessages(sourceStream, 10);
+        Thread.sleep(1000);
+
+        Map<String, String> opts = new HashMap<>();
+        opts.put("endpoints", streamEndpoint());
+        opts.put("stream", sourceStream);
+        opts.put("startingOffsets", "earliest");
+        opts.put("metadataFields", "");
+        opts.put("addressResolverClass",
+                "com.rabbitmq.spark.connector.TestAddressResolver");
+
+        ConnectorOptions connectorOptions = new ConnectorOptions(opts);
+        StructType schema = RabbitMQStreamTable.buildSourceSchema(
+                connectorOptions.getMetadataFields());
+        RabbitMQMicroBatchStream microBatchStream = new RabbitMQMicroBatchStream(
+                connectorOptions, schema, checkpointDir.resolve("direct-microbatch-1").toString());
+
+        try {
+            RabbitMQStreamOffset start = new RabbitMQStreamOffset(Map.of("other-stream", 0L));
+            RabbitMQStreamOffset end = new RabbitMQStreamOffset(Map.of(sourceStream, 10L));
+
+            var partitions = microBatchStream.planInputPartitions(start, end);
+            assertThat(partitions).isEmpty();
+        } finally {
+            microBatchStream.stop();
+        }
+    }
+
+    @Test
+    void microBatchLatestOffsetNoNewDataReturnsExpandedStableOffsets() throws Exception {
+        publishMessages(sourceStream, 5);
+        Thread.sleep(1000);
+
+        Map<String, String> opts = new HashMap<>();
+        opts.put("endpoints", streamEndpoint());
+        opts.put("stream", sourceStream);
+        opts.put("startingOffsets", "latest");
+        opts.put("metadataFields", "");
+        opts.put("addressResolverClass",
+                "com.rabbitmq.spark.connector.TestAddressResolver");
+
+        ConnectorOptions connectorOptions = new ConnectorOptions(opts);
+        StructType schema = RabbitMQStreamTable.buildSourceSchema(
+                connectorOptions.getMetadataFields());
+        RabbitMQMicroBatchStream microBatchStream = new RabbitMQMicroBatchStream(
+                connectorOptions, schema, checkpointDir.resolve("direct-microbatch-2").toString());
+
+        try {
+            RabbitMQStreamOffset latest = (RabbitMQStreamOffset) microBatchStream.latestOffset(
+                    new RabbitMQStreamOffset(Map.of()),
+                    ReadLimit.allAvailable());
+
+            assertThat(latest.getStreamOffsets())
+                    .containsEntry(sourceStream, 5L);
+        } finally {
+            microBatchStream.stop();
+        }
     }
 
     @Test
@@ -1277,10 +1365,10 @@ class StreamingIT extends AbstractRabbitMQIT {
         assertThat(offsets).isEqualTo(expected);
     }
 
-    // ---- IT-RETRY-006: stop() fallback persists broker offset ----
+    // ---- IT-RETRY-006: stop() does not persist uncommitted broker offset ----
 
     @Test
-    void streamingStopFallbackPersistsBrokerOffset() throws Exception {
+    void streamingStopDoesNotPersistBrokerOffsetWithoutCommit() throws Exception {
         String consumerName = "it-stop-fallback-" + System.currentTimeMillis();
         publishMessages(sourceStream, 50);
         Thread.sleep(2000);
@@ -1313,9 +1401,68 @@ class StreamingIT extends AbstractRabbitMQIT {
                 .parquet(outputDir.toString()).count();
         assertThat(count).isEqualTo(50);
 
-        // Verify broker stored offset — stop() fallback should persist cachedLatestOffset
-        long storedOffset = queryStoredOffset(consumerName, sourceStream);
-        assertThat(storedOffset).isGreaterThanOrEqualTo(49);
+        // Verify broker stored offset is not written by stop() fallback path.
+        assertThatThrownBy(() -> queryStoredOffset(consumerName, sourceStream))
+                .isInstanceOf(com.rabbitmq.stream.NoOffsetException.class);
+    }
+
+    @Test
+    void streamingAvailableNowSingleBatchResumeFromCheckpointWithoutStopFallback() throws Exception {
+        String consumerName = "it-single-batch-resume-" + System.currentTimeMillis();
+        publishMessages(sourceStream, 50);
+        Thread.sleep(1500);
+
+        Path outputDir = Files.createTempDirectory("spark-output-single-batch-resume-");
+
+        // First run: one small AvailableNow micro-batch.
+        StreamingQuery firstRun = spark.readStream()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", sourceStream)
+                .option("startingOffsets", "earliest")
+                .option("consumerName", consumerName)
+                .option("serverSideOffsetTracking", "true")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load()
+                .writeStream()
+                .format("parquet")
+                .option("path", outputDir.toString())
+                .option("checkpointLocation", checkpointDir.toString())
+                .trigger(Trigger.AvailableNow())
+                .start();
+
+        firstRun.awaitTermination(120_000);
+
+        long firstCount = spark.read().schema(MINIMAL_OUTPUT_SCHEMA)
+                .parquet(outputDir.toString()).count();
+        assertThat(firstCount).isEqualTo(50);
+
+        // Second run with same checkpoint and no new data must not reprocess messages.
+        StreamingQuery secondRun = spark.readStream()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", sourceStream)
+                .option("startingOffsets", "earliest")
+                .option("consumerName", consumerName)
+                .option("serverSideOffsetTracking", "true")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load()
+                .writeStream()
+                .format("parquet")
+                .option("path", outputDir.toString())
+                .option("checkpointLocation", checkpointDir.toString())
+                .trigger(Trigger.AvailableNow())
+                .start();
+
+        secondRun.awaitTermination(120_000);
+
+        long totalCount = spark.read().schema(MINIMAL_OUTPUT_SCHEMA)
+                .parquet(outputDir.toString()).count();
+        assertThat(totalCount).isEqualTo(50);
     }
 
     // ---- IT-RL-001: maxBytesPerTrigger only ----

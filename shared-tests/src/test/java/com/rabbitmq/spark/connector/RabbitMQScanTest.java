@@ -144,6 +144,18 @@ class RabbitMQScanTest {
         assertThat(scan).isNotInstanceOf(ContinuousStream.class);
     }
 
+    @Test
+    void toMicroBatchStreamRejectsEndingOffsetsOption() {
+        Map<String, String> opts = baseOptions();
+        opts.put("endingOffsets", "offset");
+        opts.put("endingOffset", "10");
+
+        RabbitMQScan scan = new RabbitMQScan(new ConnectorOptions(opts), schema());
+        assertThatThrownBy(() -> scan.toMicroBatchStream("/tmp/checkpoint"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("not supported for streaming queries");
+    }
+
     private static Map<String, String> baseOptions() {
         Map<String, String> opts = new LinkedHashMap<>();
         opts.put("endpoints", "localhost:5552");
