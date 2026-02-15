@@ -564,7 +564,7 @@ Acceptance criteria:
 ### Milestone 8: Release Readiness
 Deliverables:
 - End-to-end docs (usage, options, semantics, limitations)
-- Compatibility matrix (Spark 4.0/4.1, RabbitMQ versions)
+- Compatibility matrix (Spark 3.5/4.0/4.1, RabbitMQ versions)
 - Example jobs (batch source/sink, streaming source/sink, superstream)
 - Versioned release artifact + changelog
 
