@@ -181,6 +181,10 @@ final class RabbitMQPartitionReader implements PartitionReader<InternalRow> {
                 lastObservedOffset = qm.offset();
             }
 
+            if (shouldSkipByTimestamp(qm.chunkTimestampMillis())) {
+                continue;
+            }
+
             if (postFilter != null && !postFilter.accept(
                     qm.message().getBodyAsBinary(), coerceMapToStrings(qm.message().getApplicationProperties()))) {
                 if (options.isFilterWarningOnMismatch()) {
@@ -283,6 +287,8 @@ final class RabbitMQPartitionReader implements PartitionReader<InternalRow> {
                 .strategy(ConsumerFlowStrategy.creditWhenHalfMessagesProcessed(
                         options.getInitialCredits()))
                 .builder();
+        builder.subscriptionListener(context -> context.offsetSpecification(
+                resolveSubscriptionOffsetSpec(context.offsetSpecification(), offsetSpec)));
         if (options.isSingleActiveConsumer()) {
             builder.name(resolveSingleActiveConsumerName())
                     .singleActiveConsumer()
@@ -353,6 +359,24 @@ final class RabbitMQPartitionReader implements PartitionReader<InternalRow> {
             return consumerName + "-" + stream;
         }
         return consumerName;
+    }
+
+    private OffsetSpecification resolveSubscriptionOffsetSpec(
+            OffsetSpecification subscriptionOffsetSpec,
+            OffsetSpecification configuredOffsetSpec) {
+        if (lastEmittedOffset >= 0) {
+            return OffsetSpecification.offset(lastEmittedOffset + 1);
+        }
+        if (lastObservedOffset >= 0) {
+            return OffsetSpecification.offset(lastObservedOffset + 1);
+        }
+        return subscriptionOffsetSpec != null ? subscriptionOffsetSpec : configuredOffsetSpec;
+    }
+
+    private boolean shouldSkipByTimestamp(long chunkTimestampMillis) {
+        return useConfiguredStartingOffset
+                && options.getStartingOffsets() == StartingOffsetsMode.TIMESTAMP
+                && chunkTimestampMillis < options.getStartingTimestamp();
     }
 
     private boolean isBrokerFilterConfigured() {

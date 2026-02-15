@@ -1,6 +1,7 @@
 package com.rabbitmq.spark.connector;
 
 import com.rabbitmq.stream.Address;
+import com.rabbitmq.stream.BackOffDelayPolicy;
 import com.rabbitmq.stream.Environment;
 import com.rabbitmq.stream.EnvironmentBuilder;
 import io.netty.handler.ssl.SslContext;
@@ -173,6 +174,53 @@ final class EnvironmentBuilderHelper {
         }
         if (options.getLocatorConnectionCount() != null) {
             builder.locatorConnectionCount(options.getLocatorConnectionCount());
+        }
+        if (options.getRecoveryBackOffDelayPolicy() != null
+                && !options.getRecoveryBackOffDelayPolicy().isEmpty()) {
+            builder.recoveryBackOffDelayPolicy(parseBackOffDelayPolicy(
+                    options.getRecoveryBackOffDelayPolicy(),
+                    ConnectorOptions.RECOVERY_BACK_OFF_DELAY_POLICY));
+        }
+        if (options.getTopologyUpdateBackOffDelayPolicy() != null
+                && !options.getTopologyUpdateBackOffDelayPolicy().isEmpty()) {
+            builder.topologyUpdateBackOffDelayPolicy(parseBackOffDelayPolicy(
+                    options.getTopologyUpdateBackOffDelayPolicy(),
+                    ConnectorOptions.TOPOLOGY_UPDATE_BACK_OFF_DELAY_POLICY));
+        }
+        if (options.getMaxProducersByConnection() != null) {
+            builder.maxProducersByConnection(options.getMaxProducersByConnection());
+        }
+        if (options.getMaxConsumersByConnection() != null) {
+            builder.maxConsumersByConnection(options.getMaxConsumersByConnection());
+        }
+        if (options.getMaxTrackingConsumersByConnection() != null) {
+            builder.maxTrackingConsumersByConnection(options.getMaxTrackingConsumersByConnection());
+        }
+    }
+
+    private static BackOffDelayPolicy parseBackOffDelayPolicy(String rawValue, String optionName) {
+        try {
+            String[] parts = rawValue.split(",");
+            if (parts.length == 1) {
+                return BackOffDelayPolicy.fixed(Duration.parse(parts[0].trim()));
+            } else if (parts.length == 2) {
+                return BackOffDelayPolicy.fixedWithInitialDelay(
+                        Duration.parse(parts[0].trim()),
+                        Duration.parse(parts[1].trim()));
+            } else if (parts.length == 3) {
+                return BackOffDelayPolicy.fixedWithInitialDelay(
+                        Duration.parse(parts[0].trim()),
+                        Duration.parse(parts[1].trim()),
+                        Duration.parse(parts[2].trim()));
+            } else {
+                throw new IllegalArgumentException(
+                        "Expected 1, 2, or 3 comma-separated ISO-8601 durations");
+            }
+        } catch (Exception e) {
+            throw new IllegalArgumentException(
+                    "Invalid '" + optionName + "' value '" + rawValue + "'. " +
+                            "Expected ISO-8601 durations: 'PT5S', 'PT5S,PT1S', or " +
+                            "'PT5S,PT1S,PT1M'.", e);
         }
     }
 

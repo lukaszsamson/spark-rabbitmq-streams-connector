@@ -174,6 +174,11 @@ class ConnectorOptionsTest {
             map.put("forceReplicaForConsumers", "true");
             map.put("forceLeaderForProducers", "false");
             map.put("locatorConnectionCount", "3");
+            map.put("recoveryBackOffDelayPolicy", "PT5S");
+            map.put("topologyUpdateBackOffDelayPolicy", "PT5S,PT1S");
+            map.put("maxProducersByConnection", "64");
+            map.put("maxConsumersByConnection", "32");
+            map.put("maxTrackingConsumersByConnection", "16");
 
             var opts = new ConnectorOptions(map);
             assertThat(opts.getEnvironmentId()).isEqualTo("spark-rmq-prod");
@@ -182,6 +187,11 @@ class ConnectorOptionsTest {
             assertThat(opts.getForceReplicaForConsumers()).isEqualTo(Boolean.TRUE);
             assertThat(opts.getForceLeaderForProducers()).isEqualTo(Boolean.FALSE);
             assertThat(opts.getLocatorConnectionCount()).isEqualTo(3);
+            assertThat(opts.getRecoveryBackOffDelayPolicy()).isEqualTo("PT5S");
+            assertThat(opts.getTopologyUpdateBackOffDelayPolicy()).isEqualTo("PT5S,PT1S");
+            assertThat(opts.getMaxProducersByConnection()).isEqualTo(64);
+            assertThat(opts.getMaxConsumersByConnection()).isEqualTo(32);
+            assertThat(opts.getMaxTrackingConsumersByConnection()).isEqualTo(16);
         }
     }
 
@@ -917,6 +927,36 @@ class ConnectorOptionsTest {
             assertThatThrownBy(opts::validateCommon)
                     .isInstanceOf(IllegalArgumentException.class)
                     .hasMessageContaining("locatorConnectionCount");
+        }
+
+        @Test
+        void rejectsNonPositiveMaxProducersByConnection() {
+            var map = minimalStreamOptions();
+            map.put("maxProducersByConnection", "0");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateCommon)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("maxProducersByConnection");
+        }
+
+        @Test
+        void rejectsNonPositiveMaxConsumersByConnection() {
+            var map = minimalStreamOptions();
+            map.put("maxConsumersByConnection", "-1");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateCommon)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("maxConsumersByConnection");
+        }
+
+        @Test
+        void rejectsNonPositiveMaxTrackingConsumersByConnection() {
+            var map = minimalStreamOptions();
+            map.put("maxTrackingConsumersByConnection", "0");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateCommon)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("maxTrackingConsumersByConnection");
         }
     }
 

@@ -95,23 +95,19 @@ public final class RowToMessageConverter implements Serializable {
         byte[] body = row.getBinary(valueIndex);
         builder.addData(body);
 
-        // Collect creation_time from both sources, top-level overrides struct
-        Long creationTimeMillis = null;
+        // Top-level creation_time, if present, overrides properties.creation_time.
+        Long topLevelCreationTimeMillis = null;
+        if (creationTimeIndex >= 0 && !row.isNullAt(creationTimeIndex)) {
+            topLevelCreationTimeMillis = microsToMillis(row.getLong(creationTimeIndex));
+        }
 
         // Optional: properties struct
         if (propertiesIndex >= 0 && !row.isNullAt(propertiesIndex)) {
             InternalRow propsRow = row.getStruct(propertiesIndex, propertiesFieldCount);
-            creationTimeMillis = applyProperties(propsRow, builder);
-        }
-
-        // Optional: top-level creation_time overrides properties.creation_time
-        if (creationTimeIndex >= 0 && !row.isNullAt(creationTimeIndex)) {
-            creationTimeMillis = microsToMillis(row.getLong(creationTimeIndex));
-        }
-
-        // Apply creation_time if set (either from struct or top-level)
-        if (creationTimeMillis != null) {
-            builder.properties().creationTime(creationTimeMillis).messageBuilder();
+            applyProperties(propsRow, builder, topLevelCreationTimeMillis);
+        } else if (topLevelCreationTimeMillis != null) {
+            // No properties struct: apply top-level creation_time on its own.
+            builder.properties().creationTime(topLevelCreationTimeMillis).messageBuilder();
         }
 
         // Optional: application_properties
@@ -172,11 +168,10 @@ public final class RowToMessageConverter implements Serializable {
      * Apply AMQP properties from a struct row to the message builder.
      * Uses name-based field lookup to handle subset and reordered properties structs.
      *
-     * @return creation_time in millis if set, otherwise null
      */
-    private Long applyProperties(InternalRow propsRow, MessageBuilder builder) {
+    private void applyProperties(InternalRow propsRow, MessageBuilder builder,
+                                 Long topLevelCreationTimeMillis) {
         MessageBuilder.PropertiesBuilder pb = builder.properties();
-        Long creationTimeMillis = null;
         int idx;
 
         idx = propsFieldIndices[PROP_MESSAGE_ID];
@@ -217,8 +212,7 @@ public final class RowToMessageConverter implements Serializable {
         }
         idx = propsFieldIndices[PROP_CREATION_TIME];
         if (idx >= 0 && !propsRow.isNullAt(idx)) {
-            creationTimeMillis = microsToMillis(propsRow.getLong(idx));
-            pb.creationTime(creationTimeMillis);
+            pb.creationTime(microsToMillis(propsRow.getLong(idx)));
         }
         idx = propsFieldIndices[PROP_GROUP_ID];
         if (idx >= 0 && !propsRow.isNullAt(idx)) {
@@ -232,9 +226,11 @@ public final class RowToMessageConverter implements Serializable {
         if (idx >= 0 && !propsRow.isNullAt(idx)) {
             pb.replyToGroupId(propsRow.getUTF8String(idx).toString());
         }
+        if (topLevelCreationTimeMillis != null) {
+            pb.creationTime(topLevelCreationTimeMillis);
+        }
 
         pb.messageBuilder();
-        return creationTimeMillis;
     }
 
     // ---- Map conversions ----

@@ -42,6 +42,13 @@ public final class ConnectorOptions implements Serializable {
     public static final String FORCE_REPLICA_FOR_CONSUMERS = "forceReplicaForConsumers";
     public static final String FORCE_LEADER_FOR_PRODUCERS = "forceLeaderForProducers";
     public static final String LOCATOR_CONNECTION_COUNT = "locatorConnectionCount";
+    public static final String RECOVERY_BACK_OFF_DELAY_POLICY = "recoveryBackOffDelayPolicy";
+    public static final String TOPOLOGY_UPDATE_BACK_OFF_DELAY_POLICY =
+            "topologyUpdateBackOffDelayPolicy";
+    public static final String MAX_PRODUCERS_BY_CONNECTION = "maxProducersByConnection";
+    public static final String MAX_CONSUMERS_BY_CONNECTION = "maxConsumersByConnection";
+    public static final String MAX_TRACKING_CONSUMERS_BY_CONNECTION =
+            "maxTrackingConsumersByConnection";
 
     // Source
     public static final String STARTING_OFFSETS = "startingOffsets";
@@ -135,6 +142,11 @@ public final class ConnectorOptions implements Serializable {
     private final Boolean forceReplicaForConsumers;
     private final Boolean forceLeaderForProducers;
     private final Integer locatorConnectionCount;
+    private final String recoveryBackOffDelayPolicy;
+    private final String topologyUpdateBackOffDelayPolicy;
+    private final Integer maxProducersByConnection;
+    private final Integer maxConsumersByConnection;
+    private final Integer maxTrackingConsumersByConnection;
 
     // Source
     private final StartingOffsetsMode startingOffsets;
@@ -210,6 +222,13 @@ public final class ConnectorOptions implements Serializable {
         this.forceReplicaForConsumers = getNullableBoolean(options, FORCE_REPLICA_FOR_CONSUMERS);
         this.forceLeaderForProducers = getNullableBoolean(options, FORCE_LEADER_FOR_PRODUCERS);
         this.locatorConnectionCount = getInteger(options, LOCATOR_CONNECTION_COUNT);
+        this.recoveryBackOffDelayPolicy = getString(options, RECOVERY_BACK_OFF_DELAY_POLICY);
+        this.topologyUpdateBackOffDelayPolicy = getString(
+                options, TOPOLOGY_UPDATE_BACK_OFF_DELAY_POLICY);
+        this.maxProducersByConnection = getInteger(options, MAX_PRODUCERS_BY_CONNECTION);
+        this.maxConsumersByConnection = getInteger(options, MAX_CONSUMERS_BY_CONNECTION);
+        this.maxTrackingConsumersByConnection = getInteger(
+                options, MAX_TRACKING_CONSUMERS_BY_CONNECTION);
 
         // Source
         this.startingOffsets = parseEnum(options, STARTING_OFFSETS,
@@ -329,6 +348,21 @@ public final class ConnectorOptions implements Serializable {
             throw new IllegalArgumentException(
                     "'" + LOCATOR_CONNECTION_COUNT + "' must be > 0, got: " +
                             locatorConnectionCount);
+        }
+        if (maxProducersByConnection != null && maxProducersByConnection <= 0) {
+            throw new IllegalArgumentException(
+                    "'" + MAX_PRODUCERS_BY_CONNECTION + "' must be > 0, got: " +
+                            maxProducersByConnection);
+        }
+        if (maxConsumersByConnection != null && maxConsumersByConnection <= 0) {
+            throw new IllegalArgumentException(
+                    "'" + MAX_CONSUMERS_BY_CONNECTION + "' must be > 0, got: " +
+                            maxConsumersByConnection);
+        }
+        if (maxTrackingConsumersByConnection != null && maxTrackingConsumersByConnection <= 0) {
+            throw new IllegalArgumentException(
+                    "'" + MAX_TRACKING_CONSUMERS_BY_CONNECTION + "' must be > 0, got: " +
+                            maxTrackingConsumersByConnection);
         }
     }
 
@@ -537,6 +571,13 @@ public final class ConnectorOptions implements Serializable {
     public Boolean getForceReplicaForConsumers() { return forceReplicaForConsumers; }
     public Boolean getForceLeaderForProducers() { return forceLeaderForProducers; }
     public Integer getLocatorConnectionCount() { return locatorConnectionCount; }
+    public String getRecoveryBackOffDelayPolicy() { return recoveryBackOffDelayPolicy; }
+    public String getTopologyUpdateBackOffDelayPolicy() { return topologyUpdateBackOffDelayPolicy; }
+    public Integer getMaxProducersByConnection() { return maxProducersByConnection; }
+    public Integer getMaxConsumersByConnection() { return maxConsumersByConnection; }
+    public Integer getMaxTrackingConsumersByConnection() {
+        return maxTrackingConsumersByConnection;
+    }
 
     // ---- Getters: Source ----
 

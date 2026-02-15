@@ -64,6 +64,15 @@ class RowToMessageConverterTest {
         });
     }
 
+    private static StructType schemaWithPropertiesAndTopLevelCreationTime() {
+        return new StructType(new StructField[]{
+                new StructField("value", DataTypes.BinaryType, false, Metadata.empty()),
+                new StructField("properties", RabbitMQStreamTable.PROPERTIES_STRUCT,
+                        true, Metadata.empty()),
+                new StructField("creation_time", DataTypes.TimestampType, true, Metadata.empty()),
+        });
+    }
+
     private static StructType schemaWithPropertiesFirst(StructType propertiesStruct) {
         return new StructType(new StructField[]{
                 new StructField("properties", propertiesStruct, true, Metadata.empty()),
@@ -312,6 +321,40 @@ class RowToMessageConverterTest {
             Message msg = converter.convert(row, CODEC.messageBuilder());
             assertThat(msg.getProperties()).isNull();
             assertThat(msg.getBodyAsBinary()).isEqualTo("body".getBytes());
+        }
+
+        @Test
+        void topLevelCreationTimeOverridesStructCreationTimeWithoutDroppingOtherProperties() {
+            var converter = new RowToMessageConverter(schemaWithPropertiesAndTopLevelCreationTime());
+            long structCreationMicros = 1700000000000L * 1000L;
+            long topLevelCreationMicros = 1700000500000L * 1000L;
+
+            InternalRow propertiesRow = new GenericInternalRow(new Object[]{
+                    UTF8String.fromString("msg-id"), // message_id
+                    null,                            // user_id
+                    null,                            // to
+                    UTF8String.fromString("subject-a"), // subject
+                    null,                            // reply_to
+                    null,                            // correlation_id
+                    null,                            // content_type
+                    null,                            // content_encoding
+                    null,                            // absolute_expiry_time
+                    structCreationMicros,            // creation_time
+                    null,                            // group_id
+                    null,                            // group_sequence
+                    null                             // reply_to_group_id
+            });
+
+            InternalRow row = new GenericInternalRow(new Object[]{
+                    "body".getBytes(),
+                    propertiesRow,
+                    topLevelCreationMicros
+            });
+
+            Message msg = converter.convert(row, CODEC.messageBuilder());
+            assertThat(msg.getProperties().getCreationTime()).isEqualTo(1700000500000L);
+            assertThat(msg.getProperties().getMessageIdAsString()).isEqualTo("msg-id");
+            assertThat(msg.getProperties().getSubject()).isEqualTo("subject-a");
         }
     }
 

@@ -529,6 +529,62 @@ class RabbitMQPartitionReaderTest {
         }
 
         @Test
+        void nextTimestampInitialSplitSkipsMessagesBeforeConfiguredTimestamp() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("startingOffsets", "timestamp");
+            opts.put("startingTimestamp", "1700000000000");
+
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 0, 3, new ConnectorOptions(opts), true);
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
+
+            BlockingQueue<RabbitMQPartitionReader.QueuedMessage> queue = new LinkedBlockingQueue<>();
+            queue.add(new RabbitMQPartitionReader.QueuedMessage(
+                    CODEC.messageBuilder().addData("old".getBytes()).build(),
+                    0L, 1699999999999L, new NoopContext()));
+            queue.add(new RabbitMQPartitionReader.QueuedMessage(
+                    CODEC.messageBuilder().addData("new".getBytes()).build(),
+                    1L, 1700000000000L, new NoopContext()));
+
+            setPrivateField(reader, "queue", queue);
+            setPrivateField(reader, "consumer", new NoopConsumer());
+
+            assertThat(reader.next()).isTrue();
+            assertThat(reader.get().getLong(2)).isEqualTo(1L);
+            assertThat(reader.next()).isFalse();
+        }
+
+        @Test
+        void resolveSubscriptionOffsetSpecUsesLastEmittedOffsetWhenAvailable() throws Exception {
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 0, 100, minimalOptions());
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
+
+            setPrivateField(reader, "lastEmittedOffset", 41L);
+            setPrivateField(reader, "lastObservedOffset", 52L);
+
+            OffsetSpecification resolved = resolveSubscriptionOffsetSpec(
+                    reader, OffsetSpecification.first(), OffsetSpecification.offset(0));
+            assertThat(resolved).isEqualTo(OffsetSpecification.offset(42));
+        }
+
+        @Test
+        void resolveSubscriptionOffsetSpecFallsBackToLastObservedOffset() throws Exception {
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 0, 100, minimalOptions());
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
+
+            setPrivateField(reader, "lastEmittedOffset", -1L);
+            setPrivateField(reader, "lastObservedOffset", 9L);
+
+            OffsetSpecification resolved = resolveSubscriptionOffsetSpec(
+                    reader, OffsetSpecification.first(), OffsetSpecification.offset(0));
+            assertThat(resolved).isEqualTo(OffsetSpecification.offset(10));
+        }
+
+        @Test
         void resolveSingleActiveConsumerNameUsesBaseNameForSingleStream() throws Exception {
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
@@ -704,6 +760,16 @@ class RabbitMQPartitionReaderTest {
                 "resolveSingleActiveConsumerName");
         method.setAccessible(true);
         return (String) method.invoke(reader);
+    }
+
+    private static OffsetSpecification resolveSubscriptionOffsetSpec(
+            RabbitMQPartitionReader reader,
+            OffsetSpecification subscriptionOffsetSpec,
+            OffsetSpecification configuredOffsetSpec) throws Exception {
+        Method method = RabbitMQPartitionReader.class.getDeclaredMethod(
+                "resolveSubscriptionOffsetSpec", OffsetSpecification.class, OffsetSpecification.class);
+        method.setAccessible(true);
+        return (OffsetSpecification) method.invoke(reader, subscriptionOffsetSpec, configuredOffsetSpec);
     }
 
     private static ConnectorPostFilter createPostFilter(ConnectorOptions options)

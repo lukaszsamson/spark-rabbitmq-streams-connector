@@ -206,15 +206,20 @@ class EnvironmentBuilderHelperTest {
 
     @Test
     void appliesHighPriorityEnvironmentTuningOptions() throws Exception {
-        ConnectorOptions options = new ConnectorOptions(Map.of(
-                "endpoints", "hostA:5552",
-                "stream", "test-stream",
-                "environmentId", "spark-rmq-prod",
-                "rpcTimeoutMs", "15000",
-                "requestedHeartbeatSeconds", "30",
-                "forceReplicaForConsumers", "true",
-                "forceLeaderForProducers", "false",
-                "locatorConnectionCount", "3"
+        ConnectorOptions options = new ConnectorOptions(Map.ofEntries(
+                Map.entry("endpoints", "hostA:5552"),
+                Map.entry("stream", "test-stream"),
+                Map.entry("environmentId", "spark-rmq-prod"),
+                Map.entry("rpcTimeoutMs", "15000"),
+                Map.entry("requestedHeartbeatSeconds", "30"),
+                Map.entry("forceReplicaForConsumers", "true"),
+                Map.entry("forceLeaderForProducers", "false"),
+                Map.entry("locatorConnectionCount", "3"),
+                Map.entry("recoveryBackOffDelayPolicy", "PT7S"),
+                Map.entry("topologyUpdateBackOffDelayPolicy", "PT5S,PT1S"),
+                Map.entry("maxProducersByConnection", "64"),
+                Map.entry("maxConsumersByConnection", "32"),
+                Map.entry("maxTrackingConsumersByConnection", "16")
         ));
 
         StreamEnvironmentBuilder builder = new StreamEnvironmentBuilder();
@@ -228,12 +233,43 @@ class EnvironmentBuilderHelperTest {
         assertThat(getFieldValue(builder, "forceReplicaForConsumers")).isEqualTo(true);
         assertThat(getFieldValue(builder, "forceLeaderForProducers")).isEqualTo(false);
         assertThat(getFieldValue(builder, "locatorConnectionCount")).isEqualTo(3);
+        assertThat(getFieldValue(builder, "maxProducersByConnection")).isEqualTo(64);
+        assertThat(getFieldValue(builder, "maxConsumersByConnection")).isEqualTo(32);
+        assertThat(getFieldValue(builder, "maxTrackingConsumersByConnection")).isEqualTo(16);
 
         Object clientParameters = getClientParameters(builder);
         assertThat(getFieldValue(clientParameters, "rpcTimeout"))
                 .hasToString("PT15S");
         assertThat(getFieldValue(clientParameters, "requestedHeartbeat"))
                 .hasToString("PT30S");
+
+        com.rabbitmq.stream.BackOffDelayPolicy recoveryPolicy =
+                (com.rabbitmq.stream.BackOffDelayPolicy) getFieldValue(
+                        builder, "recoveryBackOffDelayPolicy");
+        assertThat(recoveryPolicy.delay(0)).hasToString("PT7S");
+        assertThat(recoveryPolicy.delay(1)).hasToString("PT7S");
+
+        com.rabbitmq.stream.BackOffDelayPolicy topologyPolicy =
+                (com.rabbitmq.stream.BackOffDelayPolicy) getFieldValue(
+                        builder, "topologyBackOffDelayPolicy");
+        assertThat(topologyPolicy.delay(0)).hasToString("PT5S");
+        assertThat(topologyPolicy.delay(1)).hasToString("PT1S");
+    }
+
+    @Test
+    void invalidBackOffDelayPolicyFailsFast() {
+        ConnectorOptions options = new ConnectorOptions(Map.of(
+                "endpoints", "hostA:5552",
+                "stream", "test-stream",
+                "recoveryBackOffDelayPolicy", "not-a-duration"
+        ));
+
+        StreamEnvironmentBuilder builder = new StreamEnvironmentBuilder();
+        assertThatThrownBy(() -> invokeConfigureTuning(builder, options))
+                .hasCauseInstanceOf(IllegalArgumentException.class)
+                .cause()
+                .hasMessageContaining("recoveryBackOffDelayPolicy")
+                .hasMessageContaining("not-a-duration");
     }
 
     private static List<String> getUris(StreamEnvironmentBuilder builder) throws Exception {
