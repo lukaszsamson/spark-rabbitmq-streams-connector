@@ -125,6 +125,11 @@ final class RabbitMQPartitionReader implements PartitionReader<InternalRow> {
             }
 
             if (qm == null) {
+                if (consumerClosed.get()) {
+                    throw new IOException(
+                            "Consumer for stream '" + stream + "' closed before reaching target end offset "
+                                    + endOffset + ". Last emitted offset: " + lastEmittedOffset);
+                }
                 // With broker-side filtering, not all offsets in [start, end) are delivered.
                 // Timestamp-seek split can also legitimately have no in-range rows when the
                 // resolved broker seek position is already past this split's end.
