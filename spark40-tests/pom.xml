@@ -80,7 +80,7 @@
                         </goals>
                         <configuration>
                             <includeGroupIds>com.rabbitmq.spark</includeGroupIds>
-                            <includeArtifactIds>sparkling-rabbit-spark40</includeArtifactIds>
+                            <includeArtifactIds>sparkling-rabbit-spark40,sparkling-rabbit-spark-shared</includeArtifactIds>
                             <includeClassifiers>unshaded</includeClassifiers>
                             <outputDirectory>${project.build.outputDirectory}</outputDirectory>
                             <includes>com/rabbitmq/spark/connector/**</includes>

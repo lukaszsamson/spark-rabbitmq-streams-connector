@@ -24,6 +24,10 @@
             <artifactId>sparkling-rabbit-core</artifactId>
         </dependency>
         <dependency>
+            <groupId>com.rabbitmq.spark</groupId>
+            <artifactId>sparkling-rabbit-spark-shared</artifactId>
+        </dependency>
+        <dependency>
             <groupId>org.apache.spark</groupId>
             <artifactId>spark-sql_${scala.binary.version}</artifactId>
             <version>${spark.version}</version>
@@ -54,6 +58,12 @@
     </dependencies>
 
     <build>
+        <sourceDirectory>src/main/java</sourceDirectory>
+        <resources>
+            <resource>
+                <directory>src/main/resources</directory>
+            </resource>
+        </resources>
         <plugins>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
@@ -92,6 +102,7 @@
                             <artifactSet>
                                 <includes>
                                     <include>com.rabbitmq.spark:sparkling-rabbit-core</include>
+                                    <include>com.rabbitmq.spark:sparkling-rabbit-spark-shared</include>
                                     <include>com.rabbitmq:stream-client</include>
                                     <include>io.netty:*</include>
                                     <include>org.apache.qpid:proton-j</include>

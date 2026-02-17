@@ -79,6 +79,10 @@ abstract class AbstractRabbitMQIT {
 
     @BeforeAll
     static void setupShared() {
+        if (!RABBIT.isRunning()) {
+            RABBIT.start();
+        }
+
         // Set system properties for the TestAddressResolver used by the connector
         System.setProperty("rabbitmq.test.host", RABBIT.getHost());
         System.setProperty("rabbitmq.test.port",

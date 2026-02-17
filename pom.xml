@@ -37,6 +37,7 @@
 
     <modules>
         <module>core</module>
+        <module>spark-shared</module>
         <module>spark35</module>
         <module>spark35_2.12</module>
         <module>spark40</module>
@@ -69,6 +70,7 @@
         <testcontainers.version>2.0.3</testcontainers.version>
         <log4j.version>2.24.3</log4j.version>
         <commons-lang3.version>3.15.0</commons-lang3.version>
+        <commons-compress.version>1.26.1</commons-compress.version>
 
         <!-- Plugin versions -->
         <maven-compiler-plugin.version>3.13.0</maven-compiler-plugin.version>
@@ -95,6 +97,11 @@
             <dependency>
                 <groupId>com.rabbitmq.spark</groupId>
                 <artifactId>sparkling-rabbit-core</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.rabbitmq.spark</groupId>
+                <artifactId>sparkling-rabbit-spark-shared</artifactId>
                 <version>${project.version}</version>
             </dependency>
 
@@ -180,6 +187,12 @@
                 <version>${commons-lang3.version}</version>
                 <scope>test</scope>
             </dependency>
+            <dependency>
+                <groupId>org.apache.commons</groupId>
+                <artifactId>commons-compress</artifactId>
+                <version>${commons-compress.version}</version>
+                <scope>test</scope>
+            </dependency>
         </dependencies>
     </dependencyManagement>
 
@@ -189,6 +202,7 @@
             <id>spark35</id>
             <modules>
                 <module>core</module>
+                <module>spark-shared</module>
                 <module>spark35</module>
                 <module>spark35_2.12</module>
             </modules>
@@ -197,6 +211,7 @@
             <id>spark40</id>
             <modules>
                 <module>core</module>
+                <module>spark-shared</module>
                 <module>spark40</module>
             </modules>
         </profile>
@@ -204,6 +219,7 @@
             <id>spark41</id>
             <modules>
                 <module>core</module>
+                <module>spark-shared</module>
                 <module>spark41</module>
             </modules>
         </profile>

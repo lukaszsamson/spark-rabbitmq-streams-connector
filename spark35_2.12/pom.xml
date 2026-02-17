@@ -25,6 +25,10 @@
             <artifactId>sparkling-rabbit-core</artifactId>
         </dependency>
         <dependency>
+            <groupId>com.rabbitmq.spark</groupId>
+            <artifactId>sparkling-rabbit-spark-shared</artifactId>
+        </dependency>
+        <dependency>
             <groupId>org.apache.spark</groupId>
             <artifactId>spark-sql_${scala.binary.version}</artifactId>
             <version>${spark.version}</version>
@@ -35,6 +39,10 @@
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.platform</groupId>
+            <artifactId>junit-platform-suite</artifactId>
         </dependency>
         <dependency>
             <groupId>org.assertj</groupId>
@@ -56,6 +64,7 @@
 
     <build>
         <sourceDirectory>../spark35/src/main/java</sourceDirectory>
+        <testSourceDirectory>../spark35-tests/src/test/java</testSourceDirectory>
         <resources>
             <resource>
                 <directory>../spark35/src/main/resources</directory>
