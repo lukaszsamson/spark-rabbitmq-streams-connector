@@ -912,6 +912,28 @@ class BatchReadIT extends AbstractRabbitMQIT {
         assertThat(rows).hasSize(20);
     }
 
+    // ---- IT-OPT-003: TLS modes (trustAll) ----
+
+    @Test
+    void batchReadWithTlsTrustAll() {
+        publishMessages(stream, 12);
+
+        Dataset<Row> df = spark.read()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamTlsEndpoint())
+                .option("stream", stream)
+                .option("tls", "true")
+                .option("tls.trustAll", "true")
+                .option("startingOffsets", "earliest")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load();
+
+        List<Row> rows = df.collectAsList();
+        assertThat(rows).hasSize(12);
+    }
+
     // ---- IT-OPT-004a: wrong password fails fast ----
 
     @Test
@@ -1020,6 +1042,31 @@ class BatchReadIT extends AbstractRabbitMQIT {
         assertThat(fieldNames).contains("message_annotations", "routing_key");
         assertThat(fieldNames).hasSize(6); // 4 fixed + 2 metadata
         assertThat(df4.collectAsList()).hasSize(5);
+    }
+
+    // ---- IT-OFFSET-007: no matched timestamp resolves to error ----
+
+    @Test
+    void batchReadTimestampNoMatchFailsFast() {
+        publishMessages(stream, 10, "ts-");
+
+        long futureTimestamp = System.currentTimeMillis() + 24 * 60 * 60 * 1000L;
+
+        Dataset<Row> df = spark.read()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("startingOffsets", "timestamp")
+                .option("startingTimestamp", String.valueOf(futureTimestamp))
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load();
+
+        assertThatThrownBy(df::collectAsList)
+                .satisfies(ex -> assertThat(ex.toString())
+                        .contains("No offset matched from request")
+                        .contains(String.valueOf(futureTimestamp)));
     }
 
     // ---- IT-OPT-006-source: invalid option combinations ----

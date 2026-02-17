@@ -17,6 +17,11 @@ public class TestAddressResolver implements ConnectorAddressResolver {
         String host = System.getProperty("rabbitmq.test.host", "localhost");
         int port = Integer.parseInt(
                 System.getProperty("rabbitmq.test.port", "5552"));
+        int tlsPort = Integer.parseInt(
+                System.getProperty("rabbitmq.test.tls.port", String.valueOf(port)));
+        if (address.port() == tlsPort) {
+            port = tlsPort;
+        }
         return new Address(host, port);
     }
 }

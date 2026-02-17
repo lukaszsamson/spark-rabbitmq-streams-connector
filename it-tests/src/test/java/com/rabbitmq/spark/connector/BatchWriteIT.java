@@ -75,6 +75,101 @@ class BatchWriteIT extends AbstractRabbitMQIT {
         assertThat(bodies).contains("write-test-0", "write-test-1", "write-test-19");
     }
 
+    // ---- IT-SINK-002: publisherConfirmTimeoutMs timeout ----
+
+    @Test
+    void batchWritePublisherConfirmTimeoutFailsFast() {
+        StructType schema = new StructType()
+                .add("value", DataTypes.BinaryType, false);
+
+        List<Row> data = new ArrayList<>();
+        for (int i = 0; i < 5; i++) {
+            data.add(RowFactory.create(("timeout-" + i).getBytes()));
+        }
+
+        Dataset<Row> df = spark.createDataFrame(data, schema);
+
+        java.util.concurrent.ExecutorService executor = java.util.concurrent.Executors.newSingleThreadExecutor();
+        java.util.concurrent.Future<?> stopper = executor.submit(() -> {
+            Thread.sleep(200);
+            stopRabbitMqApp();
+            Thread.sleep(1200);
+            startRabbitMqApp();
+            return null;
+        });
+
+        try {
+            assertThatThrownBy(() -> df.write()
+                    .format("rabbitmq_streams")
+                    .mode("append")
+                    .option("endpoints", streamEndpoint())
+                    .option("stream", stream)
+                    .option("publisherConfirmTimeoutMs", "1500")
+                    .option("enqueueTimeoutMs", "500")
+                    .option("maxInFlight", "1")
+                    .option("addressResolverClass",
+                            "com.rabbitmq.spark.connector.TestAddressResolver")
+                    .save())
+                    .satisfies(ex -> assertThat(ex.toString())
+                            .containsAnyOf("Timed out waiting for publisher confirms",
+                                    "Error when establishing stream connection",
+                                    "Locator not available",
+                                    "Connection is closed"));
+        } finally {
+            try {
+                stopper.get(5, java.util.concurrent.TimeUnit.SECONDS);
+            } catch (Exception ignored) {
+                // best effort
+            }
+            executor.shutdownNow();
+        }
+    }
+
+    // ---- IT-RETRY-002: transient broker disconnect during write ----
+
+    @Test
+    void batchWriteRecoversAfterBrokerRestart() throws Exception {
+        StructType schema = new StructType()
+                .add("value", DataTypes.BinaryType, false);
+
+        List<Row> data = new ArrayList<>();
+        for (int i = 0; i < 30; i++) {
+            data.add(RowFactory.create(("retry-" + i).getBytes()));
+        }
+
+        Dataset<Row> df = spark.createDataFrame(data, schema);
+
+        java.util.concurrent.ExecutorService executor = java.util.concurrent.Executors.newSingleThreadExecutor();
+        java.util.concurrent.Future<?> stopper = executor.submit(() -> {
+            Thread.sleep(200);
+            stopRabbitMqApp();
+            Thread.sleep(800);
+            startRabbitMqApp();
+            return null;
+        });
+
+        try {
+            df.write()
+                    .format("rabbitmq_streams")
+                    .mode("append")
+                    .option("endpoints", streamEndpoint())
+                    .option("stream", stream)
+                    .option("retryOnRecovery", "true")
+                    .option("publisherConfirmTimeoutMs", "5000")
+                    .option("enqueueTimeoutMs", "500")
+                    .option("maxInFlight", "5")
+                    .option("addressResolverClass",
+                            "com.rabbitmq.spark.connector.TestAddressResolver")
+                    .save();
+        } finally {
+            stopper.get(5, java.util.concurrent.TimeUnit.SECONDS);
+            executor.shutdownNow();
+        }
+
+        List<Message> messages = consumeMessages(stream, 30);
+        assertThat(messages).hasSize(30);
+    }
+
     @Test
     void batchWriteWithApplicationProperties() {
         // Create DataFrame with value and application_properties
@@ -323,6 +418,86 @@ class BatchWriteIT extends AbstractRabbitMQIT {
         assertThat(values).contains("roundtrip-0", "roundtrip-15", "roundtrip-29");
     }
 
+    @Test
+    void batchWriteComplexMetadataRoundTrip() {
+        StructType propsSchema = new StructType()
+                .add("message_id", DataTypes.StringType, true)
+                .add("subject", DataTypes.StringType, true)
+                .add("correlation_id", DataTypes.StringType, true)
+                .add("content_type", DataTypes.StringType, true)
+                .add("creation_time", DataTypes.TimestampType, true);
+        StructType schema = new StructType()
+                .add("value", DataTypes.BinaryType, false)
+                .add("properties", propsSchema, true)
+                .add("application_properties",
+                        DataTypes.createMapType(DataTypes.StringType, DataTypes.StringType), true)
+                .add("message_annotations",
+                        DataTypes.createMapType(DataTypes.StringType, DataTypes.StringType), true)
+                .add("creation_time", DataTypes.TimestampType, true);
+
+        java.sql.Timestamp createdAt = new java.sql.Timestamp(System.currentTimeMillis());
+        Row props = RowFactory.create(
+                "msg-1",
+                "subject-1",
+                "corr-1",
+                "text/plain",
+                createdAt);
+
+        Map<String, String> appProps = Map.of("region", "emea", "priority", "high");
+        Map<String, String> annotations = Map.of("traceId", "abc-123", "span", "root");
+
+        List<Row> data = List.of(RowFactory.create(
+                "complex-0".getBytes(),
+                props,
+                appProps,
+                annotations,
+                createdAt));
+
+        spark.createDataFrame(data, schema)
+                .write()
+                .format("rabbitmq_streams")
+                .mode("append")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .save();
+
+        Dataset<Row> df = spark.read()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("startingOffsets", "earliest")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load();
+
+        List<Row> rows = df.collectAsList();
+        assertThat(rows).hasSize(1);
+
+        Row row = rows.get(0);
+        assertThat(new String((byte[]) row.getAs("value"))).isEqualTo("complex-0");
+        scala.collection.Map<String, String> appPropsOut = row.getAs("application_properties");
+        assertThat(scala.jdk.javaapi.CollectionConverters.asJava(appPropsOut))
+                .containsEntry("region", "emea")
+                .containsEntry("priority", "high");
+
+        scala.collection.Map<String, String> annotationsOut = row.getAs("message_annotations");
+        assertThat(scala.jdk.javaapi.CollectionConverters.asJava(annotationsOut))
+                .containsEntry("traceId", "abc-123")
+                .containsEntry("span", "root");
+
+        Row propsOut = row.getAs("properties");
+        assertThat(propsOut).isNotNull();
+        assertThat(propsOut.getAs("message_id").toString()).isEqualTo("msg-1");
+        assertThat(propsOut.getAs("subject").toString()).isEqualTo("subject-1");
+        assertThat(propsOut.getAs("correlation_id").toString()).isEqualTo("corr-1");
+        assertThat(propsOut.getAs("content_type").toString()).isEqualTo("text/plain");
+        assertThat(((java.sql.Timestamp) propsOut.getAs("creation_time"))).isEqualTo(createdAt);
+
+        assertThat(((java.sql.Timestamp) row.getAs("creation_time"))).isEqualTo(createdAt);
+    }
+
     // ---- IT-SINK-001: write to non-existent stream fails ----
 
     @Test
@@ -522,6 +697,55 @@ class BatchWriteIT extends AbstractRabbitMQIT {
                 .sorted()
                 .toList();
         assertThat(values).contains("first-0", "first-19", "second-0", "second-19");
+    }
+
+    // ---- P1: dedup IT coverage for retries/restarts ----
+
+    @Test
+    void batchWriteDedupAfterPartialFailureSuppressesDuplicates() throws Exception {
+        StructType schema = new StructType()
+                .add("value", DataTypes.BinaryType, false);
+
+        List<Row> data = new ArrayList<>();
+        for (int i = 0; i < 10; i++) {
+            data.add(RowFactory.create(("dedup-" + i).getBytes()));
+        }
+
+        Dataset<Row> df = spark.createDataFrame(data, schema);
+
+        stopRabbitMqApp();
+        try {
+            assertThatThrownBy(() -> df.write()
+                    .format("rabbitmq_streams")
+                    .mode("append")
+                    .option("endpoints", streamEndpoint())
+                    .option("stream", stream)
+                    .option("producerName", "dedup-retry")
+                    .option("publisherConfirmTimeoutMs", "1500")
+                    .option("enqueueTimeoutMs", "500")
+                    .option("addressResolverClass",
+                            "com.rabbitmq.spark.connector.TestAddressResolver")
+                    .save())
+                    .satisfies(ex -> assertThat(ex.toString())
+                            .containsAnyOf("Timed out waiting for publisher confirms",
+                                    "Error when establishing stream connection",
+                                    "Locator not available"));
+        } finally {
+            startRabbitMqApp();
+        }
+
+        df.write()
+                .format("rabbitmq_streams")
+                .mode("append")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("producerName", "dedup-retry")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .save();
+
+        List<Message> messages = consumeMessages(stream, 10);
+        assertThat(messages).hasSize(10);
     }
 
     // ---- IT-SINK-008: ignoreUnknownColumns ----

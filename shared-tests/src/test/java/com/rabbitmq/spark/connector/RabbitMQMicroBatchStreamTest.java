@@ -588,7 +588,7 @@ class RabbitMQMicroBatchStreamTest {
             RabbitMQStreamOffset start = new RabbitMQStreamOffset(snapshot);
             Offset latest = stream.latestOffset(start, ReadLimit.allAvailable());
 
-            assertThat(latest).isSameAs(start);
+            assertThat(latest).isEqualTo(start);
         }
 
         @Test

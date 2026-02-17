@@ -815,6 +815,89 @@ class SuperStreamIT extends AbstractRabbitMQIT {
         assertThat(rows.size()).isLessThan(360);
     }
 
+    // ---- IT-DATALOSS-003: retention truncation with failOnDataLoss=false (superstream) ----
+
+    @Test
+    void streamingSuperStreamFailOnDataLossFalseForTruncation() throws Exception {
+        for (int p = 0; p < PARTITION_COUNT; p++) {
+            String partition = superStream + "-" + p;
+            deleteStream(partition);
+            createStreamWithRetention(partition, 1000, 500);
+        }
+
+        int batches = 8;
+        int perBatch = 20;
+        int expectedTotal = batches * perBatch * PARTITION_COUNT;
+
+        for (int p = 0; p < PARTITION_COUNT; p++) {
+            String partition = superStream + "-" + p;
+            for (int batch = 0; batch < batches; batch++) {
+                publishMessages(partition, perBatch, "trunc-p" + p + "-b" + batch + "-");
+                Thread.sleep(200);
+            }
+        }
+
+        Map<String, Long> firstOffsets = new java.util.LinkedHashMap<>();
+        for (int p = 0; p < PARTITION_COUNT; p++) {
+            String partition = superStream + "-" + p;
+            long firstOffset = waitForTruncation(partition, 30_000);
+            firstOffsets.put(partition, firstOffset);
+        }
+
+        boolean truncated = firstOffsets.values().stream().allMatch(offset -> offset > 0);
+        org.junit.jupiter.api.Assumptions.assumeTrue(truncated,
+                "Retention truncation did not occur for all partitions");
+
+        Path checkpointDir = Files.createTempDirectory("spark-checkpoint-ss-trunc-");
+        Path outputDir = Files.createTempDirectory("spark-output-ss-trunc-");
+
+        StreamingQuery query = spark.readStream()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("superstream", superStream)
+                .option("startingOffsets", "offset")
+                .option("startingOffset", "0")
+                .option("failOnDataLoss", "false")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load()
+                .writeStream()
+                .format("parquet")
+                .option("path", outputDir.toString())
+                .option("checkpointLocation", checkpointDir.toString())
+                .trigger(Trigger.AvailableNow())
+                .start();
+
+        query.awaitTermination(120_000);
+
+        List<Row> rows = spark.read().schema(MINIMAL_OUTPUT_SCHEMA)
+                .parquet(outputDir.toString())
+                .collectAsList();
+
+        assertThat(rows).isNotEmpty();
+        assertThat(rows.size()).isLessThan(expectedTotal);
+
+        Map<String, List<Long>> offsetsByStream = rows.stream()
+                .collect(Collectors.groupingBy(
+                        row -> row.getAs("stream").toString(),
+                        Collectors.mapping(
+                                row -> (Long) row.getAs("offset"),
+                                Collectors.toList())));
+
+        for (Map.Entry<String, List<Long>> entry : offsetsByStream.entrySet()) {
+            List<Long> offsets = entry.getValue();
+            Set<Long> uniqueOffsets = Set.copyOf(offsets);
+            assertThat(uniqueOffsets)
+                    .as("No duplicate offsets in stream " + entry.getKey())
+                    .hasSize(offsets.size());
+
+            long minOffset = offsets.stream().mapToLong(Long::longValue).min().orElse(-1);
+            long expectedMin = firstOffsets.getOrDefault(entry.getKey(), -1L);
+            assertThat(minOffset).isGreaterThanOrEqualTo(expectedMin);
+        }
+    }
+
     // ---- IT-DATALOSS-006: failOnDataLoss=false no duplicates ----
 
     @Test
@@ -1011,6 +1094,166 @@ class SuperStreamIT extends AbstractRabbitMQIT {
         assertThat(countsByStream).doesNotContainKey(superStream + "-2");
     }
 
+    // ---- S4: key-based routing with binding-key partitions ----
+
+    @Test
+    void batchWriteKeyRoutingWithBindingKeys() throws Exception {
+        String keySuper = uniqueStreamName();
+        deleteSuperStream(keySuper);
+        createSuperStreamWithBindingKeys(keySuper, "amer", "emea", "apac");
+
+        StructType schema = new StructType()
+                .add("value", DataTypes.BinaryType, false)
+                .add("routing_key", DataTypes.StringType, false);
+
+        List<Row> data = new ArrayList<>();
+        for (int i = 0; i < 10; i++) {
+            data.add(RowFactory.create(("amer-" + i).getBytes(), "amer"));
+            data.add(RowFactory.create(("emea-" + i).getBytes(), "emea"));
+            data.add(RowFactory.create(("apac-" + i).getBytes(), "apac"));
+        }
+
+        spark.createDataFrame(data, schema)
+                .write()
+                .format("rabbitmq_streams")
+                .mode("append")
+                .option("endpoints", streamEndpoint())
+                .option("superstream", keySuper)
+                .option("routingStrategy", "key")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .save();
+
+        Dataset<Row> df = spark.read()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("superstream", keySuper)
+                .option("startingOffsets", "earliest")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load();
+
+        List<Row> rows = df.collectAsList();
+        assertThat(rows).hasSize(30);
+
+        List<String> streams = rows.stream()
+                .map(row -> row.getAs("stream").toString())
+                .distinct()
+                .sorted()
+                .toList();
+        assertThat(streams).containsExactly(keySuper + "-amer", keySuper + "-apac", keySuper + "-emea");
+
+        Map<String, List<String>> byStream = rows.stream()
+                .collect(Collectors.groupingBy(
+                        row -> row.getAs("stream").toString(),
+                        Collectors.mapping(row -> new String((byte[]) row.getAs("value")),
+                                Collectors.toList())));
+
+        assertThat(byStream.get(keySuper + "-amer")).allMatch(v -> v.startsWith("amer-"));
+        assertThat(byStream.get(keySuper + "-emea")).allMatch(v -> v.startsWith("emea-"));
+        assertThat(byStream.get(keySuper + "-apac")).allMatch(v -> v.startsWith("apac-"));
+
+        deleteSuperStream(keySuper);
+    }
+
+    // ---- S4: deduplication with super stream producer ----
+
+    @Test
+    void batchWriteSuperStreamDedupAfterRetry() throws Exception {
+        String dedupSuper = uniqueStreamName();
+        deleteSuperStream(dedupSuper);
+        createSuperStream(dedupSuper, PARTITION_COUNT);
+
+        StructType schema = new StructType()
+                .add("value", DataTypes.BinaryType, false)
+                .add("routing_key", DataTypes.StringType, true);
+
+        List<Row> data = new ArrayList<>();
+        for (int i = 0; i < 20; i++) {
+            data.add(RowFactory.create(("dup-" + i).getBytes(), String.valueOf(i)));
+        }
+
+        Dataset<Row> df = spark.createDataFrame(data, schema);
+
+        stopRabbitMqApp();
+        try {
+            assertThatThrownBy(() -> df.write()
+                    .format("rabbitmq_streams")
+                    .mode("append")
+                    .option("endpoints", streamEndpoint())
+                    .option("superstream", dedupSuper)
+                    .option("producerName", "ss-dedup")
+                    .option("publisherConfirmTimeoutMs", "500")
+                    .option("enqueueTimeoutMs", "200")
+                    .option("addressResolverClass",
+                            "com.rabbitmq.spark.connector.TestAddressResolver")
+                    .save())
+                    .hasMessageContaining("Timed out waiting for publisher confirms");
+        } finally {
+            startRabbitMqApp();
+        }
+
+        df.write()
+                .format("rabbitmq_streams")
+                .mode("append")
+                .option("endpoints", streamEndpoint())
+                .option("superstream", dedupSuper)
+                .option("producerName", "ss-dedup")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .save();
+
+        Dataset<Row> readDf = spark.read()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("superstream", dedupSuper)
+                .option("startingOffsets", "earliest")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load();
+
+        List<Row> rows = readDf.collectAsList();
+        assertThat(rows).hasSize(20);
+        deleteSuperStream(dedupSuper);
+    }
+
+    // ---- S4: large partition count (tracking consumer limits) ----
+
+    @Test
+    void batchReadLargeSuperStreamPartitionCount() throws Exception {
+        String largeSuper = uniqueStreamName();
+        deleteSuperStream(largeSuper);
+        createSuperStream(largeSuper, 60);
+
+        for (int p = 0; p < 60; p++) {
+            publishMessages(largeSuper + "-" + p, 2, "p" + p + "-");
+        }
+        Thread.sleep(2000);
+
+        Dataset<Row> df = spark.read()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("superstream", largeSuper)
+                .option("startingOffsets", "earliest")
+                .option("maxTrackingConsumersByConnection", "5")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load();
+
+        List<Row> rows = df.collectAsList();
+        assertThat(rows).hasSize(120);
+
+        Set<String> streams = rows.stream()
+                .map(row -> row.getAs("stream").toString())
+                .collect(Collectors.toSet());
+        assertThat(streams).hasSize(60);
+
+        deleteSuperStream(largeSuper);
+    }
+
     // ---- IT-RL-005: AvailableNow batch count matches rate limit (superstream) ----
 
     @Test
@@ -1199,6 +1442,62 @@ class SuperStreamIT extends AbstractRabbitMQIT {
                 .toList();
 
         assertThat(values).anyMatch(v -> v.startsWith("p2-re-"));
+    }
+
+    // ---- IT-DATALOSS-005: deleted/recreated superstream partition between batches ----
+
+    @Test
+    void streamingSuperStreamRecreatePartitionNoDuplicates() throws Exception {
+        for (int p = 0; p < PARTITION_COUNT; p++) {
+            publishMessages(superStream + "-" + p, 15, "pre-p" + p + "-");
+        }
+        Thread.sleep(2000);
+
+        Path checkpointDir = Files.createTempDirectory("spark-checkpoint-ss-loss-");
+        Path outputDir = Files.createTempDirectory("spark-output-ss-loss-");
+        AtomicBoolean recreated = new AtomicBoolean(false);
+
+        StreamingQuery query = spark.readStream()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("superstream", superStream)
+                .option("startingOffsets", "earliest")
+                .option("failOnDataLoss", "false")
+                .option("maxRecordsPerTrigger", "8")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load()
+                .writeStream()
+                .foreachBatch((batch, batchId) -> {
+                    batch.write()
+                            .mode("append")
+                            .format("parquet")
+                            .save(outputDir.toString());
+                    if (batchId == 0L && recreated.compareAndSet(false, true)) {
+                        deleteStream(superStream + "-1");
+                        Thread.sleep(500);
+                        createStream(superStream + "-1");
+                        publishMessages(superStream + "-1", 8, "re-p1-");
+                    }
+                })
+                .option("checkpointLocation", checkpointDir.toString())
+                .trigger(Trigger.AvailableNow())
+                .start();
+
+        query.awaitTermination(120_000);
+        assertThat(recreated.get()).isTrue();
+
+        List<Row> rows = spark.read().schema(MINIMAL_OUTPUT_SCHEMA)
+                .parquet(outputDir.toString())
+                .collectAsList();
+        assertThat(rows).isNotEmpty();
+
+        List<String> values = rows.stream()
+                .map(row -> new String((byte[]) row.getAs("value")))
+                .toList();
+        assertThat(values).anyMatch(v -> v.startsWith("re-p1-"));
+        assertThat(Set.copyOf(values)).hasSize(values.size());
     }
 
     // ---- IT-STRESS-002: churn test with failOnDataLoss=false ----

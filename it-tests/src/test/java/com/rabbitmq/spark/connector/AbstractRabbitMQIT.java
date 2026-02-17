@@ -15,6 +15,7 @@ import org.testcontainers.containers.RabbitMQContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
+import org.testcontainers.utility.MountableFile;
 
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructType;
@@ -43,6 +44,7 @@ abstract class AbstractRabbitMQIT {
     private static final Logger LOG = LoggerFactory.getLogger(AbstractRabbitMQIT.class);
 
     static final int STREAM_PORT = 5552;
+    static final int STREAM_TLS_PORT = 5551;
 
     /**
      * Shared RabbitMQ container with stream plugin enabled.
@@ -52,7 +54,22 @@ abstract class AbstractRabbitMQIT {
     static final RabbitMQContainer RABBIT = new RabbitMQContainer(
             DockerImageName.parse("rabbitmq:4.0-management"))
             .withPluginsEnabled("rabbitmq_stream")
-            .withExposedPorts(STREAM_PORT);
+            .withCopyFileToContainer(
+                    MountableFile.forClasspathResource("rabbitmq/rabbitmq.conf"),
+                    "/etc/rabbitmq/rabbitmq.conf")
+            .withCopyFileToContainer(
+                    MountableFile.forClasspathResource("tls/rabbitmq-key.pem"),
+                    "/etc/rabbitmq/certs/rabbitmq-key.pem")
+            .withCopyFileToContainer(
+                    MountableFile.forClasspathResource("tls/rabbitmq-cert.pem"),
+                    "/etc/rabbitmq/certs/rabbitmq-cert.pem")
+            .withCopyFileToContainer(
+                    MountableFile.forClasspathResource("tls/ca-cert.pem"),
+                    "/etc/rabbitmq/certs/ca-cert.pem")
+            .withEnv("RABBITMQ_CONFIG_FILE", "/etc/rabbitmq/rabbitmq")
+            .withEnv("RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS",
+                    "-rabbitmq_stream advertised_tls_port " + STREAM_TLS_PORT)
+            .withExposedPorts(STREAM_PORT, STREAM_TLS_PORT);
 
     /** Shared Spark session — local mode, reused across all IT classes. */
     static SparkSession spark;
@@ -66,6 +83,8 @@ abstract class AbstractRabbitMQIT {
         System.setProperty("rabbitmq.test.host", RABBIT.getHost());
         System.setProperty("rabbitmq.test.port",
                 String.valueOf(RABBIT.getMappedPort(STREAM_PORT)));
+        System.setProperty("rabbitmq.test.tls.port",
+                String.valueOf(RABBIT.getMappedPort(STREAM_TLS_PORT)));
 
         if (spark == null) {
             spark = SparkSession.builder()
@@ -113,6 +132,11 @@ abstract class AbstractRabbitMQIT {
         return RABBIT.getHost() + ":" + RABBIT.getMappedPort(STREAM_PORT);
     }
 
+    /** The mapped TLS stream endpoint for connector options. */
+    String streamTlsEndpoint() {
+        return RABBIT.getHost() + ":" + RABBIT.getMappedPort(STREAM_TLS_PORT);
+    }
+
     /** Generate a unique stream name for a test. */
     String uniqueStreamName() {
         return "test-stream-" + UUID.randomUUID().toString().substring(0, 8);
@@ -152,6 +176,29 @@ abstract class AbstractRabbitMQIT {
         }
     }
 
+    /** Create a superstream with explicit binding keys via CLI. */
+    void createSuperStreamWithBindingKeys(String name, String... keys) {
+        List<String> args = new ArrayList<>();
+        args.add("rabbitmq-streams");
+        args.add("add_super_stream");
+        args.add(name);
+        args.add("--binding-keys");
+        args.add(String.join(",", keys));
+        try {
+            var result = RABBIT.execInContainer(args.toArray(new String[0]));
+            if (result.getExitCode() != 0) {
+                throw new RuntimeException(
+                        "Failed to create superstream with binding keys '" + name
+                                + "': " + result.getStderr());
+            }
+            LOG.info("Created superstream '{}' with binding keys {}", name, String.join(",", keys));
+        } catch (RuntimeException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to create superstream with binding keys '" + name + "'", e);
+        }
+    }
+
     /** Add partitions to an existing superstream via CLI. */
     void addSuperStreamPartitions(String name, int partitionsToAdd) {
         try {
@@ -178,6 +225,60 @@ abstract class AbstractRabbitMQIT {
             LOG.info("Deleted superstream '{}'", name);
         } catch (Exception e) {
             LOG.debug("Failed to delete superstream '{}': {}", name, e.getMessage());
+        }
+    }
+
+    // ---- Broker lifecycle helpers ----
+
+    void stopRabbitMqApp() {
+        try {
+            var result = RABBIT.execInContainer("rabbitmqctl", "stop_app");
+            if (result.getExitCode() != 0) {
+                throw new RuntimeException("Failed to stop RabbitMQ app: " + result.getStderr());
+            }
+            LOG.info("RabbitMQ app stopped");
+        } catch (RuntimeException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to stop RabbitMQ app", e);
+        }
+    }
+
+    void startRabbitMqApp() {
+        try {
+            var result = RABBIT.execInContainer("rabbitmqctl", "start_app");
+            if (result.getExitCode() != 0) {
+                throw new RuntimeException("Failed to start RabbitMQ app: " + result.getStderr());
+            }
+            var await = RABBIT.execInContainer("rabbitmqctl", "await_startup");
+            if (await.getExitCode() != 0) {
+                throw new RuntimeException("RabbitMQ did not start: " + await.getStderr());
+            }
+            LOG.info("RabbitMQ app started");
+        } catch (RuntimeException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to start RabbitMQ app", e);
+        }
+    }
+
+    void blockRabbitMqPort() {
+        try {
+            RABBIT.execInContainer("sh", "-c",
+                    "iptables -I INPUT -p tcp --dport " + STREAM_PORT + " -j DROP");
+            LOG.info("Blocked RabbitMQ stream port {}", STREAM_PORT);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to block RabbitMQ port", e);
+        }
+    }
+
+    void unblockRabbitMqPort() {
+        try {
+            RABBIT.execInContainer("sh", "-c",
+                    "iptables -D INPUT -p tcp --dport " + STREAM_PORT + " -j DROP");
+            LOG.info("Unblocked RabbitMQ stream port {}", STREAM_PORT);
+        } catch (Exception e) {
+            LOG.debug("Failed to unblock RabbitMQ port: {}", e.getMessage());
         }
     }
 

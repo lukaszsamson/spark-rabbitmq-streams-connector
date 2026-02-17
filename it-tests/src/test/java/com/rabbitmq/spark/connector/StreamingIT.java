@@ -1392,6 +1392,233 @@ class StreamingIT extends AbstractRabbitMQIT {
         assertThat(phase2MinOffset).isGreaterThan(storedOffset);
     }
 
+    // ---- IT-ALO-005: derived consumerName fallback path on non-fatal lookup failure ----
+
+    @Test
+    void streamingDerivedConsumerNameFallbackOnLookupFailure() throws Exception {
+        publishMessages(sourceStream, 20, "fallback-");
+        Thread.sleep(1500);
+
+        Path outputDir = Files.createTempDirectory("spark-output-alo-fallback-");
+        Path checkpointDir = Files.createTempDirectory("spark-checkpoint-alo-fallback-");
+
+        EnvironmentPool.getInstance().closeAll();
+        String envId = "fallback-env-" + System.currentTimeMillis();
+        long pollTimeoutMs = 300;
+
+        java.util.concurrent.ExecutorService executor = java.util.concurrent.Executors.newSingleThreadExecutor();
+        java.util.concurrent.Future<?> stopper = executor.submit(() -> {
+            Thread.sleep(200);
+            stopRabbitMqApp();
+            Thread.sleep(800);
+            startRabbitMqApp();
+            return null;
+        });
+
+        StreamingQuery query = spark.readStream()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", sourceStream)
+                .option("startingOffsets", "earliest")
+                .option("environmentId", envId)
+                .option("pollTimeoutMs", String.valueOf(pollTimeoutMs))
+                .option("serverSideOffsetTracking", "true")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load()
+                .writeStream()
+                .format("parquet")
+                .option("path", outputDir.toString())
+                .option("checkpointLocation", checkpointDir.toString())
+                .trigger(Trigger.AvailableNow())
+                .start();
+
+        query.awaitTermination(120_000);
+        stopper.get(5, TimeUnit.SECONDS);
+        executor.shutdownNow();
+
+        List<Row> rows = spark.read().schema(MINIMAL_OUTPUT_SCHEMA)
+                .parquet(outputDir.toString())
+                .collectAsList();
+        assertThat(rows).hasSize(20);
+
+        Set<Long> offsets = rows.stream()
+                .map(row -> (Long) row.getAs("offset"))
+                .collect(Collectors.toSet());
+        assertThat(offsets).hasSize(20);
+
+        EnvironmentPool.getInstance().closeAll();
+    }
+
+    // ---- IT-RETRY-001: transient broker disconnect during read ----
+
+    @Test
+    void streamingRecoversAfterBrokerRestartDuringRead() throws Exception {
+        publishMessages(sourceStream, 40, "reco-");
+        Thread.sleep(1500);
+
+        Path outputDir = Files.createTempDirectory("spark-output-retry-read-");
+        Path checkpointDir = Files.createTempDirectory("spark-checkpoint-retry-read-");
+        EnvironmentPool.getInstance().closeAll();
+
+        java.util.concurrent.ExecutorService executor = java.util.concurrent.Executors.newSingleThreadExecutor();
+        java.util.concurrent.Future<?> stopper = executor.submit(() -> {
+            Thread.sleep(300);
+            stopRabbitMqApp();
+            Thread.sleep(800);
+            startRabbitMqApp();
+            return null;
+        });
+
+        StreamingQuery query = spark.readStream()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", sourceStream)
+                .option("startingOffsets", "earliest")
+                .option("pollTimeoutMs", "300")
+                .option("serverSideOffsetTracking", "false")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load()
+                .writeStream()
+                .format("parquet")
+                .option("path", outputDir.toString())
+                .option("checkpointLocation", checkpointDir.toString())
+                .trigger(Trigger.AvailableNow())
+                .start();
+
+        query.awaitTermination(120_000);
+        stopper.get(5, TimeUnit.SECONDS);
+        executor.shutdownNow();
+
+        List<Row> rows = spark.read().schema(MINIMAL_OUTPUT_SCHEMA)
+                .parquet(outputDir.toString())
+                .collectAsList();
+        assertThat(rows).hasSize(40);
+
+        Set<Long> offsets = rows.stream()
+                .map(row -> (Long) row.getAs("offset"))
+                .collect(Collectors.toSet());
+        assertThat(offsets).hasSize(40);
+
+        EnvironmentPool.getInstance().closeAll();
+    }
+
+    // ---- IT-RETRY-005: broker-offset store timeout path (best effort) ----
+
+    @Test
+    void streamingBrokerOffsetStoreTimeoutDoesNotAbortQuery() throws Exception {
+        publishMessages(sourceStream, 25, "commit-");
+        Thread.sleep(1500);
+
+        EnvironmentPool.getInstance().closeAll();
+        String envId = "commit-timeout-" + System.currentTimeMillis();
+
+        Path outputDir = Files.createTempDirectory("spark-output-commit-timeout-");
+        Path localCheckpoint = Files.createTempDirectory("spark-checkpoint-commit-timeout-");
+
+        blockRabbitMqPort();
+
+        try {
+            StreamingQuery query = spark.readStream()
+                    .format("rabbitmq_streams")
+                    .option("endpoints", streamEndpoint())
+                    .option("stream", sourceStream)
+                    .option("startingOffsets", "earliest")
+                    .option("serverSideOffsetTracking", "true")
+                    .option("environmentId", envId)
+                    .option("metadataFields", "")
+                    .option("addressResolverClass",
+                            "com.rabbitmq.spark.connector.TestAddressResolver")
+                    .load()
+                    .writeStream()
+                    .format("parquet")
+                    .option("path", outputDir.toString())
+                    .option("checkpointLocation", localCheckpoint.toString())
+                    .trigger(Trigger.AvailableNow())
+                    .start();
+
+            query.awaitTermination(120_000);
+
+            List<Row> rows = spark.read().schema(MINIMAL_OUTPUT_SCHEMA)
+                    .parquet(outputDir.toString())
+                    .collectAsList();
+            assertThat(rows).hasSize(25);
+        } finally {
+            unblockRabbitMqPort();
+            EnvironmentPool.getInstance().closeAll();
+        }
+    }
+
+    // ---- IT-ALO-002: sink task failure after partial writes causes duplicates ----
+
+    @Test
+    void streamingSinkFailureAfterPartialWritesCausesDuplicates() throws Exception {
+        for (int i = 0; i < 30; i++) {
+            publishMessages(sourceStream, 1, "dup-" + i + "-");
+        }
+        Thread.sleep(1500);
+
+        Path outputDir = Files.createTempDirectory("spark-output-alo-dup-");
+        Path failureCheckpoint = Files.createTempDirectory("spark-checkpoint-alo-dup-");
+        java.util.concurrent.atomic.AtomicBoolean failed = new java.util.concurrent.atomic.AtomicBoolean(false);
+
+        StreamingQuery query = spark.readStream()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", sourceStream)
+                .option("startingOffsets", "earliest")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load()
+                .writeStream()
+                .foreachBatch((batch, batchId) -> {
+                    batch.write()
+                            .mode("append")
+                            .format("parquet")
+                            .save(outputDir.toString());
+                    if (batchId == 0L && failed.compareAndSet(false, true)) {
+                        throw new RuntimeException("Intentional sink failure after write");
+                    }
+                })
+                .option("checkpointLocation", failureCheckpoint.toString())
+                .trigger(Trigger.AvailableNow())
+                .start();
+
+        assertThatThrownBy(() -> query.awaitTermination(120_000))
+                .hasMessageContaining("Intentional sink failure");
+
+        StreamingQuery retry = spark.readStream()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", sourceStream)
+                .option("startingOffsets", "earliest")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load()
+                .writeStream()
+                .format("parquet")
+                .option("path", outputDir.toString())
+                .option("checkpointLocation", failureCheckpoint.toString())
+                .trigger(Trigger.AvailableNow())
+                .start();
+
+        retry.awaitTermination(120_000);
+
+        List<String> values = spark.read().schema(MINIMAL_OUTPUT_SCHEMA)
+                .parquet(outputDir.toString())
+                .collectAsList().stream()
+                .map(row -> new String((byte[]) row.getAs("value")))
+                .toList();
+
+        Set<String> unique = Set.copyOf(values);
+        assertThat(values.size()).isGreaterThan(unique.size());
+    }
+
     // ---- IT-SPLIT-001: minPartitions split in streaming ----
 
     @Test

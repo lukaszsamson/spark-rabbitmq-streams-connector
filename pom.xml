@@ -68,6 +68,7 @@
         <mockito.version>5.15.2</mockito.version>
         <testcontainers.version>2.0.3</testcontainers.version>
         <log4j.version>2.24.3</log4j.version>
+        <commons-lang3.version>3.15.0</commons-lang3.version>
 
         <!-- Plugin versions -->
         <maven-compiler-plugin.version>3.13.0</maven-compiler-plugin.version>
@@ -171,6 +172,12 @@
                 <groupId>org.apache.logging.log4j</groupId>
                 <artifactId>log4j-core</artifactId>
                 <version>${log4j.version}</version>
+                <scope>test</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.commons</groupId>
+                <artifactId>commons-lang3</artifactId>
+                <version>${commons-lang3.version}</version>
                 <scope>test</scope>
             </dependency>
         </dependencies>
