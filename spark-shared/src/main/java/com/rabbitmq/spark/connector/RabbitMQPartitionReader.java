@@ -134,16 +134,24 @@ final class RabbitMQPartitionReader implements PartitionReader<InternalRow> {
                 // Timestamp-seek split can also legitimately have no in-range rows when the
                 // resolved broker seek position is already past this split's end.
                 // If the stream tail has already reached this split's end, we can terminate.
-                boolean canTerminateOnEmpty = isBrokerFilterConfigured() || useConfiguredStartingOffset;
+                boolean brokerFilterConfigured = isBrokerFilterConfigured();
+                boolean canTerminateOnEmpty = brokerFilterConfigured || useConfiguredStartingOffset;
                 if (canTerminateOnEmpty && hasStreamTailReachedPlannedEnd()) {
                     finished = true;
                     return false;
                 }
                 totalWaitMs += pollTimeoutMs;
                 if (totalWaitMs >= maxWaitMs) {
-                    if (canTerminateOnEmpty) {
+                    if (useConfiguredStartingOffset) {
                         LOG.warn("Reached maxWaitMs={} while reading filtered stream '{}'; " +
                                         "terminating split early at lastObservedOffset={} for planned endOffset={}",
+                                maxWaitMs, stream, lastObservedOffset, endOffset);
+                        finished = true;
+                        return false;
+                    }
+                    if (brokerFilterConfigured && hasStreamTailReachedPlannedEnd()) {
+                        LOG.warn("Reached maxWaitMs={} while reading filtered stream '{}'; " +
+                                        "tail indicates planned end reached at lastObservedOffset={} for endOffset={}",
                                 maxWaitMs, stream, lastObservedOffset, endOffset);
                         finished = true;
                         return false;

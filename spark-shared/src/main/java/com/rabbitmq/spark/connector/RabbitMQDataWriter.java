@@ -390,7 +390,7 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
         if (baseName == null || baseName.isEmpty()) {
             return null;
         }
-        return baseName + "-p" + partitionId;
+        return baseName + "-p" + partitionId + "-t" + taskId;
     }
 
     /**

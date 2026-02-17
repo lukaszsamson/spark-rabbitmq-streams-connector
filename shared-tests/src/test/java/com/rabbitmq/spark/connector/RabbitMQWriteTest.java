@@ -544,7 +544,7 @@ class RabbitMQWriteTest {
         }
 
         @Test
-        void deriveProducerNameIsStableAcrossTaskAttempts() throws Exception {
+        void deriveProducerNameIncludesTaskIdToAvoidAttemptCollisions() throws Exception {
             Map<String, String> opts = minimalSinkMap();
             opts.put("producerName", "dedup");
             ConnectorOptions options = new ConnectorOptions(opts);
@@ -556,7 +556,26 @@ class RabbitMQWriteTest {
 
             writer.write(new GenericInternalRow(new Object[]{"x".getBytes()}));
 
-            assertThat(builder.name).isEqualTo("dedup-p2");
+            assertThat(builder.name).isEqualTo("dedup-p2-t7");
+        }
+
+        @Test
+        void dedupProducerNamesMustAvoidTaskAttemptCollisions() throws Exception {
+            Map<String, String> opts = minimalSinkMap();
+            opts.put("producerName", "dedup");
+            ConnectorOptions options = new ConnectorOptions(opts);
+
+            CapturingProducerBuilder builder = new CapturingProducerBuilder(true);
+            seedEnvironmentPool(options, new BuilderEnvironment(builder));
+
+            RabbitMQDataWriter firstAttempt = new RabbitMQDataWriter(
+                    options, minimalSinkSchema(), 2, 7, -1);
+            RabbitMQDataWriter secondAttempt = new RabbitMQDataWriter(
+                    options, minimalSinkSchema(), 2, 8, -1);
+
+            InternalRow row = new GenericInternalRow(new Object[]{"x".getBytes()});
+            firstAttempt.write(row);
+            secondAttempt.write(row);
         }
 
         @Test
@@ -1121,6 +1140,8 @@ class RabbitMQWriteTest {
     }
 
     private static final class CapturingProducerBuilder implements com.rabbitmq.stream.ProducerBuilder {
+        private final boolean failOnDuplicateName;
+        private final Set<String> activeProducerNames;
         private int maxInFlight;
         private long confirmTimeoutMs;
         private long enqueueTimeoutMs;
@@ -1130,6 +1151,17 @@ class RabbitMQWriteTest {
         private Boolean dynamicBatch;
         private com.rabbitmq.stream.Resource.StateListener listener;
         private String name;
+
+        private CapturingProducerBuilder() {
+            this(false);
+        }
+
+        private CapturingProducerBuilder(boolean failOnDuplicateName) {
+            this.failOnDuplicateName = failOnDuplicateName;
+            this.activeProducerNames = failOnDuplicateName
+                    ? Collections.newSetFromMap(new ConcurrentHashMap<>())
+                    : Set.of();
+        }
 
         @Override
         public com.rabbitmq.stream.ProducerBuilder stream(String stream) {
@@ -1222,7 +1254,48 @@ class RabbitMQWriteTest {
 
         @Override
         public com.rabbitmq.stream.Producer build() {
+            if (failOnDuplicateName && name != null && !activeProducerNames.add(name)) {
+                throw new com.rabbitmq.stream.StreamException(
+                        "Error while declaring publisher: 17 (PRECONDITION_FAILED). " +
+                                "Could not assign producer to client.");
+            }
+            if (failOnDuplicateName && name != null) {
+                return new NameTrackingProducer(activeProducerNames, name);
+            }
             return new NoopProducer();
+        }
+    }
+
+    private static final class NameTrackingProducer implements com.rabbitmq.stream.Producer {
+        private static final com.rabbitmq.stream.codec.QpidProtonCodec CODEC =
+                new com.rabbitmq.stream.codec.QpidProtonCodec();
+        private final Set<String> activeProducerNames;
+        private final String producerName;
+
+        private NameTrackingProducer(Set<String> activeProducerNames, String producerName) {
+            this.activeProducerNames = activeProducerNames;
+            this.producerName = producerName;
+        }
+
+        @Override
+        public com.rabbitmq.stream.MessageBuilder messageBuilder() {
+            return CODEC.messageBuilder();
+        }
+
+        @Override
+        public long getLastPublishingId() {
+            return 0L;
+        }
+
+        @Override
+        public void send(com.rabbitmq.stream.Message message,
+                         com.rabbitmq.stream.ConfirmationHandler confirmationHandler) {
+            confirmationHandler.handle(new com.rabbitmq.stream.ConfirmationStatus(message, true, (short) 0));
+        }
+
+        @Override
+        public void close() {
+            activeProducerNames.remove(producerName);
         }
     }
 

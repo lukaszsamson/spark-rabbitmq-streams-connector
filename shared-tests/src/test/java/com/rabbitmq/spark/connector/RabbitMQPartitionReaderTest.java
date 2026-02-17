@@ -221,6 +221,31 @@ class RabbitMQPartitionReaderTest {
         }
 
         @Test
+        void nextWithBrokerFilterMustNotSilentlyTerminateBeforePlannedEndOffset() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("filterValues", "alpha");
+            opts.put("filterValueColumn", "region");
+            opts.put("pollTimeoutMs", "5");
+            opts.put("maxWaitMs", "5");
+
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 0, 40, new ConnectorOptions(opts));
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
+
+            setPrivateField(reader, "consumer", new NoopConsumer());
+            setPrivateField(reader, "queue", new LinkedBlockingQueue<>());
+            setPrivateField(reader, "lastObservedOffset", 34L);
+
+            // Expected behavior: a reader that has not reached planned end offset must not
+            // silently terminate just because maxWaitMs elapsed.
+            assertThatThrownBy(reader::next)
+                    .isInstanceOf(IOException.class)
+                    .hasMessageContaining("Timed out waiting for messages");
+        }
+
+        @Test
         void nextDedupSkipsDuplicateOffsets() throws Exception {
             RabbitMQInputPartition partition = new RabbitMQInputPartition(
                     "test-stream", 0, 3, minimalOptions());
