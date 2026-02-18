@@ -1259,8 +1259,7 @@ class StreamingIT extends AbstractRabbitMQIT {
         Dataset<Row> phase1Result = spark.read().schema(MINIMAL_OUTPUT_SCHEMA)
                 .parquet(outputDir.toString());
         long phase1Count = phase1Result.count();
-        // Trigger.AvailableNow tail snapshots can briefly lag by one offset; resume must catch it.
-        assertThat(phase1Count).isBetween(99L, 100L);
+        assertThat(phase1Count).isEqualTo(100L);
 
         // Get the max offset from phase 1
         long phase1MaxOffset = phase1Result.collectAsList().stream()

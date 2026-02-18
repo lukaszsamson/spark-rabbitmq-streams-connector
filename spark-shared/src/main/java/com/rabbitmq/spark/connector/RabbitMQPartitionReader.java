@@ -175,21 +175,6 @@ final class RabbitMQPartitionReader implements PartitionReader<InternalRow> {
                         finished = true;
                         return false;
                     }
-                    if (brokerFilterConfigured && isNearPlannedEndAfterFiltering()) {
-                        LOG.warn("Reached maxWaitMs={} while reading filtered stream '{}'; " +
-                                        "terminating near planned end at lastObservedOffset={} for endOffset={}",
-                                maxWaitMs, stream, lastObservedOffset, endOffset);
-                        finished = true;
-                        return false;
-                    }
-                    if (brokerFilterConfigured && lastObservedOffset >= startOffset) {
-                        LOG.warn("Reached maxWaitMs={} while reading filtered stream '{}'; " +
-                                        "observed offsets in planned range but no further matching records arrived " +
-                                        "(lastObservedOffset={}, planned endOffset={}). Completing split.",
-                                maxWaitMs, stream, lastObservedOffset, endOffset);
-                        finished = true;
-                        return false;
-                    }
                     if (!options.isFailOnDataLoss() && isPlannedRangeNoLongerReachableDueToDataLoss()) {
                         LOG.warn("Reached maxWaitMs={} on stream '{}' and planned range [{}, {}) is no longer " +
                                         "reachable after data loss/recreation; completing split because failOnDataLoss=false",
@@ -197,9 +182,38 @@ final class RabbitMQPartitionReader implements PartitionReader<InternalRow> {
                         finished = true;
                         return false;
                     }
-                    if (!options.isFailOnDataLoss()) {
-                        LOG.warn("Reached maxWaitMs={} on stream '{}' with no progress toward planned range [{}, {}); " +
-                                        "completing split because failOnDataLoss=false",
+                    if (brokerFilterConfigured && lastObservedOffset >= startOffset) {
+                        LOG.warn("Reached maxWaitMs={} while reading filtered stream '{}'; " +
+                                        "observed in-range offsets and no additional matching records arrived " +
+                                        "(lastObservedOffset={}, planned endOffset={}). Completing split.",
+                                maxWaitMs, stream, lastObservedOffset, endOffset);
+                        finished = true;
+                        return false;
+                    }
+                    if (!options.isFailOnDataLoss()
+                            && endOffset > 0
+                            && lastObservedOffset >= endOffset - 2) {
+                        LOG.warn("Reached maxWaitMs={} on stream '{}' near planned end; " +
+                                        "completing split because failOnDataLoss=false " +
+                                        "(lastObservedOffset={}, planned endOffset={})",
+                                maxWaitMs, stream, lastObservedOffset, endOffset);
+                        finished = true;
+                        return false;
+                    }
+                    if (!options.isFailOnDataLoss()
+                            && lastObservedOffset < startOffset
+                            && isStreamTailBelowPlannedEnd()) {
+                        LOG.warn("Reached maxWaitMs={} on stream '{}' with no in-range progress and tail below " +
+                                        "planned end; completing split because failOnDataLoss=false " +
+                                        "(startOffset={}, planned endOffset={})",
+                                maxWaitMs, stream, startOffset, endOffset);
+                        finished = true;
+                        return false;
+                    }
+                    if (!options.isFailOnDataLoss() && lastObservedOffset < startOffset) {
+                        LOG.warn("Reached maxWaitMs={} on stream '{}' without in-range progress; " +
+                                        "completing split because failOnDataLoss=false " +
+                                        "(startOffset={}, planned endOffset={})",
                                 maxWaitMs, stream, startOffset, endOffset);
                         finished = true;
                         return false;
@@ -473,16 +487,6 @@ final class RabbitMQPartitionReader implements PartitionReader<InternalRow> {
         }
     }
 
-    private boolean isNearPlannedEndAfterFiltering() {
-        if (endOffset <= 0 || lastObservedOffset < 0) {
-            return false;
-        }
-        // Broker-side filtering can legitimately skip the final offset(s) in [start, end).
-        // If we already observed up to end-2 and no more records arrive within maxWaitMs,
-        // allow bounded reads to complete instead of failing the task.
-        return lastObservedOffset >= endOffset - 2;
-    }
-
     private boolean isPlannedRangeNoLongerReachableDueToDataLoss() {
         try {
             StreamStats stats = environment.queryStreamStats(stream);
@@ -492,7 +496,24 @@ final class RabbitMQPartitionReader implements PartitionReader<InternalRow> {
                     tail < startOffset || first > startOffset || (lastObservedOffset >= 0 && tail < lastObservedOffset);
             return tail < endOffset - 1 && streamWasResetOrTruncated;
         } catch (Exception e) {
+            if (isMissingStreamException(e)) {
+                return true;
+            }
             LOG.debug("Unable to validate data-loss reachability for stream '{}': {}",
+                    stream, e.getMessage());
+            return false;
+        }
+    }
+
+    private boolean isStreamTailBelowPlannedEnd() {
+        try {
+            StreamStats stats = environment.queryStreamStats(stream);
+            long statsTail = stats.committedChunkId();
+            long probedTail = probeLastMessageOffset();
+            long tail = Math.max(statsTail, probedTail);
+            return tail < endOffset - 1;
+        } catch (Exception e) {
+            LOG.debug("Unable to validate stream tail for reachability on '{}': {}",
                     stream, e.getMessage());
             return false;
         }

@@ -880,10 +880,6 @@ final class RabbitMQMicroBatchStream
     }
 
     private long mergeTailOffsetsForAvailableNow(long statsTail, long probedTail) {
-        if (statsTail > 0 && probedTail > 0 && Math.abs(statsTail - probedTail) <= 1) {
-            // Avoid planning a phantom final offset when one source is ahead by exactly 1.
-            return Math.min(statsTail, probedTail);
-        }
         return Math.max(statsTail, probedTail);
     }
 
