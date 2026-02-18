@@ -94,7 +94,18 @@ final class RabbitMQPartitionReader implements PartitionReader<InternalRow> {
 
         // Lazy initialization: create consumer on first call
         if (consumer == null) {
-            initConsumer();
+            try {
+                initConsumer();
+            } catch (Exception e) {
+                if (!options.isFailOnDataLoss() && isMissingStreamException(e)) {
+                    LOG.warn("Unable to initialize consumer for stream '{}' because stream/partition " +
+                                    "is missing; completing split because failOnDataLoss=false",
+                            stream);
+                    finished = true;
+                    return false;
+                }
+                throw new IOException("Failed to initialize consumer for stream '" + stream + "'", e);
+            }
         }
 
         long totalWaitMs = 0;
@@ -126,6 +137,13 @@ final class RabbitMQPartitionReader implements PartitionReader<InternalRow> {
 
             if (qm == null) {
                 if (consumerClosed.get()) {
+                    if (!options.isFailOnDataLoss() && isPlannedRangeNoLongerReachableDueToDataLoss()) {
+                        LOG.warn("Consumer for stream '{}' closed and planned range [{}, {}) is no longer " +
+                                        "reachable; completing split because failOnDataLoss=false",
+                                stream, startOffset, endOffset);
+                        finished = true;
+                        return false;
+                    }
                     throw new IOException(
                             "Consumer for stream '" + stream + "' closed before reaching target end offset "
                                     + endOffset + ". Last emitted offset: " + lastEmittedOffset);
@@ -135,14 +153,15 @@ final class RabbitMQPartitionReader implements PartitionReader<InternalRow> {
                 // resolved broker seek position is already past this split's end.
                 // If the stream tail has already reached this split's end, we can terminate.
                 boolean brokerFilterConfigured = isBrokerFilterConfigured();
-                boolean canTerminateOnEmpty = brokerFilterConfigured || useConfiguredStartingOffset;
+                boolean timestampStart = isTimestampConfiguredStartingOffset();
+                boolean canTerminateOnEmpty = brokerFilterConfigured || timestampStart;
                 if (canTerminateOnEmpty && hasStreamTailReachedPlannedEnd()) {
                     finished = true;
                     return false;
                 }
                 totalWaitMs += pollTimeoutMs;
                 if (totalWaitMs >= maxWaitMs) {
-                    if (useConfiguredStartingOffset) {
+                    if (timestampStart) {
                         LOG.warn("Reached maxWaitMs={} while reading filtered stream '{}'; " +
                                         "terminating split early at lastObservedOffset={} for planned endOffset={}",
                                 maxWaitMs, stream, lastObservedOffset, endOffset);
@@ -153,6 +172,35 @@ final class RabbitMQPartitionReader implements PartitionReader<InternalRow> {
                         LOG.warn("Reached maxWaitMs={} while reading filtered stream '{}'; " +
                                         "tail indicates planned end reached at lastObservedOffset={} for endOffset={}",
                                 maxWaitMs, stream, lastObservedOffset, endOffset);
+                        finished = true;
+                        return false;
+                    }
+                    if (brokerFilterConfigured && isNearPlannedEndAfterFiltering()) {
+                        LOG.warn("Reached maxWaitMs={} while reading filtered stream '{}'; " +
+                                        "terminating near planned end at lastObservedOffset={} for endOffset={}",
+                                maxWaitMs, stream, lastObservedOffset, endOffset);
+                        finished = true;
+                        return false;
+                    }
+                    if (brokerFilterConfigured && lastObservedOffset >= startOffset) {
+                        LOG.warn("Reached maxWaitMs={} while reading filtered stream '{}'; " +
+                                        "observed offsets in planned range but no further matching records arrived " +
+                                        "(lastObservedOffset={}, planned endOffset={}). Completing split.",
+                                maxWaitMs, stream, lastObservedOffset, endOffset);
+                        finished = true;
+                        return false;
+                    }
+                    if (!options.isFailOnDataLoss() && isPlannedRangeNoLongerReachableDueToDataLoss()) {
+                        LOG.warn("Reached maxWaitMs={} on stream '{}' and planned range [{}, {}) is no longer " +
+                                        "reachable after data loss/recreation; completing split because failOnDataLoss=false",
+                                maxWaitMs, stream, startOffset, endOffset);
+                        finished = true;
+                        return false;
+                    }
+                    if (!options.isFailOnDataLoss()) {
+                        LOG.warn("Reached maxWaitMs={} on stream '{}' with no progress toward planned range [{}, {}); " +
+                                        "completing split because failOnDataLoss=false",
+                                maxWaitMs, stream, startOffset, endOffset);
                         finished = true;
                         return false;
                     }
@@ -392,6 +440,11 @@ final class RabbitMQPartitionReader implements PartitionReader<InternalRow> {
                 && chunkTimestampMillis < options.getStartingTimestamp();
     }
 
+    private boolean isTimestampConfiguredStartingOffset() {
+        return useConfiguredStartingOffset
+                && options.getStartingOffsets() == StartingOffsetsMode.TIMESTAMP;
+    }
+
     private boolean isBrokerFilterConfigured() {
         return options.getFilterValues() != null && !options.getFilterValues().isEmpty();
     }
@@ -418,6 +471,48 @@ final class RabbitMQPartitionReader implements PartitionReader<InternalRow> {
                     stream, e.getMessage());
             return false;
         }
+    }
+
+    private boolean isNearPlannedEndAfterFiltering() {
+        if (endOffset <= 0 || lastObservedOffset < 0) {
+            return false;
+        }
+        // Broker-side filtering can legitimately skip the final offset(s) in [start, end).
+        // If we already observed up to end-2 and no more records arrive within maxWaitMs,
+        // allow bounded reads to complete instead of failing the task.
+        return lastObservedOffset >= endOffset - 2;
+    }
+
+    private boolean isPlannedRangeNoLongerReachableDueToDataLoss() {
+        try {
+            StreamStats stats = environment.queryStreamStats(stream);
+            long first = stats.firstOffset();
+            long tail = stats.committedChunkId();
+            boolean streamWasResetOrTruncated =
+                    tail < startOffset || first > startOffset || (lastObservedOffset >= 0 && tail < lastObservedOffset);
+            return tail < endOffset - 1 && streamWasResetOrTruncated;
+        } catch (Exception e) {
+            LOG.debug("Unable to validate data-loss reachability for stream '{}': {}",
+                    stream, e.getMessage());
+            return false;
+        }
+    }
+
+    private boolean isMissingStreamException(Throwable throwable) {
+        Throwable current = throwable;
+        while (current != null) {
+            if (current instanceof StreamDoesNotExistException) {
+                return true;
+            }
+            String message = current.getMessage();
+            if (message != null && (message.contains("STREAM_DOES_NOT_EXIST")
+                    || message.contains("does not exist")
+                    || message.contains("has no partition streams"))) {
+                return true;
+            }
+            current = current.getCause();
+        }
+        return false;
     }
 
     private long probeLastMessageOffset() {

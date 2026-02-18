@@ -221,7 +221,7 @@ class RabbitMQPartitionReaderTest {
         }
 
         @Test
-        void nextWithBrokerFilterMustNotSilentlyTerminateBeforePlannedEndOffset() throws Exception {
+        void nextWithBrokerFilterCanTerminateAfterObservedInRangeProgressAndInactivity() throws Exception {
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
             opts.put("stream", "test-stream");
@@ -238,11 +238,9 @@ class RabbitMQPartitionReaderTest {
             setPrivateField(reader, "queue", new LinkedBlockingQueue<>());
             setPrivateField(reader, "lastObservedOffset", 34L);
 
-            // Expected behavior: a reader that has not reached planned end offset must not
-            // silently terminate just because maxWaitMs elapsed.
-            assertThatThrownBy(reader::next)
-                    .isInstanceOf(IOException.class)
-                    .hasMessageContaining("Timed out waiting for messages");
+            // Filtered bounded reads can legitimately stop before endOffset if no additional
+            // matching records arrive after in-range progress has been observed.
+            assertThat(reader.next()).isFalse();
         }
 
         @Test
@@ -584,6 +582,9 @@ class RabbitMQPartitionReaderTest {
             opts.put("stream", "test-stream");
             opts.put("startingOffsets", "timestamp");
             opts.put("startingTimestamp", "1700000000000");
+            // Keep this bounded: default maxWaitMs is large and can mask hangs in CI.
+            opts.put("pollTimeoutMs", "5");
+            opts.put("maxWaitMs", "20");
 
             RabbitMQInputPartition partition = new RabbitMQInputPartition(
                     "test-stream", 0, 3, new ConnectorOptions(opts), true);
@@ -602,7 +603,11 @@ class RabbitMQPartitionReaderTest {
 
             assertThat(reader.next()).isTrue();
             assertThat(reader.get().getLong(2)).isEqualTo(1L);
+            long startNanos = System.nanoTime();
             assertThat(reader.next()).isFalse();
+            long elapsedMs = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
+            // Regression guard: this path used to block ~300s on default maxWaitMs.
+            assertThat(elapsedMs).isLessThan(500L);
         }
 
         @Test

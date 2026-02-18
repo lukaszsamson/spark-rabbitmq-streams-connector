@@ -631,7 +631,17 @@ public final class ConnectorOptions implements Serializable {
         if (value != null || options.containsKey(key)) {
             return value;
         }
-        return options.get(key.toLowerCase(Locale.ROOT));
+        String lowerKey = key.toLowerCase(Locale.ROOT);
+        value = options.get(lowerKey);
+        if (value != null || options.containsKey(lowerKey)) {
+            return value;
+        }
+        for (Map.Entry<String, String> entry : options.entrySet()) {
+            if (entry.getKey() != null && entry.getKey().equalsIgnoreCase(key)) {
+                return entry.getValue();
+            }
+        }
+        return null;
     }
 
     private static String getString(Map<String, String> options, String key) {

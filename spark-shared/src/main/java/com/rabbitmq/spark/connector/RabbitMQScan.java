@@ -14,8 +14,13 @@ import org.slf4j.LoggerFactory;
 
 import java.util.*;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 
@@ -29,6 +34,7 @@ import java.lang.reflect.Method;
 final class RabbitMQScan implements Scan {
 
     private static final Logger LOG = LoggerFactory.getLogger(RabbitMQScan.class);
+    private static final long TAIL_PROBE_TIMEOUT_MS = 1_500L;
 
     private final ConnectorOptions options;
     private final StructType schema;
@@ -262,11 +268,39 @@ final class RabbitMQScan implements Scan {
             return options.getEndingOffset();
         }
 
-        // endingOffsets=latest: combine stats-derived tail with a direct last-message probe
-        // to avoid underestimating on older broker/client combinations.
+        // endingOffsets=latest: use the most recent tail we can observe.
+        // Stream stats can lag behind newly published messages, so keep the probe and
+        // take max(statsTail, probedTail). Bound probe latency to avoid planning stalls.
         long statsTail = resolveTailOffset(stats);
-        long probedTail = probeTailOffsetFromLastMessage(env, stream);
+        long probedTail = probeTailOffsetFromLastMessageWithTimeout(
+                env, stream, TAIL_PROBE_TIMEOUT_MS);
         return Math.max(statsTail, probedTail);
+    }
+
+    private long probeTailOffsetFromLastMessageWithTimeout(
+            Environment env, String stream, long timeoutMs) {
+        ExecutorService executor = Executors.newSingleThreadExecutor(r -> {
+            Thread t = new Thread(r, "rabbitmq-scan-tail-probe");
+            t.setDaemon(true);
+            return t;
+        });
+        Future<Long> future = executor.submit(() -> probeTailOffsetFromLastMessage(env, stream));
+        try {
+            return future.get(timeoutMs, TimeUnit.MILLISECONDS);
+        } catch (TimeoutException e) {
+            future.cancel(true);
+            LOG.debug("Tail probe timed out after {} ms for stream '{}'", timeoutMs, stream);
+            return 0;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            future.cancel(true);
+            return 0;
+        } catch (ExecutionException e) {
+            LOG.debug("Tail probe failed for stream '{}': {}", stream, e.getMessage());
+            return 0;
+        } finally {
+            executor.shutdownNow();
+        }
     }
 
     long[] resolveStreamOffsetRangeForTests(Environment env, String stream) {

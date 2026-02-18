@@ -2,6 +2,7 @@ package com.rabbitmq.spark.connector;
 
 import com.rabbitmq.stream.Environment;
 import com.rabbitmq.stream.NoOffsetException;
+import com.rabbitmq.stream.StreamDoesNotExistException;
 import com.rabbitmq.stream.StreamStats;
 import org.apache.spark.sql.connector.read.InputPartition;
 import org.apache.spark.sql.connector.read.PartitionReaderFactory;
@@ -199,13 +200,18 @@ final class RabbitMQMicroBatchStream
 
     @Override
     public void stop() {
-        if (options.isServerSideOffsetTracking(true)
-                && (lastStoredEndOffsets == null || lastStoredEndOffsets.isEmpty())
-                && cachedLatestOffset != null) {
-            // Some Spark execution paths can terminate without invoking commit(end).
-            // Persist a best-effort fallback so broker-side recovery remains functional.
-            persistBrokerOffsets(cachedLatestOffset.getStreamOffsets());
+        // Spark can stop AvailableNow queries after the final processed batch without invoking
+        // source commit for that terminal offset. Persist the latest known end offsets as
+        // best-effort broker metadata before shutting down commit resources.
+        RabbitMQStreamOffset latest = cachedLatestOffset;
+        if (latest != null) {
+            try {
+                persistBrokerOffsets(latest.getStreamOffsets());
+            } catch (Exception e) {
+                LOG.warn("Failed to persist broker offsets during stop()", e);
+            }
         }
+
         brokerCommitExecutor.shutdownNow();
         if (environment != null) {
             try {
@@ -657,9 +663,16 @@ final class RabbitMQMicroBatchStream
             List<String> discovered = SuperStreamPartitionDiscovery.discoverPartitions(
                     getEnvironment(), options.getSuperStream());
             if (discovered.isEmpty()) {
-                throw new IllegalStateException(
-                        "Superstream '" + options.getSuperStream() +
-                                "' has no partition streams");
+                if (options.isFailOnDataLoss()) {
+                    throw new IllegalStateException(
+                            "Superstream '" + options.getSuperStream() +
+                                    "' has no partition streams");
+                }
+                LOG.warn("Superstream '{}' currently has no partition streams; returning empty topology "
+                                + "because failOnDataLoss=false",
+                        options.getSuperStream());
+                streams = List.of();
+                return streams;
             }
 
             if (previous == null) {
@@ -672,13 +685,20 @@ final class RabbitMQMicroBatchStream
             streams = discovered;
         } catch (Exception e) {
             if (previous == null) {
-                throw e;
+                if (options.isFailOnDataLoss()) {
+                    throw e;
+                }
+                LOG.warn("Failed to discover initial topology for superstream '{}'; returning empty topology "
+                                + "because failOnDataLoss=false: {}",
+                        options.getSuperStream(), e.getMessage());
+                streams = List.of();
+                return streams;
             }
             LOG.warn("Failed to refresh superstream '{}' partition streams, using cached topology: {}",
                     options.getSuperStream(), e.getMessage());
             streams = previous;
         }
-        if (streams.isEmpty()) {
+        if (streams.isEmpty() && options.isFailOnDataLoss()) {
             throw new IllegalStateException(
                     "Superstream '" + options.getSuperStream() +
                             "' has no partition streams");
@@ -723,7 +743,7 @@ final class RabbitMQMicroBatchStream
         Environment env = getEnvironment();
         Map<String, Long> tailOffsets = new LinkedHashMap<>();
         for (String stream : streams) {
-            tailOffsets.put(stream, queryStreamTailOffsetForLatest(env, stream));
+            tailOffsets.put(stream, queryStreamTailOffsetForAvailableNow(env, stream));
         }
         return tailOffsets;
     }
@@ -873,6 +893,20 @@ final class RabbitMQMicroBatchStream
         return Math.max(statsTail, probedTail);
     }
 
+    private long queryStreamTailOffsetForAvailableNow(Environment env, String stream) {
+        long statsTail = queryStreamTailOffset(env, stream);
+        long probedTail = probeTailOffsetFromLastMessage(env, stream);
+        return mergeTailOffsetsForAvailableNow(statsTail, probedTail);
+    }
+
+    private long mergeTailOffsetsForAvailableNow(long statsTail, long probedTail) {
+        if (statsTail > 0 && probedTail > 0 && Math.abs(statsTail - probedTail) <= 1) {
+            // Avoid planning a phantom final offset when one source is ahead by exactly 1.
+            return Math.min(statsTail, probedTail);
+        }
+        return Math.max(statsTail, probedTail);
+    }
+
     private long probeTailOffsetFromLastMessageCached(Environment env, String stream) {
         long now = System.currentTimeMillis();
         Long lastProbeAt = probeTailCacheTimestampMs.get(stream);
@@ -991,6 +1025,11 @@ final class RabbitMQMicroBatchStream
         List<Future<?>> futures = new ArrayList<>();
         for (Map.Entry<String, Long> entry : toStore) {
             String stream = entry.getKey();
+            if (!options.isFailOnDataLoss() && isMissingStream(env, stream)) {
+                LOG.debug("Skipping broker offset store for deleted stream '{}' (failOnDataLoss=false)",
+                        stream);
+                continue;
+            }
             long lastProcessed = entry.getValue() - 1;
             futures.add(brokerCommitExecutor.submit(() -> {
                 try {
@@ -1005,12 +1044,14 @@ final class RabbitMQMicroBatchStream
         }
 
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(COMMIT_TIMEOUT_SECONDS);
+        boolean cancelOutstanding = false;
         for (Future<?> f : futures) {
             long remaining = deadline - System.nanoTime();
             if (remaining <= 0) {
                 LOG.warn("Broker offset commit timed out after {}s " +
                                 "(best-effort, Spark checkpoint is source of truth)",
                         COMMIT_TIMEOUT_SECONDS);
+                cancelOutstanding = true;
                 break;
             }
             try {
@@ -1019,15 +1060,35 @@ final class RabbitMQMicroBatchStream
                 LOG.warn("Broker offset commit timed out after {}s " +
                                 "(best-effort, Spark checkpoint is source of truth)",
                         COMMIT_TIMEOUT_SECONDS);
+                cancelOutstanding = true;
                 break;
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
+                cancelOutstanding = true;
                 break;
             } catch (ExecutionException e) {
                 // Already logged in task
             }
         }
+        if (cancelOutstanding) {
+            for (Future<?> f : futures) {
+                if (!f.isDone()) {
+                    f.cancel(true);
+                }
+            }
+        }
 
         lastStoredEndOffsets = new LinkedHashMap<>(endOffsets);
+    }
+
+    private boolean isMissingStream(Environment env, String stream) {
+        try {
+            env.queryStreamStats(stream);
+            return false;
+        } catch (StreamDoesNotExistException e) {
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
     }
 }

@@ -25,6 +25,7 @@ import com.rabbitmq.stream.NoOffsetException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -45,6 +46,7 @@ abstract class AbstractRabbitMQIT {
 
     static final int STREAM_PORT = 5552;
     static final int STREAM_TLS_PORT = 5551;
+    static final String ERLANG_COOKIE = "SPARKLINGRABBITINTEGRATIONCOOKIE1234567890";
 
     /**
      * Shared RabbitMQ container with stream plugin enabled.
@@ -53,6 +55,15 @@ abstract class AbstractRabbitMQIT {
     @Container
     static final RabbitMQContainer RABBIT = new RabbitMQContainer(
             DockerImageName.parse("rabbitmq:4.0-management"))
+            .withTmpFs(Map.of("/var/lib/rabbitmq", "rw,noexec,nosuid,size=512m"))
+            .withCreateContainerCmdModifier(cmd -> cmd.withEntrypoint(
+                    "bash",
+                    "-lc",
+                    "set -euo pipefail; "
+                            + "echo '" + ERLANG_COOKIE + "' > /var/lib/rabbitmq/.erlang.cookie; "
+                            + "chmod 600 /var/lib/rabbitmq/.erlang.cookie; "
+                            + "chown rabbitmq:rabbitmq /var/lib/rabbitmq/.erlang.cookie; "
+                            + "exec /usr/local/bin/docker-entrypoint.sh rabbitmq-server"))
             .withPluginsEnabled("rabbitmq_stream")
             .withCopyFileToContainer(
                     MountableFile.forClasspathResource("rabbitmq/rabbitmq.conf"),
@@ -391,6 +402,55 @@ abstract class AbstractRabbitMQIT {
         }
         LOG.warn("Stream '{}' was not truncated within {}ms", stream, maxWaitMs);
         return -1;
+    }
+
+    /**
+     * Wait until all streams are truncated (first offset > 0) within one shared timeout window.
+     * Returns first offsets for each stream (-1 for streams that did not truncate in time).
+     */
+    Map<String, Long> waitForTruncationAll(List<String> streams, long maxWaitMs) {
+        java.util.LinkedHashMap<String, Long> firstOffsets = new java.util.LinkedHashMap<>();
+        for (String stream : streams) {
+            firstOffsets.put(stream, -1L);
+        }
+
+        long deadline = System.currentTimeMillis() + maxWaitMs;
+        while (System.currentTimeMillis() < deadline) {
+            boolean allTruncated = true;
+            for (String stream : streams) {
+                if (firstOffsets.get(stream) > 0) {
+                    continue;
+                }
+                try {
+                    long firstOffset = testEnv.queryStreamStats(stream).firstOffset();
+                    if (firstOffset > 0) {
+                        LOG.info("Stream '{}' truncated, firstOffset={}", stream, firstOffset);
+                        firstOffsets.put(stream, firstOffset);
+                    } else {
+                        allTruncated = false;
+                    }
+                } catch (Exception e) {
+                    allTruncated = false;
+                    LOG.debug("Error querying stats for '{}': {}", stream, e.getMessage());
+                }
+            }
+            if (allTruncated) {
+                return firstOffsets;
+            }
+            try {
+                Thread.sleep(200);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+
+        for (Map.Entry<String, Long> entry : firstOffsets.entrySet()) {
+            if (entry.getValue() <= 0) {
+                LOG.warn("Stream '{}' was not truncated within {}ms", entry.getKey(), maxWaitMs);
+            }
+        }
+        return firstOffsets;
     }
 
     /**

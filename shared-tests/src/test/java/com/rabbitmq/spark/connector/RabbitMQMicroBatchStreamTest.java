@@ -797,7 +797,7 @@ class RabbitMQMicroBatchStreamTest {
     class CommitAndStopBehavior {
 
         @Test
-        void stopDoesNotPersistCachedOffsetsWhenCommitNotCalled() throws Exception {
+        void stopPersistsCachedOffsetsWhenCommitNotCalled() throws Exception {
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
             opts.put("stream", "test-stream");
@@ -810,7 +810,7 @@ class RabbitMQMicroBatchStreamTest {
 
             stream.stop();
 
-            assertThat(env.recordedOffsets).isEmpty();
+            assertThat(env.recordedOffsets).containsExactly(Map.entry("test-stream", 9L));
         }
 
         @Test
