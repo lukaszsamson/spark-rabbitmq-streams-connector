@@ -1,6 +1,7 @@
 package com.rabbitmq.spark.connector;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.BeforeEach;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -9,6 +10,11 @@ import static org.assertj.core.api.Assertions.assertThat;
  * without requiring a broker.
  */
 class MessageSizeTrackerTest {
+
+    @BeforeEach
+    void resetTracker() {
+        MessageSizeTracker.drainAverage(1);
+    }
 
     @Test
     void recordAccumulatesBytesAndRecords() {

@@ -9,6 +9,7 @@ import com.rabbitmq.stream.ProducerBuilder;
 import com.rabbitmq.stream.StreamCreator;
 import com.rabbitmq.stream.StreamStats;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -64,6 +65,7 @@ class StoredOffsetLookupTest {
                     StoredOffsetLookup.lookupWithDetails(env, "c", java.util.List.of("s1"));
 
             assertThat(result.getOffsets()).isEmpty();
+            assertThat(result.getFailedStreams()).isEmpty();
         }
 
         @Test
@@ -103,12 +105,13 @@ class StoredOffsetLookupTest {
 
         @Test
         void directLocatorPathPreferredWhenAvailable() {
-            Environment env = new LocatorEnvironment(Map.of(
+            DualPathEnvironment env = new DualPathEnvironment(Map.of(
                     "s1", LocatorResponse.ok(5L)
             ));
             StoredOffsetLookup.LookupResult result =
                     StoredOffsetLookup.lookupWithDetails(env, "c", java.util.List.of("s1"));
             assertThat(result.getOffsets()).containsEntry("s1", 6L);
+            assertThat(env.consumerBuilderCalls.get()).isZero();
         }
 
         @Test
@@ -116,9 +119,8 @@ class StoredOffsetLookupTest {
             Environment env = new LocatorEnvironment(Map.of(
                     "s1", LocatorResponse.noOffset()
             ));
-            StoredOffsetLookup.LookupResult result =
-                    StoredOffsetLookup.lookupWithDetails(env, "c", java.util.List.of("s1"));
-            assertThat(result.getOffsets()).isEmpty();
+            Map<String, Long> result = StoredOffsetLookup.lookup(env, "c", java.util.List.of("s1"));
+            assertThat(result).isEmpty();
         }
 
         @Test
@@ -129,6 +131,8 @@ class StoredOffsetLookupTest {
             StoredOffsetLookup.LookupResult result =
                     StoredOffsetLookup.lookupWithDetails(env, "c", java.util.List.of("s1"));
             assertThat(result.getFailedStreams()).containsExactly("s1");
+            assertThat(result.hasFailures()).isTrue();
+            assertThat(result.getOffsets()).isEmpty();
         }
 
         @Test
@@ -147,17 +151,16 @@ class StoredOffsetLookupTest {
         }
 
         @Test
-        void lookupWithDetailsReportsFailuresInMessage() {
+        void lookupOmitsFailedStreamsFromOffsetsMap() {
             Environment env = new LocatorEnvironment(Map.of(
                     "s1", LocatorResponse.ok(1L),
                     "s2", LocatorResponse.error((short) 3)
             ));
 
-            StoredOffsetLookup.LookupResult result =
-                    StoredOffsetLookup.lookupWithDetails(env, "c", java.util.List.of("s1", "s2"));
+            Map<String, Long> result = StoredOffsetLookup.lookup(env, "c", java.util.List.of("s1", "s2"));
 
-            assertThat(result.getOffsets()).containsEntry("s1", 2L);
-            assertThat(result.getFailedStreams()).containsExactly("s2");
+            assertThat(result).containsEntry("s1", 2L);
+            assertThat(result).doesNotContainKey("s2");
         }
 
         @Test
@@ -265,6 +268,65 @@ class StoredOffsetLookupTest {
 
         @Override
         public ConsumerBuilder consumerBuilder() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void close() {
+        }
+    }
+
+    private static final class DualPathEnvironment implements Environment {
+        private final Map<String, LocatorResponse> responses;
+        private final AtomicInteger consumerBuilderCalls = new AtomicInteger();
+
+        private DualPathEnvironment(Map<String, LocatorResponse> responses) {
+            this.responses = responses;
+        }
+
+        @SuppressWarnings("unused")
+        public Object locator() {
+            return new Locator(responses);
+        }
+
+        @Override
+        public ConsumerBuilder consumerBuilder() {
+            consumerBuilderCalls.incrementAndGet();
+            return new FixedOffsetConsumerBuilder(99L);
+        }
+
+        @Override
+        public StreamCreator streamCreator() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void deleteStream(String stream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void deleteSuperStream(String superStream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public StreamStats queryStreamStats(String stream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void storeOffset(String reference, String stream, long offset) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public boolean streamExists(String stream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public ProducerBuilder producerBuilder() {
             throw new UnsupportedOperationException();
         }
 

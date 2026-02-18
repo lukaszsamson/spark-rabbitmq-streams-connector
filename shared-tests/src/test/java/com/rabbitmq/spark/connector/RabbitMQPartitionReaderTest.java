@@ -264,7 +264,9 @@ class RabbitMQPartitionReaderTest {
             setPrivateField(reader, "consumer", new NoopConsumer());
 
             assertThat(reader.next()).isTrue();
+            assertThat(reader.get().getLong(2)).isEqualTo(1L);
             assertThat(reader.next()).isTrue();
+            assertThat(reader.get().getLong(2)).isEqualTo(2L);
             assertThat(reader.next()).isFalse();
         }
 
@@ -409,7 +411,7 @@ class RabbitMQPartitionReaderTest {
             var metrics = reader.currentMetricsValues();
             assertThat(metrics[0].value()).isEqualTo(3L);
             assertThat(metrics[1].value()).isEqualTo(6L);
-            assertThat(metrics[2].value()).isGreaterThan(0L);
+            assertThat(metrics[2].value()).isGreaterThanOrEqualTo(5L);
         }
 
         @Test
@@ -636,6 +638,20 @@ class RabbitMQPartitionReaderTest {
             OffsetSpecification resolved = resolveSubscriptionOffsetSpec(
                     reader, OffsetSpecification.first(), OffsetSpecification.offset(0));
             assertThat(resolved).isEqualTo(OffsetSpecification.offset(10));
+        }
+
+        @Test
+        void resolveSubscriptionOffsetSpecFallsBackToConfiguredOffsetWhenNoProgress() throws Exception {
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 0, 100, minimalOptions());
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
+
+            setPrivateField(reader, "lastEmittedOffset", -1L);
+            setPrivateField(reader, "lastObservedOffset", -1L);
+
+            OffsetSpecification resolved = resolveSubscriptionOffsetSpec(
+                    reader, null, OffsetSpecification.offset(7));
+            assertThat(resolved).isEqualTo(OffsetSpecification.offset(7));
         }
 
         @Test

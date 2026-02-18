@@ -240,9 +240,13 @@ class EnvironmentPoolTest {
             putEntry(key, entry);
 
             Environment first = pool.acquire(options);
+            Environment second = pool.acquire(options);
             assertThat(first).isSameAs(env);
-            assertThat(getRefCount(entry)).isEqualTo(2);
+            assertThat(second).isSameAs(env);
+            assertThat(getRefCount(entry)).isEqualTo(3);
 
+            pool.release(options);
+            assertThat(getRefCount(entry)).isEqualTo(2);
             pool.release(options);
             assertThat(getRefCount(entry)).isEqualTo(1);
             assertThat((Object) getEvictionTask(entry)).isNull();
@@ -261,7 +265,12 @@ class EnvironmentPoolTest {
             putEntry(key, entry);
 
             Environment first = pool.acquire(options);
+            pool.release(options);
+            assertThat(getRefCount(entry)).isEqualTo(1);
+
+            Environment reacquired = pool.acquire(options);
             assertThat(first).isSameAs(env);
+            assertThat(reacquired).isSameAs(env);
             assertThat(getRefCount(entry)).isEqualTo(2);
 
             pool.release(options);

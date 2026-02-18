@@ -16,7 +16,11 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.util.*;
@@ -310,6 +314,11 @@ class RabbitMQWriteTest {
             RabbitMQWriterCommitMessage msg = new RabbitMQWriterCommitMessage(0, 1, 10, 500);
             assertThat(msg).isInstanceOf(WriterCommitMessage.class);
             assertThat(msg).isInstanceOf(java.io.Serializable.class);
+            RabbitMQWriterCommitMessage restored = serializeRoundTrip(msg);
+            assertThat(restored.getPartitionId()).isEqualTo(0);
+            assertThat(restored.getTaskId()).isEqualTo(1);
+            assertThat(restored.getRecordsWritten()).isEqualTo(10);
+            assertThat(restored.getBytesWritten()).isEqualTo(500);
         }
     }
 
@@ -326,6 +335,8 @@ class RabbitMQWriteTest {
                     minimalSinkOptions(), minimalSinkSchema());
             assertThat(factory).isInstanceOf(java.io.Serializable.class);
             assertThat(factory).isInstanceOf(DataWriterFactory.class);
+            Object restored = serializeRoundTrip(factory);
+            assertThat(restored).isInstanceOf(RabbitMQDataWriterFactory.class);
         }
 
         @Test
@@ -504,7 +515,7 @@ class RabbitMQWriteTest {
         }
 
         @Test
-        void writeAcceptsCustomRoutingStrategyWithoutRoutingKey() throws Exception {
+        void writeWithoutRoutingKeyDoesNotInvokeCustomRoutingStrategy() throws Exception {
             TestRoutingStrategy.invoked = false;
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
@@ -576,6 +587,9 @@ class RabbitMQWriteTest {
             InternalRow row = new GenericInternalRow(new Object[]{"x".getBytes()});
             firstAttempt.write(row);
             secondAttempt.write(row);
+
+            assertThat(builder.activeProducerNames).contains("dedup-p2-t7", "dedup-p2-t8");
+            assertThat(builder.activeProducerNames).hasSize(2);
         }
 
         @Test
@@ -699,14 +713,14 @@ class RabbitMQWriteTest {
         void metricsIncludePublishConfirmsAndLatencyOnSuccessfulSend() throws Exception {
             RabbitMQDataWriter writer = new RabbitMQDataWriter(
                     minimalSinkOptions(), minimalSinkSchema(), 0, 1, -1);
-            setPrivateField(writer, "producer", new NoopProducer());
+            setPrivateField(writer, "producer", new SlowConfirmProducer(10));
 
             writer.write(new GenericInternalRow(new Object[]{"x".getBytes()}));
 
             Map<String, Long> metrics = metricsByName(writer.currentMetricsValues());
             assertThat(metrics.get("publishConfirms")).isEqualTo(1L);
             assertThat(metrics.get("publishErrors")).isEqualTo(0L);
-            assertThat(metrics.get("writeLatencyMs")).isGreaterThanOrEqualTo(0L);
+            assertThat(metrics.get("writeLatencyMs")).isGreaterThanOrEqualTo(5L);
         }
 
         @Test
@@ -894,6 +908,22 @@ class RabbitMQWriteTest {
         return byName;
     }
 
+    @SuppressWarnings("unchecked")
+    private static <T> T serializeRoundTrip(T value) {
+        try {
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            try (ObjectOutputStream oos = new ObjectOutputStream(out)) {
+                oos.writeObject(value);
+            }
+            try (ObjectInputStream ois = new ObjectInputStream(
+                    new ByteArrayInputStream(out.toByteArray()))) {
+                return (T) ois.readObject();
+            }
+        } catch (Exception e) {
+            throw new AssertionError("Serialization round-trip failed", e);
+        }
+    }
+
     /**
      * Minimal LogicalWriteInfo implementation for testing.
      */
@@ -972,6 +1002,42 @@ class RabbitMQWriteTest {
                          com.rabbitmq.stream.ConfirmationHandler confirmationHandler) {
             confirmationHandler.handle(new com.rabbitmq.stream.ConfirmationStatus(
                     message, confirmSuccess, (short) (confirmSuccess ? 0 : 1)));
+        }
+
+        @Override
+        public void close() {
+        }
+    }
+
+    private static final class SlowConfirmProducer implements com.rabbitmq.stream.Producer {
+        private static final com.rabbitmq.stream.codec.QpidProtonCodec CODEC =
+                new com.rabbitmq.stream.codec.QpidProtonCodec();
+        private final long delayMs;
+
+        private SlowConfirmProducer(long delayMs) {
+            this.delayMs = delayMs;
+        }
+
+        @Override
+        public com.rabbitmq.stream.MessageBuilder messageBuilder() {
+            return CODEC.messageBuilder();
+        }
+
+        @Override
+        public long getLastPublishingId() {
+            return 0L;
+        }
+
+        @Override
+        public void send(com.rabbitmq.stream.Message message,
+                         com.rabbitmq.stream.ConfirmationHandler confirmationHandler) {
+            try {
+                Thread.sleep(delayMs);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException(e);
+            }
+            confirmationHandler.handle(new com.rabbitmq.stream.ConfirmationStatus(message, true, (short) 0));
         }
 
         @Override

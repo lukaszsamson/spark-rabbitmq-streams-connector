@@ -1,6 +1,7 @@
 package com.rabbitmq.spark.connector;
 
 import org.apache.spark.sql.connector.read.InputPartition;
+import org.apache.spark.sql.connector.read.PartitionReaderFactory;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.Metadata;
 import org.apache.spark.sql.types.StructField;
@@ -282,8 +283,13 @@ class RabbitMQBatchTest {
         @Test
         void createReaderFactoryReturnsNonNull() {
             RabbitMQBatch batch = new RabbitMQBatch(baseOptions(), SCHEMA, Map.of());
-            assertThat(batch.createReaderFactory()).isNotNull();
-            assertThat(batch.createReaderFactory()).isInstanceOf(RabbitMQPartitionReaderFactory.class);
+            PartitionReaderFactory factory = batch.createReaderFactory();
+            assertThat(factory).isInstanceOf(RabbitMQPartitionReaderFactory.class);
+
+            RabbitMQInputPartition partition = new RabbitMQInputPartition("test-stream", 0, 1, baseOptions());
+            var reader = factory.createReader(partition);
+            assertThat(reader).isInstanceOf(RabbitMQPartitionReader.class);
+            assertThat(reader.currentMetricsValues()).hasSize(3);
         }
     }
 
