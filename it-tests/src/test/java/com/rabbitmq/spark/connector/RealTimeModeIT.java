@@ -120,8 +120,11 @@ class RealTimeModeIT extends AbstractRabbitMQIT {
                 .start();
 
         try {
-            // Wait for query to start, then publish messages
-            Thread.sleep(3000);
+            long startupDeadline = System.currentTimeMillis() + 30_000;
+            while (query.lastProgress() == null && System.currentTimeMillis() < startupDeadline) {
+                Thread.sleep(100);
+            }
+            assertThat(query.lastProgress()).isNotNull();
             publishMessages(sourceStream, 30);
 
             // Wait for messages to be processed
@@ -376,7 +379,7 @@ class RealTimeModeIT extends AbstractRabbitMQIT {
             query.stop();
         }
 
-        assertThat(COLLECTED_ROWS.size()).isGreaterThanOrEqualTo(40);
+        assertThat(COLLECTED_ROWS.size()).isEqualTo(40);
 
         // Verify broker stored the offset
         long storedOffset = queryStoredOffset(consumerName, sourceStream);

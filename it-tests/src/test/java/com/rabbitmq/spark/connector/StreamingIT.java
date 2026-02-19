@@ -277,8 +277,11 @@ class StreamingIT extends AbstractRabbitMQIT {
                 .map(msg -> new String(msg.getBodyAsBinary()))
                 .sorted()
                 .toList();
-
-        assertThat(bodies).contains("streaming-write-0", "streaming-write-24");
+        List<String> expected = new ArrayList<>();
+        for (int i = 0; i < 25; i++) {
+            expected.add("streaming-write-" + i);
+        }
+        assertThat(bodies).containsExactlyInAnyOrderElementsOf(expected);
     }
 
     // ---- IT-SINK-UPDATE-001: stateless update mode matches append mode ----
@@ -2055,6 +2058,7 @@ class StreamingIT extends AbstractRabbitMQIT {
         Thread.sleep(400);
 
         AtomicInteger batchCount = new AtomicInteger(0);
+        List<Long> batchSizes = new ArrayList<>();
 
         StreamingQuery query = spark.readStream()
                 .format("rabbitmq_streams")
@@ -2068,7 +2072,10 @@ class StreamingIT extends AbstractRabbitMQIT {
                 .load()
                 .writeStream()
                 .foreachBatch((org.apache.spark.api.java.function.VoidFunction2<Dataset<Row>, Long>)
-                        (batch, batchId) -> batchCount.incrementAndGet())
+                        (batch, batchId) -> {
+                            batchCount.incrementAndGet();
+                            batchSizes.add(batch.count());
+                        })
                 .option("checkpointLocation", checkpointDir.toString())
                 .trigger(Trigger.AvailableNow())
                 .start();
@@ -2076,6 +2083,8 @@ class StreamingIT extends AbstractRabbitMQIT {
         query.awaitTermination(120_000);
 
         assertThat(batchCount.get()).isEqualTo(3);
+        assertThat(batchSizes).hasSize(3);
+        assertThat(batchSizes).allMatch(count -> count > 0L);
     }
 
     // ---- IT-RL-006: maxRecordsPerTrigger=Long.MAX_VALUE does not overflow ----
@@ -2314,7 +2323,7 @@ class StreamingIT extends AbstractRabbitMQIT {
         double avgLag = Double.parseDouble(metrics.get("avgOffsetsBehindLatest"));
 
         assertThat(minLag).isGreaterThanOrEqualTo(0);
-        assertThat(maxLag).isGreaterThanOrEqualTo(0);
+        assertThat(maxLag).isGreaterThan(0);
         assertThat(avgLag).isGreaterThanOrEqualTo(0.0);
         assertThat(minLag).isLessThanOrEqualTo(maxLag);
     }

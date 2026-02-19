@@ -16,6 +16,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Files;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -170,8 +171,11 @@ class BatchReadIT extends AbstractRabbitMQIT {
                 .map(row -> new String((byte[]) row.getAs("value")))
                 .sorted()
                 .toList();
-
-        assertThat(values).contains("hello-0", "hello-1", "hello-9");
+        List<String> expected = new ArrayList<>();
+        for (int i = 0; i < 10; i++) {
+            expected.add("hello-" + i);
+        }
+        assertThat(values).containsExactlyInAnyOrderElementsOf(expected);
     }
 
     @Test

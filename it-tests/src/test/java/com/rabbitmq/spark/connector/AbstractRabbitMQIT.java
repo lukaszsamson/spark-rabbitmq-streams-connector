@@ -348,7 +348,11 @@ abstract class AbstractRabbitMQIT {
                 .build();
 
         try {
-            latch.await(30, TimeUnit.SECONDS);
+            boolean complete = latch.await(30, TimeUnit.SECONDS);
+            if (!complete) {
+                LOG.warn("Timed out waiting to consume {} messages from stream '{}'; consumed {}",
+                        count, stream, messages.size());
+            }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         } finally {

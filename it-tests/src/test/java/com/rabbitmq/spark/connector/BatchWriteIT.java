@@ -72,7 +72,11 @@ class BatchWriteIT extends AbstractRabbitMQIT {
                 .sorted()
                 .toList();
 
-        assertThat(bodies).contains("write-test-0", "write-test-1", "write-test-19");
+        List<String> expected = new ArrayList<>();
+        for (int i = 0; i < 20; i++) {
+            expected.add("write-test-" + i);
+        }
+        assertThat(bodies).containsExactlyInAnyOrderElementsOf(expected);
     }
 
     // ---- IT-SINK-002: publisherConfirmTimeoutMs timeout ----
@@ -381,8 +385,8 @@ class BatchWriteIT extends AbstractRabbitMQIT {
                         "com.rabbitmq.spark.connector.TestAddressResolver")
                 .save();
 
-        assertThat(TestObservationCollectorFactory.prePublishCount()).isGreaterThanOrEqualTo(12);
-        assertThat(TestObservationCollectorFactory.publishedCount()).isGreaterThanOrEqualTo(12);
+        assertThat(TestObservationCollectorFactory.prePublishCount()).isEqualTo(12);
+        assertThat(TestObservationCollectorFactory.publishedCount()).isEqualTo(12);
     }
 
     @Test
@@ -415,7 +419,11 @@ class BatchWriteIT extends AbstractRabbitMQIT {
                 .sorted()
                 .toList();
 
-        assertThat(values).contains("roundtrip-0", "roundtrip-15", "roundtrip-29");
+        List<String> expected = new ArrayList<>();
+        for (int i = 0; i < 30; i++) {
+            expected.add("roundtrip-" + i);
+        }
+        assertThat(values).containsExactlyInAnyOrderElementsOf(expected);
     }
 
     @Test
@@ -517,7 +525,9 @@ class BatchWriteIT extends AbstractRabbitMQIT {
                         .option("addressResolverClass",
                                 "com.rabbitmq.spark.connector.TestAddressResolver")
                         .save()
-        ).isInstanceOf(SparkException.class);
+        ).isInstanceOf(SparkException.class)
+                .satisfies(ex -> assertThat(ex.toString())
+                        .containsAnyOf("does not exist", "STREAM_NOT_AVAILABLE"));
     }
 
     @Test
@@ -646,7 +656,11 @@ class BatchWriteIT extends AbstractRabbitMQIT {
                 .map(row -> new String((byte[]) row.getAs("value")))
                 .sorted()
                 .toList();
-        assertThat(values).contains("compressed-0", "compressed-1", "compressed-49");
+        List<String> expected = new ArrayList<>();
+        for (int i = 0; i < 50; i++) {
+            expected.add("compressed-" + i);
+        }
+        assertThat(values).containsExactlyInAnyOrderElementsOf(expected);
     }
 
     // ---- IT-SINK-006: producerName deduplication ----
@@ -696,7 +710,12 @@ class BatchWriteIT extends AbstractRabbitMQIT {
                 .map(msg -> new String(msg.getBodyAsBinary()))
                 .sorted()
                 .toList();
-        assertThat(values).contains("first-0", "first-19", "second-0", "second-19");
+        List<String> expected = new ArrayList<>();
+        for (int i = 0; i < 20; i++) {
+            expected.add("first-" + i);
+            expected.add("second-" + i);
+        }
+        assertThat(values).containsExactlyInAnyOrderElementsOf(expected);
     }
 
     // ---- P1: dedup IT coverage for retries/restarts ----
@@ -921,9 +940,8 @@ class BatchWriteIT extends AbstractRabbitMQIT {
             }
         }
 
-        assertThat(metrics.stream().distinct().toList())
-                .as("DataFrame metrics should be present after write")
-                .isNotEmpty();
+        assertThat(metrics)
+                .contains("number of output rows");
     }
 
     @Test
