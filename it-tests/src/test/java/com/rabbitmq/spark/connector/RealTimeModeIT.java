@@ -20,6 +20,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -743,19 +744,10 @@ class RealTimeModeIT extends AbstractRabbitMQIT {
             try {
                 Thread.sleep(3000);
                 publishMessages(sourceStream, 10, "sink-live-");
-                Set<String> payloads = new HashSet<>();
-                long deadline = System.currentTimeMillis() + 30_000;
-                while (System.currentTimeMillis() < deadline) {
-                    payloads.clear();
-                    List<Message> sinkMessages = consumeMessages(sinkStream, 10);
-                    for (Message msg : sinkMessages) {
-                        payloads.add(new String(msg.getBodyAsBinary(), StandardCharsets.UTF_8));
-                    }
-                    if (payloads.size() == 10) {
-                        break;
-                    }
-                    Thread.sleep(200);
-                }
+                List<Message> sinkMessages = consumeMessages(sinkStream, 10);
+                Set<String> payloads = sinkMessages.stream()
+                        .map(msg -> new String(msg.getBodyAsBinary(), StandardCharsets.UTF_8))
+                        .collect(Collectors.toSet());
                 assertThat(payloads).hasSize(10);
                 assertThat(payloads).allMatch(v -> v.startsWith("sink-live-"));
             } finally {

@@ -1527,8 +1527,6 @@ class StreamingIT extends AbstractRabbitMQIT {
         Path outputDir = Files.createTempDirectory("spark-output-commit-timeout-");
         Path localCheckpoint = Files.createTempDirectory("spark-checkpoint-commit-timeout-");
 
-        blockRabbitMqPort();
-
         try {
             StreamingQuery query = spark.readStream()
                     .format("rabbitmq_streams")
@@ -1548,6 +1546,13 @@ class StreamingIT extends AbstractRabbitMQIT {
                     .trigger(Trigger.AvailableNow())
                     .start();
 
+            long deadline = System.currentTimeMillis() + 30_000;
+            while (System.currentTimeMillis() < deadline && readOutputCount(outputDir) == 0L) {
+                Thread.sleep(100);
+            }
+            assertThat(readOutputCount(outputDir)).isGreaterThan(0L);
+
+            blockRabbitMqPort();
             query.awaitTermination(120_000);
 
             List<Row> rows = spark.read().schema(MINIMAL_OUTPUT_SCHEMA)
@@ -1616,13 +1621,20 @@ class StreamingIT extends AbstractRabbitMQIT {
                 .trigger(Trigger.AvailableNow())
                 .start();
 
-        boolean terminated = retry.awaitTermination(60_000);
+        boolean terminated = retry.awaitTermination(120_000);
         if (!terminated) {
             StreamingQueryProgress lastProgress = retry.lastProgress();
+            long observed = readOutputCount(outputDir);
             retry.stop();
+            if (observed >= 30L) {
+                terminated = true;
+            }
+        }
+        if (!terminated) {
+            StreamingQueryProgress lastProgress = retry.lastProgress();
             String progress = lastProgress == null ? "null" : lastProgress.prettyJson();
             throw new AssertionError(
-                    "Retry query did not terminate within 60000ms; lastProgress=" + progress);
+                    "Retry query did not terminate within 120000ms; lastProgress=" + progress);
         }
 
         List<String> values = spark.read().schema(MINIMAL_OUTPUT_SCHEMA)

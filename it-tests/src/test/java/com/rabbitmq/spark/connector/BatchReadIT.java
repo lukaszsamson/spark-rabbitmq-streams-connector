@@ -691,7 +691,7 @@ class BatchReadIT extends AbstractRabbitMQIT {
             deleteStream(stream);
 
             assertThatThrownBy(() -> future.get(20, TimeUnit.SECONDS))
-                    .isInstanceOfAny(ExecutionException.class, java.util.concurrent.TimeoutException.class)
+                    .isInstanceOf(ExecutionException.class)
                     .satisfies(ex -> {
                         if (ex instanceof ExecutionException ee) {
                             String message = ee.getCause() != null
@@ -700,8 +700,7 @@ class BatchReadIT extends AbstractRabbitMQIT {
                             assertThat(message).isNotNull();
                             assertThat(
                                     message.contains("closed before reaching target end offset")
-                                            || message.contains("does not exist")
-                                            || message.contains("Timed out waiting for messages"))
+                                            || message.contains("does not exist"))
                                     .isTrue();
                         }
                     });
