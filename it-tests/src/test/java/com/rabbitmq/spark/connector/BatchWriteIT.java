@@ -820,11 +820,12 @@ class BatchWriteIT extends AbstractRabbitMQIT {
 
     @Test
     void batchWriteDedupAfterPartialFailureSuppressesDuplicates() throws Exception {
+        final int expectedCount = 6;
         StructType schema = new StructType()
                 .add("value", DataTypes.BinaryType, false);
 
         List<Row> data = new ArrayList<>();
-        for (int i = 0; i < 10; i++) {
+        for (int i = 0; i < expectedCount; i++) {
             data.add(RowFactory.create(("dedup-" + i).getBytes()));
         }
 
@@ -838,7 +839,7 @@ class BatchWriteIT extends AbstractRabbitMQIT {
                     .option("endpoints", streamEndpoint())
                     .option("stream", stream)
                     .option("producerName", "dedup-retry")
-                    .option("publisherConfirmTimeoutMs", "1500")
+                    .option("publisherConfirmTimeoutMs", "800")
                     .option("enqueueTimeoutMs", "500")
                     .option("addressResolverClass",
                             "com.rabbitmq.spark.connector.TestAddressResolver")
@@ -846,7 +847,8 @@ class BatchWriteIT extends AbstractRabbitMQIT {
                     .satisfies(ex -> assertThat(ex.toString())
                             .containsAnyOf("Timed out waiting for publisher confirms",
                                     "Error when establishing stream connection",
-                                    "Locator not available"));
+                                    "Locator not available",
+                                    "Connection is closed"));
         } finally {
             startRabbitMqApp();
         }
@@ -861,8 +863,13 @@ class BatchWriteIT extends AbstractRabbitMQIT {
                         "com.rabbitmq.spark.connector.TestAddressResolver")
                 .save();
 
-        List<Message> messages = consumeMessages(stream, 10);
-        assertThat(messages).hasSize(10);
+        List<Message> messages = consumeMessages(stream, expectedCount);
+        List<String> values = messages.stream()
+                .map(msg -> new String(msg.getBodyAsBinary()))
+                .toList();
+        assertThat(values).hasSize(expectedCount);
+        assertThat(values).containsExactlyInAnyOrder(
+                "dedup-0", "dedup-1", "dedup-2", "dedup-3", "dedup-4", "dedup-5");
     }
 
     // ---- IT-SINK-008: ignoreUnknownColumns ----

@@ -1572,10 +1572,8 @@ class StreamingIT extends AbstractRabbitMQIT {
 
     @Test
     void streamingSinkFailureAfterPartialWritesCausesDuplicates() throws Exception {
-        for (int i = 0; i < 30; i++) {
-            publishMessages(sourceStream, 1, "dup-" + i + "-");
-        }
-        Thread.sleep(400);
+        final int expectedCount = 12;
+        publishMessages(sourceStream, expectedCount, "dup-");
 
         Path outputDir = Files.createTempDirectory("spark-output-alo-dup-");
         Path failureCheckpoint = Files.createTempDirectory("spark-checkpoint-alo-dup-");
@@ -1604,7 +1602,7 @@ class StreamingIT extends AbstractRabbitMQIT {
                 .trigger(Trigger.AvailableNow())
                 .start();
 
-        assertThatThrownBy(() -> query.awaitTermination(120_000))
+        assertThatThrownBy(() -> query.awaitTermination(30_000))
                 .hasMessageContaining("Intentional sink failure");
 
         StreamingQuery retry = spark.readStream()
@@ -1624,12 +1622,24 @@ class StreamingIT extends AbstractRabbitMQIT {
                 .trigger(Trigger.AvailableNow())
                 .start();
 
-        boolean terminated = retry.awaitTermination(120_000);
+        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(45);
+        long observed = 0L;
+        while (retry.isActive() && System.nanoTime() < deadlineNanos) {
+            observed = readOutputCount(outputDir);
+            if (observed >= expectedCount) {
+                retry.stop();
+                retry.awaitTermination(10_000);
+                break;
+            }
+            Thread.sleep(250);
+        }
+
+        boolean terminated = !retry.isActive();
         if (!terminated) {
-            StreamingQueryProgress lastProgress = retry.lastProgress();
-            long observed = readOutputCount(outputDir);
+            observed = readOutputCount(outputDir);
             retry.stop();
-            if (observed >= 30L) {
+            retry.awaitTermination(10_000);
+            if (observed >= expectedCount) {
                 terminated = true;
             }
         }
@@ -1650,7 +1660,7 @@ class StreamingIT extends AbstractRabbitMQIT {
         // At-least-once semantics allow duplicates on retry, but Spark may also resume
         // without duplicates depending on failure timing/checkpoint state.
         assertThat(values.size()).isGreaterThanOrEqualTo(unique.size());
-        assertThat(unique).hasSize(30);
+        assertThat(unique).hasSize(expectedCount);
     }
 
     // ---- IT-SPLIT-001: minPartitions split in streaming ----

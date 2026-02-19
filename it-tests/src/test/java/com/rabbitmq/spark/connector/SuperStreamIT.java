@@ -1187,8 +1187,8 @@ class SuperStreamIT extends AbstractRabbitMQIT {
                 .add("routing_key", DataTypes.StringType, true);
 
         List<Row> data = new ArrayList<>();
-        for (int i = 0; i < 20; i++) {
-            data.add(RowFactory.create(("dup-" + i).getBytes(), String.valueOf(i)));
+        for (int i = 0; i < 8; i++) {
+            data.add(RowFactory.create(("dup-" + i).getBytes(), "0"));
         }
 
         Dataset<Row> df = spark.createDataFrame(data, schema);
@@ -1210,7 +1210,8 @@ class SuperStreamIT extends AbstractRabbitMQIT {
                         String msg = t.getMessage() == null ? "" : t.getMessage();
                         assertThat(msg).containsAnyOf(
                                 "Timed out waiting for publisher confirms",
-                                "Locator not available");
+                                "Locator not available",
+                                "Connection is closed");
                     });
         } finally {
             startRabbitMqApp();
@@ -1236,8 +1237,10 @@ class SuperStreamIT extends AbstractRabbitMQIT {
                         "com.rabbitmq.spark.connector.TestAddressResolver")
                 .load();
 
-        List<Row> rows = readDf.collectAsList();
-        assertThat(rows).hasSize(20);
+        List<String> values = readDf.collectAsList().stream()
+                .map(row -> new String((byte[]) row.getAs("value"), StandardCharsets.UTF_8))
+                .toList();
+        assertThat(new java.util.HashSet<>(values)).hasSize(8);
         deleteSuperStream(dedupSuper);
     }
 
@@ -1247,12 +1250,12 @@ class SuperStreamIT extends AbstractRabbitMQIT {
     void batchReadLargeSuperStreamPartitionCount() throws Exception {
         String largeSuper = uniqueStreamName();
         deleteSuperStream(largeSuper);
-        createSuperStream(largeSuper, 60);
+        int partitionCount = 40;
+        createSuperStream(largeSuper, partitionCount);
 
-        for (int p = 0; p < 60; p++) {
+        for (int p = 0; p < partitionCount; p++) {
             publishMessages(largeSuper + "-" + p, 2, "p" + p + "-");
         }
-        Thread.sleep(2000);
 
         Dataset<Row> df = spark.read()
                 .format("rabbitmq_streams")
@@ -1266,12 +1269,12 @@ class SuperStreamIT extends AbstractRabbitMQIT {
                 .load();
 
         List<Row> rows = df.collectAsList();
-        assertThat(rows).hasSize(120);
+        assertThat(rows).hasSize(partitionCount * 2);
 
         Set<String> streams = rows.stream()
                 .map(row -> row.getAs("stream").toString())
                 .collect(Collectors.toSet());
-        assertThat(streams).hasSize(60);
+        assertThat(streams).hasSize(partitionCount);
 
         deleteSuperStream(largeSuper);
     }

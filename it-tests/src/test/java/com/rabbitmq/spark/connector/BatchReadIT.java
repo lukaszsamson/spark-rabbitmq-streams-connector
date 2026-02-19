@@ -849,8 +849,9 @@ class BatchReadIT extends AbstractRabbitMQIT {
                 .option("stream", stream)
                 .option("startingOffsets", "earliest")
                 .option("filterValues", "alpha")
+                .option("filterValueColumn", "filter")
                 .option("filterMatchUnfiltered", "true")
-                .option("pollTimeoutMs", "500")
+                .option("pollTimeoutMs", "200")
                 .option("maxWaitMs", "10000")
                 .option("metadataFields", "")
                 .option("addressResolverClass",
@@ -876,8 +877,9 @@ class BatchReadIT extends AbstractRabbitMQIT {
                 .option("stream", stream)
                 .option("startingOffsets", "earliest")
                 .option("filterValues", "alpha")
+                .option("filterValueColumn", "filter")
                 .option("filterMatchUnfiltered", "false")
-                .option("pollTimeoutMs", "500")
+                .option("pollTimeoutMs", "200")
                 .option("maxWaitMs", "10000")
                 .option("metadataFields", "")
                 .option("addressResolverClass",
