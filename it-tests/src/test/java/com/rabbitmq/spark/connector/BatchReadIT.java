@@ -981,9 +981,10 @@ class BatchReadIT extends AbstractRabbitMQIT {
                     throw t;
                 }
                 if (attempt == 3) {
-                    Assumptions.assumeTrue(false,
-                            "Skipping due to transient TLS handshake failures in test environment: "
-                                    + t.getMessage());
+                    throw new AssertionError(
+                            "TLS trustAll read did not stabilize after retries; this indicates TLS/bootstrap "
+                                    + "flakiness in the test environment. Last error: " + t.getMessage(),
+                            t);
                 }
                 try {
                     Thread.sleep(300L * attempt);
@@ -1237,8 +1238,9 @@ class BatchReadIT extends AbstractRabbitMQIT {
     void batchReadCheckpointForwardCompatibilitySpark35() throws Exception {
         var fixtureMetadata = getClass().getClassLoader()
                 .getResource("fixtures/spark35-checkpoint-v1/metadata");
-        Assumptions.assumeTrue(fixtureMetadata != null,
-                "spark35 checkpoint fixture is missing");
+        assertThat(fixtureMetadata)
+                .as("spark35 checkpoint fixture must exist in test resources")
+                .isNotNull();
         Path fixtureDir = Path.of(fixtureMetadata.toURI()).getParent();
         Path checkpointDir = Files.createTempDirectory("spark35-fixture-ckpt-");
         copyDirectory(fixtureDir, checkpointDir);

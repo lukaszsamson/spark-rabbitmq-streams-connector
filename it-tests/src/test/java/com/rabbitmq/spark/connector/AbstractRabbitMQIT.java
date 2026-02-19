@@ -191,6 +191,28 @@ abstract class AbstractRabbitMQIT {
         }
     }
 
+    /** Create a superstream with explicit retention settings for partition streams. */
+    void createSuperStreamWithRetention(String name, int partitions,
+                                        long maxLengthBytes, long maxSegmentSizeBytes) {
+        try {
+            var result = RABBIT.execInContainer(
+                    "rabbitmq-streams", "add_super_stream", name,
+                    "--partitions", String.valueOf(partitions),
+                    "--max-length-bytes", String.valueOf(maxLengthBytes),
+                    "--stream-max-segment-size-bytes", String.valueOf(maxSegmentSizeBytes));
+            if (result.getExitCode() != 0) {
+                throw new RuntimeException(
+                        "Failed to create retained superstream '" + name + "': " + result.getStderr());
+            }
+            LOG.info("Created retained superstream '{}' with {} partitions (maxLengthBytes={}, segmentSize={})",
+                    name, partitions, maxLengthBytes, maxSegmentSizeBytes);
+        } catch (RuntimeException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to create retained superstream '" + name + "'", e);
+        }
+    }
+
     /** Create a superstream with explicit binding keys via CLI. */
     void createSuperStreamWithBindingKeys(String name, String... keys) {
         List<String> args = new ArrayList<>();

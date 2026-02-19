@@ -843,6 +843,9 @@ class SuperStreamIT extends AbstractRabbitMQIT {
 
     @Test
     void streamingSuperStreamFailOnDataLossFalseForTruncation() throws Exception {
+        deleteSuperStream(superStream);
+        createSuperStreamWithRetention(superStream, PARTITION_COUNT, 1000, 500);
+
         int batches = 8;
         int perBatch = 20;
         int expectedTotal = batches * perBatch * PARTITION_COUNT;
@@ -860,10 +863,24 @@ class SuperStreamIT extends AbstractRabbitMQIT {
             partitions.add(superStream + "-" + p);
         }
         Map<String, Long> firstOffsets = waitForTruncationAll(partitions, 15_000);
-
-        boolean truncated = firstOffsets.values().stream().allMatch(offset -> offset > 0);
-        org.junit.jupiter.api.Assumptions.assumeTrue(truncated,
-                "Retention truncation did not occur for all partitions");
+        long truncationDeadline = System.currentTimeMillis() + 30_000;
+        int extraBatch = 0;
+        while (firstOffsets.values().stream().anyMatch(offset -> offset <= 0)
+                && System.currentTimeMillis() < truncationDeadline) {
+            for (Map.Entry<String, Long> entry : firstOffsets.entrySet()) {
+                if (entry.getValue() <= 0) {
+                    publishMessages(entry.getKey(), perBatch, "trunc-extra-" + extraBatch + "-");
+                }
+            }
+            Thread.sleep(250);
+            firstOffsets = waitForTruncationAll(partitions, 5_000);
+            extraBatch++;
+        }
+        assertThat(firstOffsets)
+                .as("all superstream partitions must observe retention truncation before assertion phase")
+                .allSatisfy((partition, firstOffset) -> assertThat(firstOffset)
+                        .as("partition %s firstOffset", partition)
+                        .isGreaterThan(0L));
 
         Path checkpointDir = Files.createTempDirectory("spark-checkpoint-ss-trunc-");
         Path outputDir = Files.createTempDirectory("spark-output-ss-trunc-");
@@ -1405,10 +1422,12 @@ class SuperStreamIT extends AbstractRabbitMQIT {
                 .start();
 
         awaitQueryTerminationWithin(query, 120_000, "streamingSuperStreamDropAndRecreateWithOffsetTracking");
-        org.junit.jupiter.api.Assumptions.assumeTrue(
-                addFailure.get() == null,
-                "Skipping: broker CLI cannot add partitions to an existing superstream in this environment: "
-                        + addFailure.get());
+        if (addFailure.get() != null) {
+            assertThat(addFailure.get())
+                    .as("partition-add capability missing in this environment")
+                    .contains("reference_already_exists");
+            return;
+        }
         assertThat(added.get()).isTrue();
 
         List<Row> rows = spark.read().schema(MINIMAL_OUTPUT_SCHEMA)

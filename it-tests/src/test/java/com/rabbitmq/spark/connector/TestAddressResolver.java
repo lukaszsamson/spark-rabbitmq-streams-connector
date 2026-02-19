@@ -15,12 +15,19 @@ public class TestAddressResolver implements ConnectorAddressResolver {
     @Override
     public Address resolve(Address address) {
         String host = System.getProperty("rabbitmq.test.host", "localhost");
-        int port = Integer.parseInt(
+        int mappedStreamPort = Integer.parseInt(
                 System.getProperty("rabbitmq.test.port", "5552"));
-        int tlsPort = Integer.parseInt(
-                System.getProperty("rabbitmq.test.tls.port", String.valueOf(port)));
-        if (address.port() == tlsPort) {
-            port = tlsPort;
+        int mappedTlsPort = Integer.parseInt(
+                System.getProperty("rabbitmq.test.tls.port", String.valueOf(mappedStreamPort)));
+
+        // RabbitMQ may advertise container-internal default ports (5552/5551),
+        // while clients outside Docker must connect to mapped host ports.
+        int requestedPort = address.port();
+        int port = mappedStreamPort;
+        if (requestedPort == 5551 || requestedPort == mappedTlsPort) {
+            port = mappedTlsPort;
+        } else if (requestedPort == 5552 || requestedPort == mappedStreamPort) {
+            port = mappedStreamPort;
         }
         return new Address(host, port);
     }
