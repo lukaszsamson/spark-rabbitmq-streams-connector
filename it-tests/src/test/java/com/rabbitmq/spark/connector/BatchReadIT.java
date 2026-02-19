@@ -10,6 +10,9 @@ import org.apache.logging.log4j.core.LogEvent;
 import org.apache.logging.log4j.core.LoggerContext;
 import org.apache.logging.log4j.core.config.Configuration;
 import org.apache.logging.log4j.core.config.LoggerConfig;
+import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.MapType;
+import org.apache.spark.sql.types.StructType;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
@@ -176,6 +179,29 @@ class BatchReadIT extends AbstractRabbitMQIT {
             expected.add("hello-" + i);
         }
         assertThat(values).containsExactlyInAnyOrderElementsOf(expected);
+    }
+
+    @Test
+    void batchReadExposesExpectedSchemaColumnTypes() {
+        publishMessages(stream, 1, "schema-");
+
+        Dataset<Row> df = spark.read()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("startingOffsets", "earliest")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load();
+
+        StructType schema = df.schema();
+        assertThat(schema.apply("value").dataType()).isEqualTo(DataTypes.BinaryType);
+        assertThat(schema.apply("stream").dataType()).isEqualTo(DataTypes.StringType);
+        assertThat(schema.apply("offset").dataType()).isEqualTo(DataTypes.LongType);
+        assertThat(schema.apply("chunk_timestamp").dataType()).isEqualTo(DataTypes.TimestampType);
+        assertThat(schema.apply("properties").dataType()).isInstanceOf(StructType.class);
+        assertThat(schema.apply("application_properties").dataType()).isInstanceOf(MapType.class);
+        assertThat(schema.apply("message_annotations").dataType()).isInstanceOf(MapType.class);
     }
 
     @Test
@@ -1393,6 +1419,47 @@ class BatchReadIT extends AbstractRabbitMQIT {
         }
     }
 
+    @Test
+    void batchReadStartingOffsetsEarliestLateBindsAfterTruncation() throws Exception {
+        String truncStream = uniqueStreamName();
+        deleteStream(truncStream);
+        createStreamWithRetention(truncStream, 1000, 500);
+
+        try {
+            publishMessages(truncStream, 20, "early-");
+
+            Dataset<Row> df = spark.read()
+                    .format("rabbitmq_streams")
+                    .option("endpoints", streamEndpoint())
+                    .option("stream", truncStream)
+                    .option("startingOffsets", "earliest")
+                    .option("failOnDataLoss", "false")
+                    .option("metadataFields", "")
+                    .option("addressResolverClass",
+                            "com.rabbitmq.spark.connector.TestAddressResolver")
+                    .load();
+
+            for (int batch = 0; batch < 8; batch++) {
+                publishMessages(truncStream, 50, "late-" + batch + "-");
+                Thread.sleep(400);
+            }
+
+            long firstOffset = waitForTruncation(truncStream, 30_000);
+            Assumptions.assumeTrue(firstOffset > 0,
+                    "Retention truncation did not occur in time");
+
+            List<Row> rows = df.collectAsList();
+            assertThat(rows).isNotEmpty();
+            long minOffset = rows.stream()
+                    .mapToLong(row -> row.getAs("offset"))
+                    .min()
+                    .orElse(-1L);
+            assertThat(minOffset).isGreaterThanOrEqualTo(firstOffset);
+        } finally {
+            deleteStream(truncStream);
+        }
+    }
+
     // ---- IT-OPT-001: case-insensitive options ----
 
     @Test
@@ -1410,6 +1477,25 @@ class BatchReadIT extends AbstractRabbitMQIT {
                 .load();
 
         assertThat(df.collectAsList()).hasSize(10);
+    }
+
+    @Test
+    void batchReadRejectsPerStreamJsonStartingOffset() {
+        publishMessages(stream, 10);
+
+        assertThatThrownBy(() ->
+                spark.read()
+                        .format("rabbitmq_streams")
+                        .option("endpoints", streamEndpoint())
+                        .option("stream", stream)
+                        .option("startingOffsets", "offset")
+                        .option("startingOffset", "{\"" + stream + "\":5}")
+                        .option("metadataFields", "")
+                        .option("addressResolverClass",
+                                "com.rabbitmq.spark.connector.TestAddressResolver")
+                        .load()
+                        .collectAsList())
+                .hasMessageContaining("'startingOffset' must be a valid long");
     }
 
     // ---- IT-SCHEMA-002: DataFrame reuse in batch query ----

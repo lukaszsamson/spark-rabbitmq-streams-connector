@@ -506,6 +506,74 @@ class BatchWriteIT extends AbstractRabbitMQIT {
         assertThat(((java.sql.Timestamp) row.getAs("creation_time"))).isEqualTo(createdAt);
     }
 
+    @Test
+    void batchWriteNullMetadataRoundTrip() {
+        StructType propsSchema = new StructType()
+                .add("message_id", DataTypes.StringType, true)
+                .add("subject", DataTypes.StringType, true)
+                .add("correlation_id", DataTypes.StringType, true)
+                .add("content_type", DataTypes.StringType, true)
+                .add("creation_time", DataTypes.TimestampType, true);
+        StructType schema = new StructType()
+                .add("value", DataTypes.BinaryType, false)
+                .add("properties", propsSchema, true)
+                .add("application_properties",
+                        DataTypes.createMapType(DataTypes.StringType, DataTypes.StringType), true)
+                .add("message_annotations",
+                        DataTypes.createMapType(DataTypes.StringType, DataTypes.StringType), true)
+                .add("creation_time", DataTypes.TimestampType, true);
+
+        List<Row> data = List.of(RowFactory.create(
+                "null-meta".getBytes(), null, null, null, null));
+
+        spark.createDataFrame(data, schema)
+                .write()
+                .format("rabbitmq_streams")
+                .mode("append")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .save();
+
+        Dataset<Row> df = spark.read()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("startingOffsets", "earliest")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load();
+
+        Row row = df.collectAsList().get(0);
+        assertThat(new String((byte[]) row.getAs("value"))).isEqualTo("null-meta");
+        assertThat((Object) row.getAs("properties")).isNull();
+        assertThat((Object) row.getAs("application_properties")).isNull();
+        assertThat((Object) row.getAs("message_annotations")).isNull();
+    }
+
+    @Test
+    void batchWriteEmptyBodyRoundTrip() {
+        StructType schema = new StructType()
+                .add("value", DataTypes.BinaryType, false);
+        Dataset<Row> df = spark.createDataFrame(
+                List.of(RowFactory.create(new byte[0])),
+                schema);
+
+        df.write()
+                .format("rabbitmq_streams")
+                .mode("append")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .save();
+
+        List<Message> messages = consumeMessages(stream, 1);
+        assertThat(messages).hasSize(1);
+        assertThat(messages.get(0).getBodyAsBinary()).hasSize(0);
+    }
+
     // ---- IT-SINK-001: write to non-existent stream fails ----
 
     @Test
@@ -580,6 +648,36 @@ class BatchWriteIT extends AbstractRabbitMQIT {
         // Verify all 500 messages arrived
         List<Message> messages = consumeMessages(stream, 500);
         assertThat(messages).hasSize(500);
+    }
+
+    @Test
+    void batchWriteLargePayloadLowMaxInFlight() {
+        StructType schema = new StructType()
+                .add("value", DataTypes.BinaryType, false);
+
+        List<Row> data = new ArrayList<>();
+        for (int i = 0; i < 120; i++) {
+            byte[] payload = new byte[15 * 1024];
+            Arrays.fill(payload, (byte) ('a' + (i % 26)));
+            data.add(RowFactory.create(payload));
+        }
+
+        Dataset<Row> df = spark.createDataFrame(data, schema);
+
+        df.write()
+                .format("rabbitmq_streams")
+                .mode("append")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("maxInFlight", "1")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .save();
+
+        List<Message> messages = consumeMessages(stream, 120);
+        assertThat(messages).hasSize(120);
+        assertThat(messages.stream().mapToInt(m -> m.getBodyAsBinary().length))
+                .allMatch(size -> size == 15 * 1024);
     }
 
     // ---- IT-SINK-004: batch settings (batchSize, batchPublishingDelayMs, enqueueTimeoutMs) ----
@@ -874,6 +972,47 @@ class BatchWriteIT extends AbstractRabbitMQIT {
                 .save())
                 .hasMessageContaining("value")
                 .hasMessageContaining("binary");
+    }
+
+    @Test
+    void batchWriteSchemaTypeValidationFailsForMetadataColumns() {
+        StructType wrongAppPropsSchema = new StructType()
+                .add("value", DataTypes.BinaryType, false)
+                .add("application_properties",
+                        DataTypes.createMapType(DataTypes.StringType, DataTypes.IntegerType), true);
+        Dataset<Row> wrongAppPropsDf = spark.createDataFrame(
+                List.of(RowFactory.create("bad-map".getBytes(), Map.of("k", 1))),
+                wrongAppPropsSchema);
+
+        assertThatThrownBy(() -> wrongAppPropsDf.write()
+                .format("rabbitmq_streams")
+                .mode("append")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .save())
+                .satisfies(ex -> assertThat(ex.getMessage())
+                        .containsIgnoringCase("application_properties"));
+
+        StructType wrongPropsSchema = new StructType()
+                .add("value", DataTypes.BinaryType, false)
+                .add("properties", new StructType()
+                        .add("message_id", DataTypes.IntegerType, true), true);
+        Dataset<Row> wrongPropsDf = spark.createDataFrame(
+                List.of(RowFactory.create("bad-props".getBytes(), RowFactory.create(1))),
+                wrongPropsSchema);
+
+        assertThatThrownBy(() -> wrongPropsDf.write()
+                .format("rabbitmq_streams")
+                .mode("append")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .save())
+                .satisfies(ex -> assertThat(ex.getMessage())
+                        .containsIgnoringCase("properties"));
     }
 
     // ---- IT-SINK-010: unsupported save modes ----
