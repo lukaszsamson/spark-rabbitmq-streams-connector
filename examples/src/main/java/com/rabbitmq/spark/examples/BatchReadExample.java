@@ -10,8 +10,8 @@ import org.apache.spark.sql.SparkSession;
  * <p>Reads all messages from a stream and displays them. Run with:
  * <pre>
  * spark-submit --class com.rabbitmq.spark.examples.BatchReadExample \
- *   --jars sparkling-rabbit-spark41-0.1.0.jar \
- *   sparkling-rabbit-examples-0.1.0.jar
+ *   --jars sparkling-rabbit-spark41-&lt;version&gt;.jar \
+ *   sparkling-rabbit-examples-&lt;version&gt;.jar
  * </pre>
  */
 public class BatchReadExample {

@@ -19,8 +19,8 @@ import java.util.List;
  * <p>Run with:
  * <pre>
  * spark-submit --class com.rabbitmq.spark.examples.SuperStreamExample \
- *   --jars sparkling-rabbit-spark41-0.1.0.jar \
- *   sparkling-rabbit-examples-0.1.0.jar
+ *   --jars sparkling-rabbit-spark41-&lt;version&gt;.jar \
+ *   sparkling-rabbit-examples-&lt;version&gt;.jar
  * </pre>
  */
 public class SuperStreamExample {

@@ -16,8 +16,8 @@ import java.util.List;
  * <p>Creates sample data and writes it to a stream. Run with:
  * <pre>
  * spark-submit --class com.rabbitmq.spark.examples.BatchWriteExample \
- *   --jars sparkling-rabbit-spark41-0.1.0.jar \
- *   sparkling-rabbit-examples-0.1.0.jar
+ *   --jars sparkling-rabbit-spark41-&lt;version&gt;.jar \
+ *   sparkling-rabbit-examples-&lt;version&gt;.jar
  * </pre>
  */
 public class BatchWriteExample {

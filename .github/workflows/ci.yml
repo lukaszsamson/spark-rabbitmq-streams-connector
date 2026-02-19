@@ -48,12 +48,13 @@ jobs:
             || (echo "ERROR: spark41 shaded Netty classes not found" && exit 1)
 
   integration-tests:
-    name: Integration Tests (Java ${{ matrix.java }})
+    name: Integration Tests (Java ${{ matrix.java }}, ${{ matrix.spark_profile }})
     runs-on: ubuntu-latest
     needs: build
     strategy:
       matrix:
         java: [ '17', '21' ]
+        spark_profile: [ 'spark35', 'spark35-scala212', 'spark40', 'spark41' ]
     steps:
       - uses: actions/checkout@v4
 
@@ -65,4 +66,4 @@ jobs:
           cache: maven
 
       - name: Run integration tests
-        run: mvn -B verify -pl it-tests -am
+        run: mvn -B verify -pl it-tests -am -P${{ matrix.spark_profile }}

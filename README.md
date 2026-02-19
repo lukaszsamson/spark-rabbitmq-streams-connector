@@ -45,7 +45,7 @@ Provides a Spark DataSource V2 connector that reads from and writes to [RabbitMQ
 <dependency>
     <groupId>com.rabbitmq.spark</groupId>
     <artifactId>sparkling-rabbit-spark41</artifactId>
-    <version>0.1.0</version>
+    <version>0.1.0-SNAPSHOT</version>
 </dependency>
 ```
 
@@ -93,7 +93,7 @@ StreamingQuery query = stream.writeStream()
 ### Structured Streaming sink
 
 ```java
-query.writeStream()
+stream.writeStream()
     .format("rabbitmq_streams")
     .option("endpoints", "localhost:5552")
     .option("stream", "output-stream")
@@ -387,6 +387,10 @@ mvn verify -pl '!it-tests'
 
 # Integration tests (requires Docker)
 mvn verify -pl it-tests -am
+mvn verify -pl it-tests -am -Pspark35
+mvn verify -pl it-tests -am -Pspark35-scala212
+mvn verify -pl it-tests -am -Pspark40
+mvn verify -pl it-tests -am -Pspark41
 
 # All tests
 mvn verify
