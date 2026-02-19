@@ -247,6 +247,8 @@ final class RabbitMQScan implements Scan {
                     "No offset matched from request for timestamp "
                             + options.getStartingTimestamp()
                             + " in stream '" + stream + "'", e);
+        } catch (IllegalStateException e) {
+            throw e;
         } catch (Exception e) {
             LOG.warn("Failed to resolve timestamp start offset for stream '{}': {}",
                     stream, e.getMessage());

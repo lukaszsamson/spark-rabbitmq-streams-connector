@@ -2,7 +2,10 @@ package com.rabbitmq.spark.connector;
 
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
+import org.apache.spark.api.java.function.VoidFunction2;
 import org.apache.spark.sql.execution.SparkPlan;
+import org.apache.spark.sql.streaming.StreamingQuery;
+import org.apache.spark.sql.streaming.Trigger;
 import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.core.appender.AbstractAppender;
@@ -18,7 +21,10 @@ import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
 import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashSet;
@@ -31,6 +37,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 import java.util.stream.LongStream;
 
@@ -1118,7 +1125,7 @@ class BatchReadIT extends AbstractRabbitMQIT {
 
         assertThatThrownBy(df::collectAsList)
                 .satisfies(ex -> assertThat(ex.toString())
-                        .contains("Failed to resolve timestamp start offset"));
+                        .contains("No offset matched from request"));
     }
 
     // ---- IT-OPT-006-source: invalid option combinations ----
@@ -1226,114 +1233,59 @@ class BatchReadIT extends AbstractRabbitMQIT {
 
     @Test
     void batchReadCheckpointForwardCompatibilitySpark35() throws Exception {
-        String baseSpark35 = System.getProperty("spark.distribution.35",
-                "/Users/lukaszsamson/claude_fun/spark-3.5.4-bin-hadoop3");
-        String baseSpark40 = System.getProperty("spark.distribution.40",
-                "/Users/lukaszsamson/claude_fun/spark-4.0.1-bin-hadoop3");
-        String baseSpark41 = System.getProperty("spark.distribution.41",
-                "/Users/lukaszsamson/claude_fun/spark-4.1.1-bin-hadoop3");
+        var fixtureMetadata = getClass().getClassLoader()
+                .getResource("fixtures/spark35-checkpoint-v1/metadata");
+        Assumptions.assumeTrue(fixtureMetadata != null,
+                "spark35 checkpoint fixture is missing");
+        Path fixtureDir = Path.of(fixtureMetadata.toURI()).getParent();
+        Path checkpointDir = Files.createTempDirectory("spark35-fixture-ckpt-");
+        copyDirectory(fixtureDir, checkpointDir);
+        rewriteFixtureOffsetForStream(checkpointDir.resolve("offsets").resolve("0"), stream);
 
-        String submit35 = baseSpark35 + "/bin/spark-submit";
-        String submit40 = baseSpark40 + "/bin/spark-submit";
-        String submit41 = baseSpark41 + "/bin/spark-submit";
+        publishMessages(stream, 25, "ckpt35-");
+        Thread.sleep(500);
+        AtomicLong processedRows = new AtomicLong(0);
 
-        String checkpointDir = Files.createTempDirectory("spark35-ckpt-").toString();
-        String outputDir = Files.createTempDirectory("spark35-output-").toString();
+        StreamingQuery query = spark.readStream()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("startingOffsets", "earliest")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load()
+                .writeStream()
+                .foreachBatch((VoidFunction2<Dataset<Row>, Long>) (batch, id) -> {
+                    processedRows.addAndGet(batch.count());
+                })
+                .option("checkpointLocation", checkpointDir.toString())
+                .trigger(Trigger.AvailableNow())
+                .start();
 
-        String consumerName = "ckpt-" + UUID.randomUUID();
-        publishMessages(stream, 12, "ckpt-");
-        Thread.sleep(1500);
-
-        String connectorJar35 = System.getProperty("connector.jar.spark35");
-        String sparkSqlJar35 = System.getProperty("spark.sql.jar.spark35");
-        String connectorJar40 = System.getProperty("connector.jar.spark40");
-        String sparkSqlJar40 = System.getProperty("spark.sql.jar.spark40");
-        String connectorJar41 = System.getProperty("connector.jar.spark41");
-        String sparkSqlJar41 = System.getProperty("spark.sql.jar.spark41");
-
-        Assumptions.assumeTrue(connectorJar35 != null && !connectorJar35.isBlank(),
-                "connector.jar.spark35 system property must be set");
-        Assumptions.assumeTrue(sparkSqlJar35 != null && !sparkSqlJar35.isBlank(),
-                "spark.sql.jar.spark35 system property must be set");
-        Assumptions.assumeTrue(connectorJar40 != null && !connectorJar40.isBlank(),
-                "connector.jar.spark40 system property must be set");
-        Assumptions.assumeTrue(sparkSqlJar40 != null && !sparkSqlJar40.isBlank(),
-                "spark.sql.jar.spark40 system property must be set");
-        Assumptions.assumeTrue(connectorJar41 != null && !connectorJar41.isBlank(),
-                "connector.jar.spark41 system property must be set");
-        Assumptions.assumeTrue(sparkSqlJar41 != null && !sparkSqlJar41.isBlank(),
-                "spark.sql.jar.spark41 system property must be set");
-
-        String classpath35 = connectorJar35 + ":" + sparkSqlJar35;
-        String classpath40 = connectorJar40 + ":" + sparkSqlJar40;
-        String classpath41 = connectorJar41 + ":" + sparkSqlJar41;
-
-        runExternalQuery(
-                submit35,
-                classpath35,
-                checkpointDir,
-                outputDir,
-                consumerName
-        );
-
-        long storedOffset = queryStoredOffset(consumerName, stream);
-        assertThat(storedOffset).isGreaterThanOrEqualTo(0L);
-
-        publishMessages(stream, 5, "ckpt2-");
-        Thread.sleep(1000);
-
-        runExternalQuery(
-                submit40,
-                classpath40,
-                checkpointDir,
-                outputDir,
-                consumerName
-        );
-
-        runExternalQuery(
-                submit41,
-                classpath41,
-                checkpointDir,
-                outputDir,
-                consumerName
-        );
+        query.awaitTermination(120_000);
+        assertThat(query.exception().isEmpty()).isTrue();
+        assertThat(processedRows.get()).isGreaterThan(0L);
     }
 
-    private void runExternalQuery(
-            String submitScript,
-            String classpath,
-            String checkpointDir,
-            String outputDir,
-            String consumerName) throws Exception {
-        ProcessBuilder processBuilder = new ProcessBuilder(
-                submitScript,
-                "--class", "org.apache.spark.sql.execution.streaming.StreamingQueryRunner",
-                "--master", "local[2]",
-                "--conf", "spark.ui.enabled=false",
-                "--conf", "spark.sql.shuffle.partitions=2",
-                "--conf", "spark.jars=" + classpath,
-                "--conf", "spark.driver.extraClassPath=" + classpath,
-                "--conf", "spark.executor.extraClassPath=" + classpath,
-                "--conf", "spark.rmq.appName=ckpt",
-                "--conf", "spark.rmq.format=rabbitmq_streams",
-                "--conf", "spark.rmq.endpoints=" + streamEndpoint(),
-                "--conf", "spark.rmq.stream=" + stream,
-                "--conf", "spark.rmq.startingOffsets=earliest",
-                "--conf", "spark.rmq.metadataFields=",
-                "--conf", "spark.rmq.consumerName=" + consumerName,
-                "--conf", "spark.rmq.addressResolverClass=com.rabbitmq.spark.connector.TestAddressResolver",
-                "--conf", "spark.rmq.outputPath=" + outputDir,
-                "--conf", "spark.rmq.checkpointLocation=" + checkpointDir,
-                "--conf", "spark.rmq.trigger=AvailableNow"
-        );
+    private static void rewriteFixtureOffsetForStream(Path offsetsFile, String stream) throws IOException {
+        List<String> lines = Files.readAllLines(offsetsFile);
+        assertThat(lines).hasSizeGreaterThanOrEqualTo(3);
+        lines.set(2, "{\"" + stream + "\":0}");
+        Files.write(offsetsFile, lines);
+    }
 
-        processBuilder.environment().put("JAVA_HOME",
-                "/opt/homebrew/Cellar/openjdk@21/21.0.10/libexec/openjdk.jdk/Contents/Home");
-        processBuilder.environment().put("SPARK_LOG_DIR", checkpointDir);
-
-        Process process = processBuilder.start();
-        int exit = process.waitFor();
-        assertThat(exit).isEqualTo(0);
+    private static void copyDirectory(Path source, Path target) throws IOException {
+        try (var paths = Files.walk(source)) {
+            for (Path sourcePath : paths.toList()) {
+                Path destination = target.resolve(source.relativize(sourcePath).toString());
+                if (Files.isDirectory(sourcePath)) {
+                    Files.createDirectories(destination);
+                } else {
+                    Files.copy(sourcePath, destination, StandardCopyOption.REPLACE_EXISTING);
+                }
+            }
+        }
     }
 
     // ---- IT-OFFSET-010: mixed timestamp starting + numeric ending offset ----
