@@ -1,120 +1,93 @@
 package com.rabbitmq.spark.connector;
 
-import com.rabbitmq.stream.Environment;
+import com.rabbitmq.stream.impl.Client;
+
+import java.net.URI;
+import java.util.Arrays;
 import java.util.List;
-import java.util.function.Function;
 
 /**
- * Discovers partition streams for a RabbitMQ superstream via the configured
- * {@link Environment} path.
+ * Discovers partition streams for a RabbitMQ superstream.
  */
 final class SuperStreamPartitionDiscovery {
+
+    private static final int DEFAULT_STREAM_PORT = 5552;
+    private static final int DEFAULT_STREAM_TLS_PORT = 5551;
 
     private SuperStreamPartitionDiscovery() {}
 
     /**
-     * Discover partition streams using explicit connection parameters.
+     * Discover partition streams using connector connection options.
      *
      * @param options connector options with connection configuration
      * @param superStream the superstream name
      * @return ordered list of partition stream names
      */
     static List<String> discoverPartitions(ConnectorOptions options, String superStream) {
-        Environment environment = EnvironmentBuilderHelper.buildEnvironment(options);
-        try {
-            return discoverPartitions(environment, superStream);
-        } finally {
-            try {
-                environment.close();
-            } catch (Exception ignored) {
-                // best-effort close
+        Client.ClientParameters params = buildClientParams(options);
+        return discoverPartitions(superStream, stream -> {
+            try (Client client = new Client(params)) {
+                return client.partitions(stream);
             }
-        }
+        });
     }
 
-    static List<String> discoverPartitions(Environment environment, String superStream) {
-        ReflectiveOperationException lastFailure = null;
-
-        // Preferred: direct locator().client().partitions(...) invocation.
+    static List<String> discoverPartitions(String superStream, PartitionsQuery query) {
         try {
-            Object locator = invokeNoArg(environment, "locator");
-            Object client = invokeNoArg(locator, "client");
-            return invokePartitions(client, superStream);
-        } catch (ReflectiveOperationException e) {
-            lastFailure = e;
-        }
-
-        // Fallback: StreamEnvironment internals via locatorOperation(Function<Client, T>).
-        try {
-            tryInvokeNoArg(environment, "maybeInitializeLocator");
-            Object result = invoke(
-                    environment,
-                    "locatorOperation",
-                    new Class<?>[]{Function.class},
-                    new Object[]{(Function<Object, List<String>>) c -> {
-                        try {
-                            return invokePartitions(c, superStream);
-                        } catch (ReflectiveOperationException ex) {
-                            throw new IllegalStateException(ex);
-                        }
-                    }});
-            @SuppressWarnings("unchecked")
-            List<String> partitions = (List<String>) result;
-            return partitions;
-        } catch (ReflectiveOperationException e) {
-            if (lastFailure != null) {
-                e.addSuppressed(lastFailure);
-            }
+            return query.partitions(superStream);
+        } catch (Exception e) {
             throw new IllegalStateException(
-                    "Unable to discover superstream partitions via configured Environment", e);
+                    "Unable to discover superstream partitions for '" + superStream + "'", e);
         }
     }
 
-    private static List<String> invokePartitions(Object client, String superStream)
-            throws ReflectiveOperationException {
-        Object result = invoke(
-                client,
-                "partitions",
-                new Class<?>[]{String.class},
-                new Object[]{superStream});
-        @SuppressWarnings("unchecked")
-        List<String> partitions = (List<String>) result;
-        return partitions;
-    }
-
-    private static Object invokeNoArg(Object target, String methodName)
-            throws ReflectiveOperationException {
-        return invoke(target, methodName, new Class<?>[0], new Object[0]);
-    }
-
-    private static void tryInvokeNoArg(Object target, String methodName) {
-        try {
-            invokeNoArg(target, methodName);
-        } catch (ReflectiveOperationException ignored) {
-            // Optional initialization hook on internal implementations.
+    private static Client.ClientParameters buildClientParams(ConnectorOptions options) {
+        Client.ClientParameters params = new Client.ClientParameters();
+        if (hasText(options.getUris())) {
+            List<URI> uris = Arrays.stream(options.getUris().split(","))
+                    .map(String::trim)
+                    .filter(s -> !s.isEmpty())
+                    .map(URI::create)
+                    .toList();
+            params = Client.maybeSetUpClientParametersFromUris(uris, params);
+        } else {
+            applyHostAndPort(params, options);
         }
-    }
-
-    private static Object invoke(Object target, String methodName,
-                                 Class<?>[] paramTypes, Object[] args)
-            throws ReflectiveOperationException {
-        var method = findMethod(target.getClass(), methodName, paramTypes);
-        method.setAccessible(true);
-        return method.invoke(target, args);
-    }
-
-    private static java.lang.reflect.Method findMethod(Class<?> type, String methodName,
-                                                       Class<?>[] paramTypes)
-            throws NoSuchMethodException {
-        Class<?> current = type;
-        while (current != null) {
-            try {
-                return current.getDeclaredMethod(methodName, paramTypes);
-            } catch (NoSuchMethodException ignored) {
-                current = current.getSuperclass();
-            }
+        if (hasText(options.getUsername())) {
+            params.username(options.getUsername());
         }
-        throw new NoSuchMethodException(
-                "Method '" + methodName + "' not found on " + type.getName());
+        if (hasText(options.getPassword())) {
+            params.password(options.getPassword());
+        }
+        if (hasText(options.getVhost())) {
+            params.virtualHost(options.getVhost());
+        }
+        return params;
+    }
+
+    private static void applyHostAndPort(Client.ClientParameters params, ConnectorOptions options) {
+        String endpoint = Arrays.stream(options.getEndpoints().split(","))
+                .map(String::trim)
+                .filter(s -> !s.isEmpty())
+                .findFirst()
+                .orElse(null);
+        if (endpoint == null) {
+            return;
+        }
+        String[] parts = endpoint.split(":");
+        String host = parts[0];
+        int port = parts.length > 1
+                ? Integer.parseInt(parts[1].trim())
+                : (options.isTls() ? DEFAULT_STREAM_TLS_PORT : DEFAULT_STREAM_PORT);
+        params.host(host).port(port);
+    }
+
+    private static boolean hasText(String value) {
+        return value != null && !value.isBlank();
+    }
+
+    @FunctionalInterface
+    interface PartitionsQuery {
+        List<String> partitions(String superStream) throws Exception;
     }
 }

@@ -1,8 +1,8 @@
 package com.rabbitmq.spark.connector;
 
-import com.rabbitmq.stream.Message;
-import com.rabbitmq.stream.MessageHandler;
-import com.rabbitmq.stream.ObservationCollector;
+import com.rabbitmq.spark.shaded.com.rabbitmq.stream.Message;
+import com.rabbitmq.spark.shaded.com.rabbitmq.stream.MessageHandler;
+import com.rabbitmq.spark.shaded.com.rabbitmq.stream.ObservationCollector;
 
 import java.util.concurrent.atomic.AtomicLong;
 

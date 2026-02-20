@@ -12,8 +12,6 @@ import org.apache.spark.sql.types.StructType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -284,29 +282,7 @@ final class RabbitMQScan implements Scan {
     }
 
     static long resolveTailOffset(StreamStats stats) {
-        try {
-            Method committedOffset = stats.getClass().getMethod("committedOffset");
-            Object value = committedOffset.invoke(stats);
-            if (value instanceof Number n) {
-                return n.longValue() + 1;
-            }
-        } catch (NoSuchMethodException e) {
-            // Older client artifact; fall back to committedChunkId below.
-        } catch (InvocationTargetException e) {
-            if (!(e.getTargetException() instanceof NoOffsetException)) {
-                LOG.debug("committedOffset() lookup failed, falling back to committedChunkId(): {}",
-                        e.getTargetException().toString());
-            }
-        } catch (IllegalAccessException e) {
-            LOG.debug("Unable to access committedOffset() via reflection, falling back: {}",
-                    e.toString());
-        }
-
-        try {
-            return stats.committedChunkId() + 1;
-        } catch (NoOffsetException e) {
-            return 0;
-        }
+        return RabbitMQMicroBatchStream.resolveTailOffset(stats);
     }
 
     private long probeTailOffsetFromLastMessage(Environment env, String stream) {

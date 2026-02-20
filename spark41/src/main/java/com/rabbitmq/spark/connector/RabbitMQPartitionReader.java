@@ -587,7 +587,7 @@ final class RabbitMQPartitionReader
 
         try {
             StreamStats stats = environment.queryStreamStats(stream);
-            long statsTail = stats.committedChunkId();
+            long statsTail = resolveTailOffsetInclusive(stats);
             long tail = statsTail;
 
             if (tail < endOffset - 1 && (now - lastTailProbeMs) >= TAIL_PROBE_REFRESH_INTERVAL_MS) {
@@ -619,7 +619,7 @@ final class RabbitMQPartitionReader
         try {
             StreamStats stats = environment.queryStreamStats(stream);
             long first = stats.firstOffset();
-            long tail = stats.committedChunkId();
+            long tail = resolveTailOffsetInclusive(stats);
             boolean streamWasResetOrTruncated =
                     tail < startOffset || first > startOffset || (lastObservedOffset >= 0 && tail < lastObservedOffset);
             return tail < endOffset - 1 && streamWasResetOrTruncated;
@@ -636,7 +636,7 @@ final class RabbitMQPartitionReader
     private boolean isStreamTailBelowPlannedEnd() {
         try {
             StreamStats stats = environment.queryStreamStats(stream);
-            long statsTail = stats.committedChunkId();
+            long statsTail = resolveTailOffsetInclusive(stats);
             long probedTail = probeLastMessageOffset();
             long tail = Math.max(statsTail, probedTail);
             return tail < endOffset - 1;
@@ -662,6 +662,10 @@ final class RabbitMQPartitionReader
             current = current.getCause();
         }
         return false;
+    }
+
+    private static long resolveTailOffsetInclusive(StreamStats stats) {
+        return RabbitMQMicroBatchStream.resolveTailOffset(stats) - 1;
     }
 
     private long probeLastMessageOffset() {

@@ -11,6 +11,7 @@ import org.junit.jupiter.api.Test;
 
 import com.rabbitmq.stream.ConsumerBuilder;
 import com.rabbitmq.stream.Environment;
+import com.rabbitmq.stream.NoOffsetException;
 import com.rabbitmq.stream.ProducerBuilder;
 import com.rabbitmq.stream.StreamCreator;
 import com.rabbitmq.stream.StreamStats;
@@ -307,11 +308,8 @@ class RabbitMQMicroBatchStreamTest {
 
             RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
             setPrivateField(stream, "streams", List.of("s1", "s2"));
-            setPrivateField(stream, "environment", new LocatorEnvironment(
-                    Map.of(
-                            "s1", LocatorResponse.ok(9L),
-                            "s2", LocatorResponse.noOffset()
-                    )));
+            setPrivateField(stream, "environment", new StoredOffsetEnvironment(
+                    Map.of("s1", 9L)));
 
             RabbitMQStreamOffset offset = (RabbitMQStreamOffset) stream.initialOffset();
             assertThat(offset.getStreamOffsets()).containsEntry("s1", 10L);
@@ -1521,6 +1519,11 @@ class RabbitMQMicroBatchStreamTest {
         public long committedChunkId() {
             return firstOffset;
         }
+
+        @Override
+        public long committedOffset() {
+            return firstOffset;
+        }
     }
 
 
@@ -2116,16 +2119,11 @@ class RabbitMQMicroBatchStreamTest {
         }
     }
 
-    private static final class LocatorEnvironment implements Environment {
-        private final Map<String, LocatorResponse> responses;
+    private static final class StoredOffsetEnvironment implements Environment {
+        private final Map<String, Long> offsets;
 
-        private LocatorEnvironment(Map<String, LocatorResponse> responses) {
-            this.responses = responses;
-        }
-
-        @SuppressWarnings("unused")
-        public Object locator() {
-            return new Locator(responses);
+        private StoredOffsetEnvironment(Map<String, Long> offsets) {
+            this.offsets = offsets;
         }
 
         @Override
@@ -2165,7 +2163,7 @@ class RabbitMQMicroBatchStreamTest {
 
         @Override
         public ConsumerBuilder consumerBuilder() {
-            throw new UnsupportedOperationException();
+            return new StoredOffsetConsumerBuilder(offsets);
         }
 
         @Override
@@ -2173,69 +2171,115 @@ class RabbitMQMicroBatchStreamTest {
         }
     }
 
-    private static final class Locator {
-        private final Map<String, LocatorResponse> responses;
+    private static final class StoredOffsetConsumerBuilder implements ConsumerBuilder {
+        private final Map<String, Long> offsets;
+        private String stream;
 
-        private Locator(Map<String, LocatorResponse> responses) {
-            this.responses = responses;
+        private StoredOffsetConsumerBuilder(Map<String, Long> offsets) {
+            this.offsets = offsets;
         }
 
-        @SuppressWarnings("unused")
-        public Object client() {
-            return new LocatorClient(responses);
+        @Override
+        public ConsumerBuilder stream(String stream) {
+            this.stream = stream;
+            return this;
+        }
+
+        @Override
+        public ConsumerBuilder superStream(String superStream) {
+            return this;
+        }
+
+        @Override
+        public ConsumerBuilder offset(com.rabbitmq.stream.OffsetSpecification offsetSpecification) {
+            return this;
+        }
+
+        @Override
+        public ConsumerBuilder messageHandler(com.rabbitmq.stream.MessageHandler messageHandler) {
+            return this;
+        }
+
+        @Override
+        public ConsumerBuilder name(String name) {
+            return this;
+        }
+
+        @Override
+        public ConsumerBuilder singleActiveConsumer() {
+            return this;
+        }
+
+        @Override
+        public ConsumerBuilder consumerUpdateListener(
+                com.rabbitmq.stream.ConsumerUpdateListener consumerUpdateListener) {
+            return this;
+        }
+
+        @Override
+        public ConsumerBuilder subscriptionListener(
+                com.rabbitmq.stream.SubscriptionListener subscriptionListener) {
+            return this;
+        }
+
+        @Override
+        public ConsumerBuilder listeners(com.rabbitmq.stream.Resource.StateListener... listeners) {
+            return this;
+        }
+
+        @Override
+        public ManualTrackingStrategy manualTrackingStrategy() {
+            return new NoopManualTrackingStrategy(this);
+        }
+
+        @Override
+        public AutoTrackingStrategy autoTrackingStrategy() {
+            return new NoopAutoTrackingStrategy(this);
+        }
+
+        @Override
+        public ConsumerBuilder noTrackingStrategy() {
+            return this;
+        }
+
+        @Override
+        public ConsumerBuilder.FilterConfiguration filter() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public ConsumerBuilder.FlowConfiguration flow() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public com.rabbitmq.stream.Consumer build() {
+            return new StoredOffsetConsumer(offsets.get(stream));
         }
     }
 
-    private static final class LocatorClient {
-        private final Map<String, LocatorResponse> responses;
+    private static final class StoredOffsetConsumer implements com.rabbitmq.stream.Consumer {
+        private final Long storedOffset;
 
-        private LocatorClient(Map<String, LocatorResponse> responses) {
-            this.responses = responses;
+        private StoredOffsetConsumer(Long storedOffset) {
+            this.storedOffset = storedOffset;
         }
 
-        @SuppressWarnings("unused")
-        public Object queryOffset(String consumerName, String stream) {
-            LocatorResponse response = responses.get(stream);
-            if (response == null) {
-                return LocatorResponse.noOffset();
+        @Override
+        public void store(long offset) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void close() {
+        }
+
+        @Override
+        public long storedOffset() {
+            if (storedOffset == null) {
+                throw new NoOffsetException("no offset");
             }
-            return response;
-        }
-    }
-
-    private static final class LocatorResponse {
-        private final boolean ok;
-        private final short responseCode;
-        private final long offset;
-
-        private LocatorResponse(boolean ok, short responseCode, long offset) {
-            this.ok = ok;
-            this.responseCode = responseCode;
-            this.offset = offset;
-        }
-
-        static LocatorResponse ok(long offset) {
-            return new LocatorResponse(true, (short) 1, offset);
-        }
-
-        static LocatorResponse noOffset() {
-            return new LocatorResponse(false,
-                    com.rabbitmq.stream.Constants.RESPONSE_CODE_NO_OFFSET, 0L);
-        }
-
-        @SuppressWarnings("unused")
-        public boolean isOk() {
-            return ok;
-        }
-
-        @SuppressWarnings("unused")
-        public long getOffset() {
-            return offset;
-        }
-
-        @SuppressWarnings("unused")
-        public short getResponseCode() {
-            return responseCode;
+            return storedOffset;
         }
     }
 }

@@ -14,16 +14,12 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
 
 /**
  * Looks up stored consumer offsets from the RabbitMQ broker.
  *
  * <p>Uses temporary named consumers with {@code noTrackingStrategy()} to query
- * the broker for the last stored offset per stream. This is the recommended
- * approach since {@link Environment} does not expose a direct
- * {@code queryOffset()} API.
+ * the broker for the last stored offset per stream.
  *
  * <p>Stored offsets in RabbitMQ are <em>last-processed</em> offsets.
  * The returned map contains <em>next</em> offsets ({@code stored + 1}).
@@ -149,20 +145,6 @@ final class StoredOffsetLookup {
      * @throws IllegalStateException for fatal errors (auth, connection)
      */
     private static Long lookupStream(Environment env, String consumerName, String stream) {
-        // Prefer direct offset query via locator client when available.
-        // This avoids requiring a fully tracked consumer state transition.
-        try {
-            return lookupStreamViaLocator(env, consumerName, stream);
-        } catch (NoOffsetException e) {
-            LOG.debug("No stored offset for consumer '{}' on stream '{}'",
-                    consumerName, stream);
-            return null;
-        } catch (Exception e) {
-            LOG.debug("Direct locator lookup unavailable for consumer '{}' on stream '{}': {}",
-                    consumerName, stream, e.getMessage());
-            // Fall back to consumer-based lookup below.
-        }
-
         Consumer tempConsumer = null;
         try {
             tempConsumer = env.consumerBuilder()
@@ -205,80 +187,13 @@ final class StoredOffsetLookup {
         }
     }
 
-    private static Long lookupStreamViaLocator(Environment env, String consumerName, String stream)
-            throws Exception {
-        Object locator = invokeNoArg(env, "locator");
-        Object client = invokeNoArg(locator, "client");
-        Object response = invoke(client, "queryOffset",
-                new Class<?>[]{String.class, String.class},
-                new Object[]{consumerName, stream});
-
-        boolean ok = (Boolean) invokeNoArg(response, "isOk");
-        if (ok) {
-            long stored = ((Number) invokeNoArg(response, "getOffset")).longValue();
-            LOG.debug("Found stored offset {} for consumer '{}' on stream '{}'",
-                    stored, consumerName, stream);
-            return stored + 1;
-        }
-
-        short code = ((Number) invokeNoArg(response, "getResponseCode")).shortValue();
-        if (code == com.rabbitmq.stream.Constants.RESPONSE_CODE_NO_OFFSET) {
-            throw new NoOffsetException(
-                    "No offset stored for consumer '" + consumerName + "' on stream '" + stream + "'");
-        }
-
-        throw new IllegalStateException(
-                "QueryOffset failed for consumer '" + consumerName + "' on stream '" + stream +
-                        "' with response code " + code);
-    }
-
-    private static Object invokeNoArg(Object target, String methodName) throws Exception {
-        Method method = findMethod(target.getClass(), methodName);
-        method.setAccessible(true);
-        try {
-            return method.invoke(target);
-        } catch (InvocationTargetException e) {
-            Throwable cause = e.getTargetException();
-            if (cause instanceof Exception ex) {
-                throw ex;
-            }
-            throw e;
-        }
-    }
-
-    private static Object invoke(Object target, String methodName,
-                                 Class<?>[] paramTypes, Object[] args) throws Exception {
-        Method method = target.getClass().getMethod(methodName, paramTypes);
-        method.setAccessible(true);
-        try {
-            return method.invoke(target, args);
-        } catch (InvocationTargetException e) {
-            Throwable cause = e.getTargetException();
-            if (cause instanceof Exception ex) {
-                throw ex;
-            }
-            throw e;
-        }
-    }
-
-    private static Method findMethod(Class<?> type, String methodName) throws NoSuchMethodException {
-        Class<?> current = type;
-        while (current != null) {
-            try {
-                return current.getDeclaredMethod(methodName);
-            } catch (NoSuchMethodException ignored) {
-                current = current.getSuperclass();
-            }
-        }
-        throw new NoSuchMethodException("Method '" + methodName + "' not found on " + type.getName());
-    }
-
     /**
      * Determine if an exception represents a fatal error that should not be
      * retried or fallen back from.
      *
      * <p>Fatal errors include authentication failures, connection failures,
-     * and stream-does-not-exist errors.
+     * but exclude stream-deleted/missing conditions, which are handled by
+     * failOnDataLoss in the normal planning/read path.
      */
     private static boolean isFatalError(Exception e) {
         String msg = e.getMessage();
@@ -299,17 +214,9 @@ final class StoredOffsetLookup {
             return true;
         }
 
-        // Stream does not exist
-        if (lowerMsg.contains("stream does not exist") || lowerMsg.contains("no such stream")) {
-            return true;
-        }
-
         // Check cause chain for known fatal exception types
         Throwable cause = e;
         while (cause != null) {
-            if (cause instanceof com.rabbitmq.stream.StreamDoesNotExistException) {
-                return true;
-            }
             if (cause instanceof com.rabbitmq.stream.AuthenticationFailureException) {
                 return true;
             }

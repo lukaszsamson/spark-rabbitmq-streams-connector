@@ -722,6 +722,7 @@ class RabbitMQScanTest {
             return first;
         }
 
+        @Override
         public long committedOffset() {
             if (throwOnCommitted) {
                 throw new NoOffsetException("no committed");

@@ -640,6 +640,11 @@ class RealTimeModeTest {
         public long committedChunkId() {
             return offset;
         }
+
+        @Override
+        public long committedOffset() {
+            return offset;
+        }
     }
 
     private static final class NoopConsumer implements Consumer {

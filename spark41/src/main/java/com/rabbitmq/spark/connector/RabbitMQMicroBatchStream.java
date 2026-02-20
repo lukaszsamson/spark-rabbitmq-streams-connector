@@ -154,7 +154,7 @@ final class RabbitMQMicroBatchStream
                 LOG.info("No stored offsets found for consumer '{}', falling back to startingOffsets",
                         consumerName);
             } catch (IllegalStateException e) {
-                // Fatal error (auth, connection, stream does not exist) — fail fast
+                // Fatal error (auth/connection) — fail fast
                 throw e;
             } catch (Exception e) {
                 if (consumerNameExplicit) {
@@ -661,18 +661,36 @@ final class RabbitMQMicroBatchStream
         List<String> previous = streams;
         try {
             List<String> discovered = SuperStreamPartitionDiscovery.discoverPartitions(
-                    getEnvironment(), options.getSuperStream());
+                    options, options.getSuperStream());
             if (discovered.isEmpty()) {
                 if (options.isFailOnDataLoss()) {
                     throw new IllegalStateException(
                             "Superstream '" + options.getSuperStream() +
                                     "' has no partition streams");
                 }
+                if (previous != null && !previous.isEmpty()) {
+                    LOG.warn("Superstream '{}' discovery returned no partition streams; "
+                                    + "preserving cached topology ({} streams) because failOnDataLoss=false",
+                            options.getSuperStream(), previous.size());
+                    streams = previous;
+                    return streams;
+                }
                 LOG.warn("Superstream '{}' currently has no partition streams; returning empty topology "
                                 + "because failOnDataLoss=false",
                         options.getSuperStream());
                 streams = List.of();
                 return streams;
+            }
+
+            if (previous != null && !options.isFailOnDataLoss()) {
+                LinkedHashSet<String> merged = new LinkedHashSet<>(previous);
+                merged.addAll(discovered);
+                if (merged.size() != discovered.size()) {
+                    LOG.warn("Superstream '{}' discovery dropped {} cached partition streams; "
+                                    + "preserving cached topology because failOnDataLoss=false",
+                            options.getSuperStream(), merged.size() - discovered.size());
+                    discovered = new ArrayList<>(merged);
+                }
             }
 
             if (previous == null) {
@@ -963,28 +981,15 @@ final class RabbitMQMicroBatchStream
     }
 
     static long resolveTailOffset(StreamStats stats) {
-        // Prefer committedOffset() (RabbitMQ 4.3+) via reflection so this can
-        // compile against older stream-client artifacts that don't expose it.
         try {
-            Method committedOffset = stats.getClass().getMethod("committedOffset");
-            Object value = committedOffset.invoke(stats);
-            if (value instanceof Number n) {
-                return n.longValue() + 1;
-            }
-        } catch (NoSuchMethodException e) {
-            // Older client artifact; fall back to committedChunkId below.
-        } catch (InvocationTargetException e) {
-            if (!(e.getTargetException() instanceof NoOffsetException)) {
-                LOG.debug("committedOffset() lookup failed, falling back to committedChunkId(): {}",
-                        e.getTargetException().toString());
-            }
-            // no committed offset yet or transient issue: fall through to fallback.
-        } catch (IllegalAccessException e) {
-            LOG.debug("Unable to access committedOffset() via reflection, falling back: {}",
+            return stats.committedOffset() + 1;
+        } catch (NoOffsetException e) {
+            // Broker does not have a committed offset yet, fall back below.
+        } catch (RuntimeException e) {
+            LOG.debug("committedOffset() failed, falling back to committedChunkId(): {}",
                     e.toString());
         }
 
-        // Fallback approximation for older broker/client combinations.
         try {
             return stats.committedChunkId() + 1;
         } catch (NoOffsetException e) {

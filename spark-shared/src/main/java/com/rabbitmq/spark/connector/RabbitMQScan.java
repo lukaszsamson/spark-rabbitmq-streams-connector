@@ -21,8 +21,6 @@ import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
 
 /**
  * Logical representation of a RabbitMQ stream scan.
@@ -318,29 +316,7 @@ final class RabbitMQScan implements Scan {
     }
 
     static long resolveTailOffset(StreamStats stats) {
-        try {
-            Method committedOffset = stats.getClass().getMethod("committedOffset");
-            Object value = committedOffset.invoke(stats);
-            if (value instanceof Number n) {
-                return n.longValue() + 1;
-            }
-        } catch (NoSuchMethodException e) {
-            // Older client artifact; fall back to committedChunkId below.
-        } catch (InvocationTargetException e) {
-            if (!(e.getTargetException() instanceof NoOffsetException)) {
-                LOG.debug("committedOffset() lookup failed, falling back to committedChunkId(): {}",
-                        e.getTargetException().toString());
-            }
-        } catch (IllegalAccessException e) {
-            LOG.debug("Unable to access committedOffset() via reflection, falling back: {}",
-                    e.toString());
-        }
-
-        try {
-            return stats.committedChunkId() + 1;
-        } catch (NoOffsetException e) {
-            return 0;
-        }
+        return RabbitMQMicroBatchStream.resolveTailOffset(stats);
     }
 
     private long probeTailOffsetFromLastMessage(Environment env, String stream) {
