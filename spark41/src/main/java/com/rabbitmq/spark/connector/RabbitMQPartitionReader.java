@@ -65,8 +65,9 @@ final class RabbitMQPartitionReader
 
     // Task-level metric counters
     private long recordsRead = 0;
-    private long bytesRead = 0;
-    private long readLatencyMs = 0;
+    private long payloadBytesRead = 0;
+    private long estimatedWireBytesRead = 0;
+    private long pollWaitMs = 0;
 
     /**
      * A message queued by the consumer callback for pull-based reading.
@@ -138,7 +139,7 @@ final class RabbitMQPartitionReader
             try {
                 long pollStart = System.nanoTime();
                 qm = queue.poll(pollTimeoutMs, TimeUnit.MILLISECONDS);
-                readLatencyMs += TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - pollStart);
+                pollWaitMs += TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - pollStart);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 throw new IOException("Interrupted while reading from stream '" + stream + "'", e);
@@ -281,10 +282,8 @@ final class RabbitMQPartitionReader
                     qm.message(), stream, qm.offset(), qm.chunkTimestampMillis());
             lastEmittedOffset = qm.offset();
             recordsRead++;
-            byte[] body = qm.message().getBodyAsBinary();
-            if (body != null) {
-                bytesRead += body.length;
-            }
+            payloadBytesRead += MessageSizeEstimator.payloadBytes(qm.message());
+            estimatedWireBytesRead += MessageSizeEstimator.estimatedWireBytes(qm.message());
             return true;
         }
     }
@@ -340,7 +339,7 @@ final class RabbitMQPartitionReader
                 long pollMs = Math.min(remainingMs, pollTimeoutMs);
                 long pollStart = System.nanoTime();
                 qm = queue.poll(pollMs, TimeUnit.MILLISECONDS);
-                readLatencyMs += TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - pollStart);
+                pollWaitMs += TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - pollStart);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 throw new IOException("Interrupted while reading from stream '" + stream + "'", e);
@@ -388,10 +387,8 @@ final class RabbitMQPartitionReader
                     qm.message(), stream, qm.offset(), qm.chunkTimestampMillis());
             lastEmittedOffset = qm.offset();
             recordsRead++;
-            byte[] body = qm.message().getBodyAsBinary();
-            if (body != null) {
-                bytesRead += body.length;
-            }
+            payloadBytesRead += MessageSizeEstimator.payloadBytes(qm.message());
+            estimatedWireBytesRead += MessageSizeEstimator.estimatedWireBytes(qm.message());
             return RecordStatus.newStatusWithArrivalTimeMs(qm.chunkTimestampMillis());
         }
     }
@@ -403,7 +400,7 @@ final class RabbitMQPartitionReader
         }
         finished = true;
         // Report actual message sizes for running average estimation
-        MessageSizeTracker.record(bytesRead, recordsRead);
+        MessageSizeTracker.record(payloadBytesRead, recordsRead);
         try {
             if (consumer != null) {
                 consumer.close();
@@ -431,8 +428,11 @@ final class RabbitMQPartitionReader
     public CustomTaskMetric[] currentMetricsValues() {
         return new CustomTaskMetric[]{
                 RabbitMQSourceMetrics.taskMetric(RabbitMQSourceMetrics.RECORDS_READ, recordsRead),
-                RabbitMQSourceMetrics.taskMetric(RabbitMQSourceMetrics.BYTES_READ, bytesRead),
-                RabbitMQSourceMetrics.taskMetric(RabbitMQSourceMetrics.READ_LATENCY_MS, readLatencyMs),
+                RabbitMQSourceMetrics.taskMetric(
+                        RabbitMQSourceMetrics.PAYLOAD_BYTES_READ, payloadBytesRead),
+                RabbitMQSourceMetrics.taskMetric(
+                        RabbitMQSourceMetrics.ESTIMATED_WIRE_BYTES_READ, estimatedWireBytesRead),
+                RabbitMQSourceMetrics.taskMetric(RabbitMQSourceMetrics.POLL_WAIT_MS, pollWaitMs),
         };
     }
 

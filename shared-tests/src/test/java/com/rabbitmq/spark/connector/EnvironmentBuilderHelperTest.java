@@ -1,6 +1,7 @@
 package com.rabbitmq.spark.connector;
 
 import com.rabbitmq.stream.impl.StreamEnvironmentBuilder;
+import io.micrometer.observation.ObservationRegistry;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Field;
@@ -169,6 +170,59 @@ class EnvironmentBuilderHelperTest {
                 .cause()
                 .hasMessageContaining("observationCollectorClass")
                 .hasMessageContaining("returned null");
+    }
+
+    @Test
+    void observationRegistryProviderClassConfiguresMicrometerCollector() throws Exception {
+        ConnectorOptions options = new ConnectorOptions(Map.of(
+                "endpoints", "hostA:5552",
+                "stream", "test-stream",
+                "observationRegistryProviderClass",
+                "com.rabbitmq.spark.connector.EnvironmentBuilderHelperTest$TestObservationRegistryProvider"
+        ));
+
+        StreamEnvironmentBuilder builder = new StreamEnvironmentBuilder();
+        invokeConfigureObservationCollector(builder, options);
+
+        Object collector = getFieldValue(builder, "observationCollector");
+        assertThat(collector).isNotNull();
+        assertThat(collector.getClass().getName())
+                .contains("MicrometerObservationCollector");
+    }
+
+    @Test
+    void observationRegistryProviderClassReturningNullFailsFast() {
+        ConnectorOptions options = new ConnectorOptions(Map.of(
+                "endpoints", "hostA:5552",
+                "stream", "test-stream",
+                "observationRegistryProviderClass",
+                "com.rabbitmq.spark.connector.EnvironmentBuilderHelperTest$NullObservationRegistryProvider"
+        ));
+
+        StreamEnvironmentBuilder builder = new StreamEnvironmentBuilder();
+        assertThatThrownBy(() -> invokeConfigureObservationCollector(builder, options))
+                .hasCauseInstanceOf(IllegalArgumentException.class)
+                .cause()
+                .hasMessageContaining("observationRegistryProviderClass")
+                .hasMessageContaining("returned null");
+    }
+
+    @Test
+    void observationCollectorClassTakesPrecedenceOverRegistryProvider() throws Exception {
+        ConnectorOptions options = new ConnectorOptions(Map.of(
+                "endpoints", "hostA:5552",
+                "stream", "test-stream",
+                "observationCollectorClass",
+                "com.rabbitmq.spark.connector.EnvironmentBuilderHelperTest$TestObservationCollectorFactory",
+                "observationRegistryProviderClass",
+                "com.rabbitmq.spark.connector.EnvironmentBuilderHelperTest$TestObservationRegistryProvider"
+        ));
+
+        StreamEnvironmentBuilder builder = new StreamEnvironmentBuilder();
+        invokeConfigureObservationCollector(builder, options);
+
+        Object collector = getFieldValue(builder, "observationCollector");
+        assertThat(collector).isSameAs(TestObservationCollectorFactory.COLLECTOR);
     }
 
     @Test
@@ -433,6 +487,22 @@ class EnvironmentBuilderHelperTest {
             implements ConnectorObservationCollectorFactory {
         @Override
         public com.rabbitmq.stream.ObservationCollector<?> create(ConnectorOptions options) {
+            return null;
+        }
+    }
+
+    public static final class TestObservationRegistryProvider
+            implements ConnectorObservationRegistryProvider {
+        @Override
+        public ObservationRegistry create(ConnectorOptions options) {
+            return ObservationRegistry.create();
+        }
+    }
+
+    public static final class NullObservationRegistryProvider
+            implements ConnectorObservationRegistryProvider {
+        @Override
+        public ObservationRegistry create(ConnectorOptions options) {
             return null;
         }
     }

@@ -457,7 +457,7 @@ class RabbitMQPartitionReaderTest {
                     "test-stream", 0, 10, minimalOptions());
             RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
 
-            setPrivateField(reader, "bytesRead", 20L);
+            setPrivateField(reader, "payloadBytesRead", 20L);
             setPrivateField(reader, "recordsRead", 2L);
 
             reader.close();
@@ -474,7 +474,7 @@ class RabbitMQPartitionReaderTest {
                     "test-stream", 0, 10, minimalOptions());
             RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
 
-            setPrivateField(reader, "bytesRead", 20L);
+            setPrivateField(reader, "payloadBytesRead", 20L);
             setPrivateField(reader, "recordsRead", 2L);
 
             reader.close();
@@ -495,14 +495,16 @@ class RabbitMQPartitionReaderTest {
             RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
 
             setPrivateField(reader, "recordsRead", 3L);
-            setPrivateField(reader, "bytesRead", 30L);
-            setPrivateField(reader, "readLatencyMs", 7L);
+            setPrivateField(reader, "payloadBytesRead", 30L);
+            setPrivateField(reader, "estimatedWireBytesRead", 45L);
+            setPrivateField(reader, "pollWaitMs", 7L);
 
             var metrics = reader.currentMetricsValues();
-            assertThat(metrics).hasSize(3);
+            assertThat(metrics).hasSize(4);
             assertThat(metrics[0].value()).isEqualTo(3L);
             assertThat(metrics[1].value()).isEqualTo(30L);
-            assertThat(metrics[2].value()).isEqualTo(7L);
+            assertThat(metrics[2].value()).isEqualTo(45L);
+            assertThat(metrics[3].value()).isEqualTo(7L);
         }
 
         @Test

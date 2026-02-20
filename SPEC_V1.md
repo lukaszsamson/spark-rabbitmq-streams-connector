@@ -341,6 +341,8 @@ Type coercion notes:
 - `metadataFields` (string list; default `properties,application_properties,message_annotations,creation_time,routing_key`)
 - `failOnDataLoss` (bool; default true)
 - `addressResolverClass` (string, optional; connector-specific interface to avoid shaded RabbitMQ types)
+- `observationCollectorClass` (string, optional; custom `ObservationCollector` factory)
+- `observationRegistryProviderClass` (string, optional; Micrometer `ObservationRegistry` provider for built-in Rabbit observation collector)
 
 ### Options validation
 - Validate options at `TableProvider.getTable()` / `ScanBuilder` construction.
@@ -396,7 +398,7 @@ Type coercion notes:
 - Source metrics via `ReportsSourceMetrics` (string key-values in query progress):
   - `minOffsetsBehindLatest`, `maxOffsetsBehindLatest`, `avgOffsetsBehindLatest` computed as `max(0, tail - consumed)` where tail is from `reportLatestOffset()` and consumed is `latestConsumedOffset`.
 - Task-level metrics via `CustomMetric`:
-  - `recordsRead`, `bytesRead`, `readLatencyMs`, `recordsWritten`, `bytesWritten`, `writeLatencyMs`, `publishConfirms`, `publishErrors`.
+  - `recordsRead`, `payloadBytesRead`, `estimatedWireBytesRead`, `pollWaitMs`, `recordsWritten`, `payloadBytesWritten`, `estimatedWireBytesWritten`, `writeLatencyMs`, `publishConfirms`, `publishErrors`.
 - Log structured errors with stream and offset context.
 
 ## Offset serialization
@@ -424,6 +426,8 @@ Type coercion notes:
 
 ## Connector extension interfaces
 - `addressResolverClass` must implement a connector-defined interface (not RabbitMQ client types), have a public no-arg constructor, and run on the driver.
+- `observationCollectorClass` must implement a connector-defined factory interface and run on driver/executors.
+- `observationRegistryProviderClass` must implement a connector-defined Micrometer `ObservationRegistry` provider interface and run on driver/executors.
 - `filterPostFilterClass` must implement a connector-defined filter interface (not RabbitMQ client types), have a public no-arg constructor, and run on executors.
 - `partitionerClass` must implement a connector-defined routing interface (not RabbitMQ client types) and run on executors; routing must be deterministic for a given input.
 

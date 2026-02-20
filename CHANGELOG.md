@@ -25,7 +25,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Publisher confirms with optional deduplication via `producerName`.
 - Speculation-safe producer naming with `taskId` suffix.
 - Stream filtering (RabbitMQ 3.13+): `filterValues`, `filterMatchUnfiltered`, client-side post-filter.
-- Producer-side filter values via `filterValueColumn`.
+- Producer-side filter values via `filterValuePath` or `filterValueExtractorClass`.
 - Credit-based backpressure and configurable queue capacity.
 - `failOnDataLoss` handling for retention truncation and missing partitions.
 - TLS support with JKS keystore/truststore.
@@ -41,3 +41,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Environment option support for `observationCollectorClass`, `requestedHeartbeatSeconds`,
   `locatorConnectionCount`, `forceReplicaForConsumers`, `forceLeaderForProducers`,
   and connection backoff policy options.
+- Micrometer observation registry integration via `observationRegistryProviderClass`.
+- Task metric semantics update: `payloadBytesRead`, `estimatedWireBytesRead`, `pollWaitMs`,
+  `payloadBytesWritten`, and `estimatedWireBytesWritten`.

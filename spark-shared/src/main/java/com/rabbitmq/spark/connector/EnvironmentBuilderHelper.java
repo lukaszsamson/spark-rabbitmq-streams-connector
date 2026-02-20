@@ -4,8 +4,11 @@ import com.rabbitmq.stream.Address;
 import com.rabbitmq.stream.BackOffDelayPolicy;
 import com.rabbitmq.stream.Environment;
 import com.rabbitmq.stream.EnvironmentBuilder;
+import com.rabbitmq.stream.observation.micrometer.MicrometerObservationCollectorBuilder;
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslContextBuilder;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.TrustManagerFactory;
@@ -24,6 +27,8 @@ import java.util.List;
  * <p>Handles endpoints/URIs, TLS, credentials, vhost, and address resolver configuration.
  */
 final class EnvironmentBuilderHelper {
+
+    private static final Logger LOG = LoggerFactory.getLogger(EnvironmentBuilderHelper.class);
 
     private static final int DEFAULT_STREAM_PORT = 5552;
     private static final int DEFAULT_STREAM_TLS_PORT = 5551;
@@ -123,19 +128,45 @@ final class EnvironmentBuilderHelper {
     private static void configureObservationCollector(EnvironmentBuilder builder,
                                                       ConnectorOptions options) {
         String collectorClass = options.getObservationCollectorClass();
-        if (collectorClass == null || collectorClass.isEmpty()) {
+        String providerClass = options.getObservationRegistryProviderClass();
+        if (collectorClass != null && !collectorClass.isEmpty()
+                && providerClass != null && !providerClass.isEmpty()) {
+            LOG.warn("Both '{}' and '{}' are set; '{}' takes precedence",
+                    ConnectorOptions.OBSERVATION_COLLECTOR_CLASS,
+                    ConnectorOptions.OBSERVATION_REGISTRY_PROVIDER_CLASS,
+                    ConnectorOptions.OBSERVATION_COLLECTOR_CLASS);
+        }
+        if (collectorClass != null && !collectorClass.isEmpty()) {
+            ConnectorObservationCollectorFactory factory = ExtensionLoader.load(
+                    collectorClass, ConnectorObservationCollectorFactory.class,
+                    ConnectorOptions.OBSERVATION_COLLECTOR_CLASS);
+            var collector = factory.create(options);
+            if (collector == null) {
+                throw new IllegalArgumentException(
+                        "Class specified by '" + ConnectorOptions.OBSERVATION_COLLECTOR_CLASS +
+                                "' returned null ObservationCollector");
+            }
+            builder.observationCollector(collector);
             return;
         }
-        ConnectorObservationCollectorFactory factory = ExtensionLoader.load(
-                collectorClass, ConnectorObservationCollectorFactory.class,
-                ConnectorOptions.OBSERVATION_COLLECTOR_CLASS);
-        var collector = factory.create(options);
-        if (collector == null) {
-            throw new IllegalArgumentException(
-                    "Class specified by '" + ConnectorOptions.OBSERVATION_COLLECTOR_CLASS +
-                            "' returned null ObservationCollector");
+
+        if (providerClass == null || providerClass.isEmpty()) {
+            return;
         }
-        builder.observationCollector(collector);
+        ConnectorObservationRegistryProvider provider = ExtensionLoader.load(
+                providerClass, ConnectorObservationRegistryProvider.class,
+                ConnectorOptions.OBSERVATION_REGISTRY_PROVIDER_CLASS);
+        var observationRegistry = provider.create(options);
+        if (observationRegistry == null) {
+            throw new IllegalArgumentException(
+                    "Class specified by '" + ConnectorOptions.OBSERVATION_REGISTRY_PROVIDER_CLASS +
+                            "' returned null ObservationRegistry");
+        }
+        builder.observationCollector(new MicrometerObservationCollectorBuilder()
+                .registry(observationRegistry)
+                .build());
+        LOG.info("Configured RabbitMQ stream Micrometer observation collector from '{}'",
+                ConnectorOptions.OBSERVATION_REGISTRY_PROVIDER_CLASS);
     }
 
     private static void configureCompressionCodecFactory(EnvironmentBuilder builder,

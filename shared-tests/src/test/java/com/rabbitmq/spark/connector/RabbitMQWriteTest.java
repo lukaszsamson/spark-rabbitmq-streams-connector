@@ -164,7 +164,7 @@ class RabbitMQWriteTest {
         void supportedCustomMetricsIncludesWriteMetrics() {
             Write write = buildWrite();
             CustomMetric[] metrics = write.supportedCustomMetrics();
-            assertThat(metrics).hasSize(5);
+            assertThat(metrics).hasSize(6);
 
             Set<String> names = new HashSet<>();
             for (CustomMetric m : metrics) {
@@ -172,7 +172,8 @@ class RabbitMQWriteTest {
                 assertThat(m).isInstanceOf(CustomSumMetric.class);
             }
             assertThat(names).containsExactlyInAnyOrder(
-                    "recordsWritten", "bytesWritten", "writeLatencyMs",
+                    "recordsWritten", "payloadBytesWritten", "estimatedWireBytesWritten",
+                    "writeLatencyMs",
                     "publishConfirms", "publishErrors");
         }
     }
@@ -353,7 +354,7 @@ class RabbitMQWriteTest {
             // createWriter returns a DataWriter; it won't connect until write() is called
             var writer = factory.createWriter(0, 1);
             assertThat(writer).isInstanceOf(RabbitMQDataWriter.class);
-            assertThat(writer.currentMetricsValues()).hasSize(5);
+            assertThat(writer.currentMetricsValues()).hasSize(6);
         }
 
         @Test
@@ -362,7 +363,7 @@ class RabbitMQWriteTest {
                     minimalSinkOptions(), minimalSinkSchema());
             var writer = factory.createWriter(0, 1, 0L);
             assertThat(writer).isInstanceOf(RabbitMQDataWriter.class);
-            assertThat(writer.currentMetricsValues()).hasSize(5);
+            assertThat(writer.currentMetricsValues()).hasSize(6);
         }
     }
 
@@ -376,7 +377,9 @@ class RabbitMQWriteTest {
         @Test
         void metricsHaveCorrectNames() {
             assertThat(RabbitMQSinkMetrics.RECORDS_WRITTEN).isEqualTo("recordsWritten");
-            assertThat(RabbitMQSinkMetrics.BYTES_WRITTEN).isEqualTo("bytesWritten");
+            assertThat(RabbitMQSinkMetrics.PAYLOAD_BYTES_WRITTEN).isEqualTo("payloadBytesWritten");
+            assertThat(RabbitMQSinkMetrics.ESTIMATED_WIRE_BYTES_WRITTEN)
+                    .isEqualTo("estimatedWireBytesWritten");
             assertThat(RabbitMQSinkMetrics.WRITE_LATENCY_MS).isEqualTo("writeLatencyMs");
             assertThat(RabbitMQSinkMetrics.PUBLISH_CONFIRMS).isEqualTo("publishConfirms");
             assertThat(RabbitMQSinkMetrics.PUBLISH_ERRORS).isEqualTo("publishErrors");
@@ -453,7 +456,7 @@ class RabbitMQWriteTest {
             RabbitMQDataWriter writer = new RabbitMQDataWriter(
                     minimalSinkOptions(), minimalSinkSchema(), 0, 1, -1);
             var metrics = writer.currentMetricsValues();
-            assertThat(metrics).hasSize(5);
+            assertThat(metrics).hasSize(6);
             for (var m : metrics) {
                 assertThat(m.value()).isEqualTo(0);
             }

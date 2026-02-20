@@ -17,15 +17,17 @@ public final class RabbitMQSourceMetrics {
     // ---- Metric names (must match between CustomMetric and CustomTaskMetric) ----
 
     static final String RECORDS_READ = "recordsRead";
-    static final String BYTES_READ = "bytesRead";
-    static final String READ_LATENCY_MS = "readLatencyMs";
+    static final String PAYLOAD_BYTES_READ = "payloadBytesRead";
+    static final String ESTIMATED_WIRE_BYTES_READ = "estimatedWireBytesRead";
+    static final String POLL_WAIT_MS = "pollWaitMs";
 
     // ---- CustomMetric definitions (registered on Scan) ----
 
     static final CustomMetric[] SUPPORTED_METRICS = {
             new RecordsReadMetric(),
-            new BytesReadMetric(),
-            new ReadLatencyMsMetric(),
+            new PayloadBytesReadMetric(),
+            new EstimatedWireBytesReadMetric(),
+            new PollWaitMsMetric(),
     };
 
     public static final class RecordsReadMetric extends CustomSumMetric {
@@ -42,31 +44,45 @@ public final class RabbitMQSourceMetrics {
         }
     }
 
-    public static final class BytesReadMetric extends CustomSumMetric {
-        public BytesReadMetric() {}
+    public static final class PayloadBytesReadMetric extends CustomSumMetric {
+        public PayloadBytesReadMetric() {}
 
         @Override
         public String name() {
-            return BYTES_READ;
+            return PAYLOAD_BYTES_READ;
         }
 
         @Override
         public String description() {
-            return "Total bytes read from RabbitMQ streams";
+            return "Total payload bytes read from RabbitMQ streams";
         }
     }
 
-    public static final class ReadLatencyMsMetric extends CustomSumMetric {
-        public ReadLatencyMsMetric() {}
+    public static final class EstimatedWireBytesReadMetric extends CustomSumMetric {
+        public EstimatedWireBytesReadMetric() {}
 
         @Override
         public String name() {
-            return READ_LATENCY_MS;
+            return ESTIMATED_WIRE_BYTES_READ;
         }
 
         @Override
         public String description() {
-            return "Total read latency in milliseconds (time spent waiting for messages)";
+            return "Estimated total wire bytes read (payload + metadata)";
+        }
+    }
+
+    public static final class PollWaitMsMetric extends CustomSumMetric {
+        public PollWaitMsMetric() {}
+
+        @Override
+        public String name() {
+            return POLL_WAIT_MS;
+        }
+
+        @Override
+        public String description() {
+            return "Total queue poll wait time in milliseconds";
         }
     }
 

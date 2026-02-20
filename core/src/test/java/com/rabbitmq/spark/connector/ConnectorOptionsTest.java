@@ -1,5 +1,6 @@
 package com.rabbitmq.spark.connector;
 
+import io.micrometer.observation.ObservationRegistry;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
@@ -163,6 +164,16 @@ class ConnectorOptionsTest {
             var opts = new ConnectorOptions(map);
             assertThat(opts.getObservationCollectorClass())
                     .isEqualTo(TestObservationCollectorFactory.class.getName());
+        }
+
+        @Test
+        void parsesObservationRegistryProviderClass() {
+            var map = minimalStreamOptions();
+            map.put("observationRegistryProviderClass",
+                    TestObservationRegistryProvider.class.getName());
+            var opts = new ConnectorOptions(map);
+            assertThat(opts.getObservationRegistryProviderClass())
+                    .isEqualTo(TestObservationRegistryProvider.class.getName());
         }
 
         @Test
@@ -889,6 +900,28 @@ class ConnectorOptionsTest {
         }
 
         @Test
+        void rejectsInvalidObservationRegistryProviderClassNotFound() {
+            var map = minimalStreamOptions();
+            map.put("observationRegistryProviderClass", "com.nonexistent.RegistryProvider");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateCommon)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("observationRegistryProviderClass")
+                    .hasMessageContaining("not found");
+        }
+
+        @Test
+        void rejectsObservationRegistryProviderClassWrongType() {
+            var map = minimalStreamOptions();
+            map.put("observationRegistryProviderClass", "java.lang.String");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateCommon)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("observationRegistryProviderClass")
+                    .hasMessageContaining("does not implement");
+        }
+
+        @Test
         void rejectsInvalidCompressionCodecFactoryClassNotFound() {
             var map = minimalStreamOptions();
             map.put("compressionCodecFactoryClass", "com.nonexistent.CodecFactory");
@@ -1499,6 +1532,14 @@ class ConnectorOptionsTest {
         public com.rabbitmq.stream.compression.CompressionCodecFactory create(
                 ConnectorOptions options) {
             return compression -> null;
+        }
+    }
+
+    public static final class TestObservationRegistryProvider
+            implements ConnectorObservationRegistryProvider {
+        @Override
+        public ObservationRegistry create(ConnectorOptions options) {
+            return ObservationRegistry.create();
         }
     }
 

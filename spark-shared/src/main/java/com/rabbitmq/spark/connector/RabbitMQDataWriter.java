@@ -57,7 +57,8 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
 
     // Metrics
     private long recordsWritten = 0;
-    private long bytesWritten = 0;
+    private long payloadBytesWritten = 0;
+    private long estimatedWireBytesWritten = 0;
     private final AtomicLong writeLatencyMs = new AtomicLong(0);
     private final AtomicLong publishConfirms = new AtomicLong(0);
     private final AtomicLong publishErrors = new AtomicLong(0);
@@ -148,10 +149,8 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
 
         // Track metrics
         recordsWritten++;
-        byte[] body = converter.getValue(record);
-        if (body != null) {
-            bytesWritten += body.length;
-        }
+        payloadBytesWritten += MessageSizeEstimator.payloadBytes(message);
+        estimatedWireBytesWritten += MessageSizeEstimator.estimatedWireBytes(message);
     }
 
     @Override
@@ -189,10 +188,10 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
         }
 
         LOG.info("Committed partition {} (task {}): {} records, {} bytes",
-                partitionId, taskId, recordsWritten, bytesWritten);
+                partitionId, taskId, recordsWritten, payloadBytesWritten);
 
         return new RabbitMQWriterCommitMessage(
-                partitionId, taskId, recordsWritten, bytesWritten);
+                partitionId, taskId, recordsWritten, payloadBytesWritten);
     }
 
     @Override
@@ -236,7 +235,10 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
     public CustomTaskMetric[] currentMetricsValues() {
         return new CustomTaskMetric[]{
                 RabbitMQSinkMetrics.taskMetric(RabbitMQSinkMetrics.RECORDS_WRITTEN, recordsWritten),
-                RabbitMQSinkMetrics.taskMetric(RabbitMQSinkMetrics.BYTES_WRITTEN, bytesWritten),
+                RabbitMQSinkMetrics.taskMetric(
+                        RabbitMQSinkMetrics.PAYLOAD_BYTES_WRITTEN, payloadBytesWritten),
+                RabbitMQSinkMetrics.taskMetric(
+                        RabbitMQSinkMetrics.ESTIMATED_WIRE_BYTES_WRITTEN, estimatedWireBytesWritten),
                 RabbitMQSinkMetrics.taskMetric(RabbitMQSinkMetrics.WRITE_LATENCY_MS,
                         writeLatencyMs.get()),
                 RabbitMQSinkMetrics.taskMetric(RabbitMQSinkMetrics.PUBLISH_CONFIRMS,

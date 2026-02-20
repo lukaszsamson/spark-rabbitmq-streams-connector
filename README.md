@@ -184,6 +184,7 @@ By default, unrecognized columns cause an error. Set `ignoreUnknownColumns=true`
 | `failOnDataLoss` | bool | no | true | Fail on data loss (retention truncation, missing partitions) |
 | `addressResolverClass` | string | no | — | Custom address resolver (connector interface) |
 | `observationCollectorClass` | string | no | — | Custom observation collector (connector interface) |
+| `observationRegistryProviderClass` | string | no | — | Micrometer `ObservationRegistry` provider (connector interface) |
 | `environmentId` | string | no | — | Environment pool key override |
 
 \* At least one of `endpoints` or `uris` must be set.
@@ -347,6 +348,7 @@ The connector provides extension points via connector-defined interfaces (not Ra
 | `filterValueExtractorClass` | `ConnectorFilterValueExtractor` | Executors | Producer-side filter value derivation |
 | `partitionerClass` | `ConnectorRoutingStrategy` | Executors | Custom superstream routing (must be deterministic) |
 | `observationCollectorClass` | `ConnectorObservationCollectorFactory` | Both | Custom observability |
+| `observationRegistryProviderClass` | `ConnectorObservationRegistryProvider` | Both | Provide Micrometer observation registry |
 | `compressionCodecFactoryClass` | `ConnectorCompressionCodecFactory` | Executors | Custom compression codec |
 
 All extension classes must have a public no-arg constructor.

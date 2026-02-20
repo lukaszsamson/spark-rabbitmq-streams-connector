@@ -17,7 +17,8 @@ public final class RabbitMQSinkMetrics {
     // ---- Metric names ----
 
     static final String RECORDS_WRITTEN = "recordsWritten";
-    static final String BYTES_WRITTEN = "bytesWritten";
+    static final String PAYLOAD_BYTES_WRITTEN = "payloadBytesWritten";
+    static final String ESTIMATED_WIRE_BYTES_WRITTEN = "estimatedWireBytesWritten";
     static final String WRITE_LATENCY_MS = "writeLatencyMs";
     static final String PUBLISH_CONFIRMS = "publishConfirms";
     static final String PUBLISH_ERRORS = "publishErrors";
@@ -26,7 +27,8 @@ public final class RabbitMQSinkMetrics {
 
     static final CustomMetric[] SUPPORTED_METRICS = {
             new RecordsWrittenMetric(),
-            new BytesWrittenMetric(),
+            new PayloadBytesWrittenMetric(),
+            new EstimatedWireBytesWrittenMetric(),
             new WriteLatencyMetric(),
             new PublishConfirmsMetric(),
             new PublishErrorsMetric(),
@@ -46,17 +48,31 @@ public final class RabbitMQSinkMetrics {
         }
     }
 
-    public static final class BytesWrittenMetric extends CustomSumMetric {
-        public BytesWrittenMetric() {}
+    public static final class PayloadBytesWrittenMetric extends CustomSumMetric {
+        public PayloadBytesWrittenMetric() {}
 
         @Override
         public String name() {
-            return BYTES_WRITTEN;
+            return PAYLOAD_BYTES_WRITTEN;
         }
 
         @Override
         public String description() {
-            return "Total bytes written to RabbitMQ streams";
+            return "Total payload bytes written to RabbitMQ streams";
+        }
+    }
+
+    public static final class EstimatedWireBytesWrittenMetric extends CustomSumMetric {
+        public EstimatedWireBytesWrittenMetric() {}
+
+        @Override
+        public String name() {
+            return ESTIMATED_WIRE_BYTES_WRITTEN;
+        }
+
+        @Override
+        public String description() {
+            return "Estimated total wire bytes written (payload + metadata)";
         }
     }
 

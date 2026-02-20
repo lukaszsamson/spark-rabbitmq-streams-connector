@@ -107,14 +107,15 @@ class RabbitMQMicroBatchStreamTest {
             assertThat(stream).isInstanceOf(ReportsSourceMetrics.class);
 
             CustomMetric[] metrics = scan.supportedCustomMetrics();
-            assertThat(metrics).hasSize(3);
+            assertThat(metrics).hasSize(4);
             Set<String> names = new HashSet<>();
             for (CustomMetric m : metrics) {
                 names.add(m.name());
                 assertThat(m).isInstanceOf(CustomSumMetric.class);
             }
             assertThat(names).containsExactlyInAnyOrder(
-                    "recordsRead", "bytesRead", "readLatencyMs");
+                    "recordsRead", "payloadBytesRead",
+                    "estimatedWireBytesRead", "pollWaitMs");
         }
 
         @Test
@@ -124,7 +125,7 @@ class RabbitMQMicroBatchStreamTest {
             var scan = new RabbitMQScan(opts, schema);
 
             CustomMetric[] metrics = scan.supportedCustomMetrics();
-            assertThat(metrics).hasSize(3);
+            assertThat(metrics).hasSize(4);
 
             Set<String> names = new HashSet<>();
             for (CustomMetric m : metrics) {
@@ -132,7 +133,8 @@ class RabbitMQMicroBatchStreamTest {
                 assertThat(m).isInstanceOf(CustomSumMetric.class);
             }
             assertThat(names).containsExactlyInAnyOrder(
-                    "recordsRead", "bytesRead", "readLatencyMs");
+                    "recordsRead", "payloadBytesRead",
+                    "estimatedWireBytesRead", "pollWaitMs");
         }
     }
 
