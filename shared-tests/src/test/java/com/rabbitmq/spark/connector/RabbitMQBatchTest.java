@@ -147,7 +147,7 @@ class RabbitMQBatchTest {
         }
 
         @Test
-        void splitProportionalToData() {
+        void splitEvenlyAcrossStreams() {
             Map<String, long[]> ranges = new LinkedHashMap<>();
             ranges.put("s1", new long[]{0, 900});  // 90% of data
             ranges.put("s2", new long[]{0, 100});  // 10% of data
@@ -159,15 +159,15 @@ class RabbitMQBatchTest {
 
             assertThat(partitions).hasSize(10);
 
-            // s1 should have more splits than s2
+            // splits should be distributed evenly by stream
             long s1Splits = java.util.Arrays.stream(partitions)
                     .filter(p -> ((RabbitMQInputPartition) p).getStream().equals("s1"))
                     .count();
             long s2Splits = java.util.Arrays.stream(partitions)
                     .filter(p -> ((RabbitMQInputPartition) p).getStream().equals("s2"))
                     .count();
-            assertThat(s1Splits).isEqualTo(9);
-            assertThat(s2Splits).isEqualTo(1);
+            assertThat(s1Splits).isEqualTo(5);
+            assertThat(s2Splits).isEqualTo(5);
         }
 
         @Test

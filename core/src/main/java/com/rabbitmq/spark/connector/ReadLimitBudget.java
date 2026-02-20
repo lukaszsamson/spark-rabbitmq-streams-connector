@@ -3,15 +3,17 @@ package com.rabbitmq.spark.connector;
 import java.util.*;
 
 /**
- * Distributes a read budget (records or bytes) proportionally across streams
- * based on pending data per stream.
+ * Distributes a read budget (records or bytes) across streams using deterministic,
+ * even-per-stream allocation.
+ *
+ * <p>Offset deltas ({@code tail - start}) are treated as range caps, not message counts.
  *
  * <p>Algorithm:
  * <ol>
- *   <li>Compute pending = tail - start for each stream</li>
- *   <li>If total pending ≤ budget, return tail offsets (all data fits)</li>
- *   <li>Otherwise, allocate floor shares proportionally, at least 1 per non-empty stream</li>
- *   <li>Distribute remainder by largest fractional share</li>
+ *   <li>Compute available range span ({@code max(0, tail - start)}) per stream</li>
+ *   <li>If total available span ≤ budget, return tail offsets (all data fits)</li>
+ *   <li>Otherwise, allocate budget evenly across non-empty streams, capped by available span</li>
+ *   <li>Redistribute any leftover budget from capped streams to remaining streams</li>
  * </ol>
  */
 public final class ReadLimitBudget {
@@ -19,7 +21,8 @@ public final class ReadLimitBudget {
     private ReadLimitBudget() {}
 
     /**
-     * Distribute a record budget proportionally across streams.
+     * Distribute a record budget evenly across non-empty streams, capped by each
+     * stream's available offset span.
      *
      * @param startOffsets  stream → start offset (inclusive)
      * @param tailOffsets   stream → tail offset (exclusive)
@@ -36,7 +39,7 @@ public final class ReadLimitBudget {
             return new LinkedHashMap<>(startOffsets);
         }
 
-        // Compute pending per stream
+        // Compute available range span per stream
         Map<String, Long> pending = new LinkedHashMap<>();
         long totalPending = 0;
         for (Map.Entry<String, Long> entry : tailOffsets.entrySet()) {
@@ -57,8 +60,8 @@ public final class ReadLimitBudget {
             return new LinkedHashMap<>(tailOffsets);
         }
 
-        // Proportional allocation with floor + remainder
-        Map<String, Long> allocated = allocateProportionally(pending, budget);
+        // Even allocation across streams, capped by available range spans.
+        Map<String, Long> allocated = allocateEvenlyWithCaps(pending, budget);
 
         // Compute end offsets
         Map<String, Long> endOffsets = new LinkedHashMap<>();
@@ -73,8 +76,8 @@ public final class ReadLimitBudget {
     }
 
     /**
-     * Distribute a byte budget proportionally across streams, using an
-     * estimated message size to convert bytes to record counts.
+     * Distribute a byte budget by converting bytes to a record budget and applying
+     * the same even-per-stream capped distribution as record budgets.
      *
      * @param startOffsets          stream → start offset (inclusive)
      * @param tailOffsets           stream → tail offset (exclusive)
@@ -107,6 +110,80 @@ public final class ReadLimitBudget {
             result.put(stream, Math.min(va, vb));
         }
         return result;
+    }
+
+    /**
+     * Allocate budget evenly across entries, capped by their per-entry capacities.
+     *
+     * <p>Streams are processed in insertion order for deterministic tie-breaking.
+     */
+    static Map<String, Long> allocateEvenlyWithCaps(
+            Map<String, Long> capacity, long budget) {
+
+        Map<String, Long> allocation = new LinkedHashMap<>();
+        for (String stream : capacity.keySet()) {
+            allocation.put(stream, 0L);
+        }
+        if (budget <= 0) {
+            return allocation;
+        }
+
+        List<String> eligible = new ArrayList<>();
+        for (Map.Entry<String, Long> entry : capacity.entrySet()) {
+            if (entry.getValue() > 0) {
+                eligible.add(entry.getKey());
+            }
+        }
+
+        long remaining = budget;
+        while (remaining > 0 && !eligible.isEmpty()) {
+            long baseShare = remaining / eligible.size();
+            long remainder = remaining % eligible.size();
+
+            if (baseShare == 0) {
+                for (String stream : eligible) {
+                    if (remaining == 0) {
+                        break;
+                    }
+                    long used = allocation.getOrDefault(stream, 0L);
+                    long cap = Math.max(0L, capacity.getOrDefault(stream, 0L) - used);
+                    if (cap <= 0) {
+                        continue;
+                    }
+                    allocation.put(stream, used + 1);
+                    remaining--;
+                }
+                break;
+            }
+
+            long spent = 0;
+            List<String> nextEligible = new ArrayList<>();
+            for (int i = 0; i < eligible.size(); i++) {
+                String stream = eligible.get(i);
+                long used = allocation.getOrDefault(stream, 0L);
+                long cap = Math.max(0L, capacity.getOrDefault(stream, 0L) - used);
+                if (cap <= 0) {
+                    continue;
+                }
+
+                long requested = baseShare + (i < remainder ? 1 : 0);
+                long granted = Math.min(requested, cap);
+                allocation.put(stream, used + granted);
+                spent += granted;
+
+                if (cap > granted) {
+                    nextEligible.add(stream);
+                }
+            }
+
+            if (spent == 0) {
+                break;
+            }
+            remaining -= spent;
+            eligible = nextEligible;
+        }
+
+        return allocation;
     }
 
     /**

@@ -659,8 +659,8 @@ class RabbitMQMicroBatchStreamTest {
             });
 
             RabbitMQStreamOffset latest = (RabbitMQStreamOffset) stream.latestOffset(start, limit);
-            assertThat(latest.getStreamOffsets()).containsEntry("s1", 33L);
-            assertThat(latest.getStreamOffsets()).containsEntry("s2", 67L);
+            assertThat(latest.getStreamOffsets()).containsEntry("s1", 50L);
+            assertThat(latest.getStreamOffsets()).containsEntry("s2", 50L);
         }
 
         @Test
@@ -991,7 +991,7 @@ class RabbitMQMicroBatchStreamTest {
         }
 
         @Test
-        void planWithSplittingDistributesSplitsProportionally() {
+        void planWithSplittingDistributesSplitsEvenlyAcrossStreams() {
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
             opts.put("stream", "test-stream");
@@ -1016,13 +1016,13 @@ class RabbitMQMicroBatchStreamTest {
                         .add(new long[]{p.getStartOffset(), p.getEndOffset()});
             }
 
-            assertThat(splits.get("s1")).hasSize(2);
-            assertThat(splits.get("s2")).hasSize(4);
+            assertThat(splits.get("s1")).hasSize(3);
+            assertThat(splits.get("s2")).hasSize(3);
 
             assertThat(formatRanges(splits.get("s1")))
-                    .containsExactly("0-50", "50-100");
+                    .containsExactly("0-34", "34-67", "67-100");
             assertThat(formatRanges(splits.get("s2")))
-                    .containsExactly("0-50", "50-100", "100-150", "150-200");
+                    .containsExactly("0-67", "67-134", "134-200");
         }
 
         @Test
@@ -1077,7 +1077,7 @@ class RabbitMQMicroBatchStreamTest {
         }
 
         @Test
-        void planWithSplittingRemainderGoesToLargestFraction() {
+        void planWithSplittingRemainderIsDeterministicByStreamOrder() {
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
             opts.put("stream", "test-stream");

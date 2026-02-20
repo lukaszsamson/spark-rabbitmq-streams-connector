@@ -139,7 +139,7 @@ Type coercion notes:
   - Each split is a distinct consumer with a unique consumer name.
   - The connector enforces `[startOffset, endOffset)` client-side and discards excess messages from the final chunk.
   - This increases connections and can discard some messages at chunk boundaries.
-- For superstreams with `minPartitions > partitionStreamCount`, split individual partition streams by offset ranges (proportional to pending data). If `minPartitions <= partitionStreamCount`, no additional splitting occurs.
+- For superstreams with `minPartitions > partitionStreamCount`, split individual partition streams by offset ranges with deterministic, even-per-stream split allocation. If `minPartitions <= partitionStreamCount`, no additional splitting occurs.
 
 ### Split offset merge
 - Checkpoint offsets remain keyed by partition stream name.
@@ -188,15 +188,15 @@ Type coercion notes:
 
 ### Micro-batch planning
 - Use `SupportsAdmissionControl` to apply `ReadLimit`:
-  - `maxRecordsPerTrigger` maps to `ReadLimit.maxRows(n)`; distribute proportionally to pending data per partition stream (Spark input partitions), at least 1 record per non-empty partition.
-  - `maxBytesPerTrigger` maps to `ReadLimit.maxBytes(n)`; distribute proportionally using estimated bytes per partition (best-effort).
+  - `maxRecordsPerTrigger` maps to `ReadLimit.maxRows(n)`; distribute evenly across non-empty partition streams, capped by each stream's offset range span.
+  - `maxBytesPerTrigger` maps to `ReadLimit.maxBytes(n)`; convert bytes to record budget using estimated bytes/message, then apply the same even distribution with per-stream caps.
   - Byte estimation: maintain a running average message size from previous batches; the first batch uses `estimatedMessageSizeBytes` (default 1024).
-  - Rounding strategy: allocate floor shares, then distribute remainder by largest fractional share.
+  - Rounding strategy: allocate even base shares, then distribute remainder deterministically by stream order.
   - `getDefaultReadLimit()` returns `maxRows`, `maxBytes`, composite, or `allAvailable` depending on configured limits.
   - `latestOffset(start, ReadLimit)` dispatch:
     - `ReadAllAvailable`: return full tail offsets.
-    - `ReadMaxRows`: apply proportional record budget.
-    - `ReadMaxBytes`: apply proportional byte budget using estimated bytes/message.
+    - `ReadMaxRows`: apply even record budget with per-stream caps.
+    - `ReadMaxBytes`: apply even byte-derived record budget with per-stream caps.
     - `CompositeReadLimit`: apply the most restrictive of its components.
     - Unknown types: treat as `ReadAllAvailable`.
 - `latestOffset()` uses broker stats:

@@ -46,3 +46,5 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Micrometer observation registry integration via `observationRegistryProviderClass`.
 - Task metric semantics update: `payloadBytesRead`, `estimatedWireBytesRead`, `pollWaitMs`,
   `payloadBytesWritten`, and `estimatedWireBytesWritten`.
+- Source planning now uses deterministic even-per-stream allocation for `minPartitions`,
+  `maxRecordsPerTrigger`, and `maxBytesPerTrigger` budgets (offset spans act as caps, not weighting).

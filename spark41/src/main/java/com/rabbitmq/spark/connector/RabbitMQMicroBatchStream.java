@@ -280,40 +280,28 @@ final class RabbitMQMicroBatchStream
 
     /**
      * Split streams into more partitions when minPartitions > stream count.
-     * Each stream gets splits proportional to its share of total pending messages.
+     * Split counts are distributed evenly across streams.
      */
     private void planWithSplitting(List<InputPartition> partitions,
                                     Map<String, long[]> ranges, int minPartitions) {
-        long totalMessages = 0;
+        long totalOffsetSpan = 0;
         for (long[] range : ranges.values()) {
-            totalMessages += range[1] - range[0];
+            totalOffsetSpan += Math.max(0L, range[1] - range[0]);
         }
-        if (totalMessages == 0) {
+        if (totalOffsetSpan == 0) {
             return;
         }
 
-        // Allocate splits per stream proportional to message count
+        // Allocate deterministic split counts per stream.
         Map<String, Integer> splitsPerStream = new LinkedHashMap<>();
-        Map<String, Double> fractional = new LinkedHashMap<>();
-        int allocated = 0;
-
-        for (Map.Entry<String, long[]> entry : ranges.entrySet()) {
-            String stream = entry.getKey();
-            long messages = entry.getValue()[1] - entry.getValue()[0];
-            double share = (double) messages / totalMessages * minPartitions;
-            int floor = Math.max(1, (int) share);
-            splitsPerStream.put(stream, floor);
-            fractional.put(stream, share - floor);
-            allocated += floor;
-        }
-
-        // Distribute remainder by largest fractional share
-        int remaining = minPartitions - allocated;
-        if (remaining > 0) {
-            fractional.entrySet().stream()
-                    .sorted(Map.Entry.<String, Double>comparingByValue().reversed())
-                    .limit(remaining)
-                    .forEach(e -> splitsPerStream.merge(e.getKey(), 1, Integer::sum));
+        int streamCount = ranges.size();
+        int baseSplits = minPartitions / streamCount;
+        int remainder = minPartitions % streamCount;
+        int streamIndex = 0;
+        for (String stream : ranges.keySet()) {
+            int splitCount = Math.max(1, baseSplits + (streamIndex < remainder ? 1 : 0));
+            splitsPerStream.put(stream, splitCount);
+            streamIndex++;
         }
 
         // Create split partitions
@@ -322,17 +310,17 @@ final class RabbitMQMicroBatchStream
             long start = entry.getValue()[0];
             long end = entry.getValue()[1];
             int numSplits = splitsPerStream.getOrDefault(stream, 1);
-            long messages = end - start;
+            long offsetSpan = end - start;
 
-            if (numSplits <= 1 || messages <= 1) {
+            if (numSplits <= 1 || offsetSpan <= 1) {
                 partitions.add(new RabbitMQInputPartition(
                         stream, start, end, options,
                         useConfiguredStartingOffset(stream, start)));
                 continue;
             }
 
-            long chunkSize = messages / numSplits;
-            long rem = messages % numSplits;
+            long chunkSize = offsetSpan / numSplits;
+            long rem = offsetSpan % numSplits;
             long currentStart = start;
             for (int i = 0; i < numSplits; i++) {
                 long splitSize = chunkSize + (i < rem ? 1 : 0);

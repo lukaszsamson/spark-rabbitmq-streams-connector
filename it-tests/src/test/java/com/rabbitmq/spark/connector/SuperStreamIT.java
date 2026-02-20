@@ -1023,10 +1023,10 @@ class SuperStreamIT extends AbstractRabbitMQIT {
         }
     }
 
-    // ---- IT-RL-003: skewed superstream with proportional budget ----
+    // ---- IT-RL-003: skewed superstream with bounded budget ----
 
     @Test
-    void streamingSkewedSuperStreamProportionalBudget() throws Exception {
+    void streamingSkewedSuperStreamBoundedBudget() throws Exception {
         // Publish skewed data: 100 to p0, 10 to p1, 1 to p2
         publishMessages(superStream + "-0", 100, "p0-");
         publishMessages(superStream + "-1", 10, "p1-");

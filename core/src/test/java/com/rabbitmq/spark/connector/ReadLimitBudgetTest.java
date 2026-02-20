@@ -9,7 +9,7 @@ import java.util.Map;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Tests for {@link ReadLimitBudget} proportional budget distribution.
+ * Tests for {@link ReadLimitBudget} deterministic budget distribution.
  */
 class ReadLimitBudgetTest {
 
@@ -44,17 +44,14 @@ class ReadLimitBudgetTest {
         }
 
         @Test
-        void proportionalDistributionTwoStreams() {
+        void evenDistributionTwoStreams() {
             Map<String, Long> start = Map.of("s1", 0L, "s2", 0L);
             Map<String, Long> tail = Map.of("s1", 300L, "s2", 100L);
 
             Map<String, Long> result = ReadLimitBudget.distributeRecordBudget(start, tail, 100);
 
-            long s1End = result.get("s1");
-            long s2End = result.get("s2");
-            // s1 has 75% of data → gets ~75 of budget, s2 gets ~25
-            assertThat(s1End + s2End).isEqualTo(100L);
-            assertThat(s1End).isGreaterThan(s2End);
+            assertThat(result.get("s1")).isEqualTo(50L);
+            assertThat(result.get("s2")).isEqualTo(50L);
         }
 
         @Test
