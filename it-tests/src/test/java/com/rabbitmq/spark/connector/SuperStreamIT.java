@@ -143,7 +143,7 @@ class SuperStreamIT extends AbstractRabbitMQIT {
                 .option("superstream", superStream)
                 .option("startingOffsets", "earliest")
                 .option("filterValues", "alpha")
-                .option("filterValueColumn", "filter")
+                .option("filterValuePath", "application_properties.filter")
                 .option("filterMatchUnfiltered", "false")
                 .option("pollTimeoutMs", "500")
                 .option("maxWaitMs", "10000")

@@ -230,7 +230,7 @@ Type coercion notes:
 - Validate stream/superstream existence at planning time using `Environment.streamExists()` or by catching `StreamDoesNotExistException` from `queryStreamStats()`.
 - Fail fast with a descriptive error when the stream is missing.
 - Validate broker version when version-gated options are set:
-  - `filterValues`/`filterValueColumn` require RabbitMQ 3.13+.
+  - `filterValues` and producer-side filter extraction options require RabbitMQ 3.13+.
   - `committedOffset()` requires RabbitMQ 4.3+; on older versions, fall back to `committedChunkId()` with a warning.
   - Unsupported combinations fail with a descriptive error at planning time.
 
@@ -360,7 +360,7 @@ Type coercion notes:
 - `serverSideOffsetTracking` (bool; default true for streaming, false for batch; commit-time storage only, not auto-tracking)
 - `filterValues` (comma-separated; requires RabbitMQ 3.13+ and broker-side filtering enabled)
 - `filterMatchUnfiltered` (bool; default false)
-- `filterPostFilterClass` (string, optional; connector-specific filter interface to avoid shaded RabbitMQ types)
+- `filterPostFilterClass` (string, optional; connector post-filter interface with full message view)
 - `filterWarningOnMismatch` (bool; default true; log when post-filter drops messages due to Bloom false positives)
 - `pollTimeoutMs` (long; default 30000)
 - `maxWaitMs` (long; default 300000)
@@ -379,7 +379,10 @@ Type coercion notes:
 - `subEntrySize` (int; >1 enables batching/compression; disables dedup guarantees)
 - `routingStrategy` (hash|key|custom)
 - `partitionerClass` (string; for custom routing)
-- `filterValueColumn` (string; for producer-side filtering, requires RabbitMQ 3.13+)
+- `filterValuePath` (string; producer-side filter path: `application_properties.*`, `message_annotations.*`, or `properties.*`)
+- `filterValueExtractorClass` (string; custom producer-side filter extractor class)
+- `filterValueColumn` is removed (hard cutoff); connector fails fast if provided.
+- `filterPostFilterClassV2` is removed (hard cutoff); connector fails fast if provided.
 - `ignoreUnknownColumns` (bool; default false; when true, extra input columns are ignored)
 
 ### Auth extensions (future)
@@ -581,7 +584,7 @@ Acceptance criteria:
 4. Release prep: M8
 
 ## Filtering defaults
-- When `filterValueColumn` is absent, no producer-side filter value is set. Messages are published without a filter value and will be delivered only to consumers with `filterMatchUnfiltered = true`.
+- When both `filterValuePath` and `filterValueExtractorClass` are absent, no producer-side filter value is set. Messages are published without a filter value and will be delivered only to consumers with `filterMatchUnfiltered = true`.
 
 ## Appendix: References
 - RabbitMQ Stream Java Client super streams (topology, routing strategies, producer requirements): https://rabbitmq.github.io/rabbitmq-stream-java-client/stable/htmlsingle/#super-streams

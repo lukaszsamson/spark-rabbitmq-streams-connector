@@ -231,7 +231,7 @@ By default, unrecognized columns cause an error. Set `ignoreUnknownColumns=true`
 |--------|------|---------|-------------|
 | `filterValues` | string | — | Comma-separated filter values for server-side filtering |
 | `filterMatchUnfiltered` | bool | false | Also deliver messages without a filter value |
-| `filterPostFilterClass` | string | — | Custom client-side post-filter (connector interface) |
+| `filterPostFilterClass` | string | — | Custom client-side post-filter (message-view connector interface) |
 | `filterWarningOnMismatch` | bool | true | Log warnings when post-filter drops messages |
 
 ### Sink options
@@ -251,7 +251,8 @@ By default, unrecognized columns cause an error. Set `ignoreUnknownColumns=true`
 | `compressionCodecFactoryClass` | string | — | Custom compression codec factory (connector interface) |
 | `routingStrategy` | string | hash | Superstream routing: `hash`, `key`, or `custom` |
 | `partitionerClass` | string | — | Custom routing strategy class (required when `routingStrategy=custom`) |
-| `filterValueColumn` | string | — | Column for producer-side filter value (RabbitMQ 3.13+) |
+| `filterValuePath` | string | — | Producer-side filter value path (`application_properties.*`, `message_annotations.*`, `properties.*`) |
+| `filterValueExtractorClass` | string | — | Custom producer-side filter value extractor class |
 | `ignoreUnknownColumns` | bool | false | Ignore unrecognized input columns instead of failing |
 
 ## Offset handling and semantics
@@ -343,6 +344,7 @@ The connector provides extension points via connector-defined interfaces (not Ra
 |--------|-----------|---------|-------------|
 | `addressResolverClass` | `ConnectorAddressResolver` | Driver | Custom address resolution |
 | `filterPostFilterClass` | `ConnectorPostFilter` | Executors | Client-side message filtering |
+| `filterValueExtractorClass` | `ConnectorFilterValueExtractor` | Executors | Producer-side filter value derivation |
 | `partitionerClass` | `ConnectorRoutingStrategy` | Executors | Custom superstream routing (must be deterministic) |
 | `observationCollectorClass` | `ConnectorObservationCollectorFactory` | Both | Custom observability |
 | `compressionCodecFactoryClass` | `ConnectorCompressionCodecFactory` | Executors | Custom compression codec |

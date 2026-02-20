@@ -589,6 +589,7 @@ class ConnectorOptionsTest {
             var opts = new ConnectorOptions(map);
             assertThat(opts.getFilterPostFilterClass()).isEqualTo("com.example.MyFilter");
         }
+
     }
 
     // ========================================================================
@@ -678,11 +679,20 @@ class ConnectorOptionsTest {
         }
 
         @Test
-        void parsesFilterValueColumn() {
+        void parsesFilterValuePath() {
             var map = minimalStreamOptions();
-            map.put("filterValueColumn", "region");
+            map.put("filterValuePath", "application_properties.region");
             var opts = new ConnectorOptions(map);
-            assertThat(opts.getFilterValueColumn()).isEqualTo("region");
+            assertThat(opts.getFilterValuePath()).isEqualTo("application_properties.region");
+        }
+
+        @Test
+        void parsesFilterValueExtractorClass() {
+            var map = minimalStreamOptions();
+            map.put("filterValueExtractorClass", TestFilterValueExtractor.class.getName());
+            var opts = new ConnectorOptions(map);
+            assertThat(opts.getFilterValueExtractorClass()).isEqualTo(
+                    TestFilterValueExtractor.class.getName());
         }
 
         @Test
@@ -958,6 +968,17 @@ class ConnectorOptionsTest {
                     .isInstanceOf(IllegalArgumentException.class)
                     .hasMessageContaining("maxTrackingConsumersByConnection");
         }
+
+        @Test
+        void rejectsRemovedFilterValueColumnOption() {
+            var map = minimalStreamOptions();
+            map.put("filterValueColumn", "region");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateCommon)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("filterValueColumn")
+                    .hasMessageContaining("removed");
+        }
     }
 
     // ========================================================================
@@ -1202,6 +1223,17 @@ class ConnectorOptionsTest {
         }
 
         @Test
+        void rejectsRemovedFilterPostFilterClassV2Option() {
+            var map = minimalStreamOptions();
+            map.put("filterPostFilterClassV2", "com.example.MyFilter");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateForSource)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("filterPostFilterClassV2")
+                    .hasMessageContaining("removed");
+        }
+
+        @Test
         void rejectsNegativeEndingOffset() {
             var map = minimalStreamOptions();
             map.put("endingOffsets", "offset");
@@ -1389,6 +1421,41 @@ class ConnectorOptionsTest {
                     .isInstanceOf(IllegalArgumentException.class)
                     .hasMessageContaining("batchPublishingDelayMs");
         }
+
+        @Test
+        void rejectsBothFilterValuePathAndExtractorClass() {
+            var map = minimalStreamOptions();
+            map.put("filterValuePath", "application_properties.region");
+            map.put("filterValueExtractorClass", TestFilterValueExtractor.class.getName());
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateForSink)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("Only one")
+                    .hasMessageContaining("filterValuePath")
+                    .hasMessageContaining("filterValueExtractorClass");
+        }
+
+        @Test
+        void rejectsUnknownFilterValuePathRoot() {
+            var map = minimalStreamOptions();
+            map.put("filterValuePath", "headers.region");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateForSink)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("filterValuePath")
+                    .hasMessageContaining("root");
+        }
+
+        @Test
+        void rejectsInvalidFilterValueExtractorClassType() {
+            var map = minimalStreamOptions();
+            map.put("filterValueExtractorClass", "java.lang.String");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateForSink)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("filterValueExtractorClass")
+                    .hasMessageContaining("does not implement");
+        }
     }
 
     // ========================================================================
@@ -1430,6 +1497,20 @@ class ConnectorOptionsTest {
         public com.rabbitmq.stream.compression.CompressionCodecFactory create(
                 ConnectorOptions options) {
             return compression -> null;
+        }
+    }
+
+    public static final class TestFilterValueExtractor implements ConnectorFilterValueExtractor {
+        @Override
+        public String extract(ConnectorMessageView message) {
+            return message.valueAtPath("application_properties.region");
+        }
+    }
+
+    public static final class TestPostFilterLegacy implements ConnectorPostFilter {
+        @Override
+        public boolean accept(ConnectorMessageView message) {
+            return true;
         }
     }
 }

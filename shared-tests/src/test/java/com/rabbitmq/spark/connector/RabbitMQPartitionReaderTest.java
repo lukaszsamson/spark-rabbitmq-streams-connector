@@ -226,7 +226,7 @@ class RabbitMQPartitionReaderTest {
             opts.put("endpoints", "localhost:5552");
             opts.put("stream", "test-stream");
             opts.put("filterValues", "alpha");
-            opts.put("filterValueColumn", "region");
+            opts.put("filterValuePath", "application_properties.region");
             opts.put("pollTimeoutMs", "5");
             opts.put("maxWaitMs", "5");
 
@@ -368,7 +368,7 @@ class RabbitMQPartitionReaderTest {
                     "test-stream", 0, 3, new ConnectorOptions(opts));
             RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
 
-            setPrivateField(reader, "postFilter", new RejectAllPostFilter());
+            setPrivateField(reader, "postFilter", rejectAllPostFilter(reader));
 
             BlockingQueue<RabbitMQPartitionReader.QueuedMessage> queue = new LinkedBlockingQueue<>();
             queue.add(new RabbitMQPartitionReader.QueuedMessage(
@@ -693,23 +693,28 @@ class RabbitMQPartitionReaderTest {
             opts.put("stream", "test-stream");
             opts.put("filterPostFilterClass", AcceptAllPostFilter.class.getName());
 
-            ConnectorPostFilter postFilter = createPostFilter(new ConnectorOptions(opts));
-            assertThat(postFilter).isInstanceOf(AcceptAllPostFilter.class);
+            Object postFilter = createPostFilter(new ConnectorOptions(opts));
+            assertThat(postFilter).isNotNull();
+            assertThat(accept(postFilter, new ConnectorMessageView(
+                    new byte[0], Map.of(), Map.of(), Map.of()))).isTrue();
         }
 
         @Test
-        void derivesPostFilterFromFilterValuesAndFilterValueColumn() throws Exception {
+        void derivesPostFilterFromFilterValuesAndFilterValuePath() throws Exception {
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
             opts.put("stream", "test-stream");
             opts.put("filterValues", "alpha,beta");
-            opts.put("filterValueColumn", "region");
+            opts.put("filterValuePath", "application_properties.region");
 
-            ConnectorPostFilter postFilter = createPostFilter(new ConnectorOptions(opts));
+            Object postFilter = createPostFilter(new ConnectorOptions(opts));
             assertThat(postFilter).isNotNull();
-            assertThat(postFilter.accept(new byte[0], Map.of("region", "alpha"))).isTrue();
-            assertThat(postFilter.accept(new byte[0], Map.of("region", "gamma"))).isFalse();
-            assertThat(postFilter.accept(new byte[0], Map.of())).isFalse();
+            assertThat(accept(postFilter, new ConnectorMessageView(
+                    new byte[0], Map.of("region", "alpha"), Map.of(), Map.of()))).isTrue();
+            assertThat(accept(postFilter, new ConnectorMessageView(
+                    new byte[0], Map.of("region", "gamma"), Map.of(), Map.of()))).isFalse();
+            assertThat(accept(postFilter, new ConnectorMessageView(
+                    new byte[0], Map.of(), Map.of(), Map.of()))).isFalse();
         }
 
         @Test
@@ -718,23 +723,25 @@ class RabbitMQPartitionReaderTest {
             opts.put("endpoints", "localhost:5552");
             opts.put("stream", "test-stream");
             opts.put("filterValues", "alpha");
-            opts.put("filterValueColumn", "region");
+            opts.put("filterValuePath", "application_properties.region");
             opts.put("filterMatchUnfiltered", "true");
 
-            ConnectorPostFilter postFilter = createPostFilter(new ConnectorOptions(opts));
+            Object postFilter = createPostFilter(new ConnectorOptions(opts));
             assertThat(postFilter).isNotNull();
-            assertThat(postFilter.accept(new byte[0], Map.of())).isTrue();
-            assertThat(postFilter.accept(new byte[0], null)).isTrue();
+            assertThat(accept(postFilter, new ConnectorMessageView(
+                    new byte[0], Map.of(), Map.of(), Map.of()))).isTrue();
+            assertThat(accept(postFilter, new ConnectorMessageView(
+                    new byte[0], null, Map.of(), Map.of()))).isTrue();
         }
 
         @Test
-        void doesNotDerivePostFilterWithoutFilterValueColumn() throws Exception {
+        void doesNotDerivePostFilterWithoutFilterValuePath() throws Exception {
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
             opts.put("stream", "test-stream");
             opts.put("filterValues", "alpha,beta");
 
-            ConnectorPostFilter postFilter = createPostFilter(new ConnectorOptions(opts));
+            Object postFilter = createPostFilter(new ConnectorOptions(opts));
             assertThat(postFilter).isNull();
         }
     }
@@ -842,12 +849,34 @@ class RabbitMQPartitionReaderTest {
         return (OffsetSpecification) method.invoke(reader, subscriptionOffsetSpec, configuredOffsetSpec);
     }
 
-    private static ConnectorPostFilter createPostFilter(ConnectorOptions options)
+    private static Object createPostFilter(ConnectorOptions options)
             throws Exception {
         Method method = RabbitMQPartitionReader.class.getDeclaredMethod(
                 "createPostFilter", ConnectorOptions.class);
         method.setAccessible(true);
-        return (ConnectorPostFilter) method.invoke(null, options);
+        return method.invoke(null, options);
+    }
+
+    private static boolean accept(Object postFilter, ConnectorMessageView message) throws Exception {
+        Method method = postFilter.getClass().getMethod("accept", ConnectorMessageView.class);
+        method.setAccessible(true);
+        return (boolean) method.invoke(postFilter, message);
+    }
+
+    private static Object rejectAllPostFilter(RabbitMQPartitionReader reader) throws Exception {
+        Field field = reader.getClass().getDeclaredField("postFilter");
+        field.setAccessible(true);
+        Class<?> postFilterType = field.getType();
+        return java.lang.reflect.Proxy.newProxyInstance(
+                postFilterType.getClassLoader(),
+                new Class<?>[]{postFilterType},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "accept" -> false;
+                    case "toString" -> "RejectAllMessagePostFilter";
+                    case "hashCode" -> System.identityHashCode(proxy);
+                    case "equals" -> proxy == args[0];
+                    default -> method.invoke(proxy, args);
+                });
     }
 
     private static void setPrivateField(Object target, String fieldName, Object value)
@@ -866,14 +895,14 @@ class RabbitMQPartitionReaderTest {
 
     public static class AcceptAllPostFilter implements ConnectorPostFilter {
         @Override
-        public boolean accept(byte[] messageBody, Map<String, String> applicationProperties) {
+        public boolean accept(ConnectorMessageView message) {
             return true;
         }
     }
 
     private static final class RejectAllPostFilter implements ConnectorPostFilter {
         @Override
-        public boolean accept(byte[] messageBody, Map<String, String> applicationProperties) {
+        public boolean accept(ConnectorMessageView message) {
             return false;
         }
     }

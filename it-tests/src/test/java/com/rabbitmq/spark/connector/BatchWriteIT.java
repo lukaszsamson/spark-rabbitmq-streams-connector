@@ -230,7 +230,7 @@ class BatchWriteIT extends AbstractRabbitMQIT {
                 .mode("append")
                 .option("endpoints", streamEndpoint())
                 .option("stream", stream)
-                .option("filterValueColumn", "region")
+                .option("filterValuePath", "application_properties.region")
                 .option("addressResolverClass",
                         "com.rabbitmq.spark.connector.TestAddressResolver")
                 .save();
@@ -241,7 +241,7 @@ class BatchWriteIT extends AbstractRabbitMQIT {
                 .option("stream", stream)
                 .option("startingOffsets", "earliest")
                 .option("filterValues", "alpha")
-                .option("filterValueColumn", "region")
+                .option("filterValuePath", "application_properties.region")
                 .option("filterMatchUnfiltered", "false")
                 .option("pollTimeoutMs", "500")
                 .option("maxWaitMs", "10000")
@@ -279,7 +279,7 @@ class BatchWriteIT extends AbstractRabbitMQIT {
                 .mode("append")
                 .option("endpoints", streamEndpoint())
                 .option("stream", stream)
-                .option("filterValueColumn", "region")
+                .option("filterValuePath", "application_properties.region")
                 .option("addressResolverClass",
                         "com.rabbitmq.spark.connector.TestAddressResolver")
                 .save();
@@ -290,7 +290,7 @@ class BatchWriteIT extends AbstractRabbitMQIT {
                 .option("stream", stream)
                 .option("startingOffsets", "earliest")
                 .option("filterValues", "alpha")
-                .option("filterValueColumn", "region")
+                .option("filterValuePath", "application_properties.region")
                 .option("filterMatchUnfiltered", "true")
                 .option("pollTimeoutMs", "500")
                 .option("maxWaitMs", "10000")
@@ -331,7 +331,7 @@ class BatchWriteIT extends AbstractRabbitMQIT {
                 .mode("append")
                 .option("endpoints", streamEndpoint())
                 .option("stream", stream)
-                .option("filterValueColumn", "properties.subject")
+                .option("filterValuePath", "properties.subject")
                 .option("addressResolverClass",
                         "com.rabbitmq.spark.connector.TestAddressResolver")
                 .save();

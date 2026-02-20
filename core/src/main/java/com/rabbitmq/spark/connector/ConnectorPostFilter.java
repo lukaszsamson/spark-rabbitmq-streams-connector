@@ -1,8 +1,6 @@
 package com.rabbitmq.spark.connector;
 
 import java.io.Serializable;
-import java.util.Map;
-
 /**
  * Post-filter for stream messages after broker-side filtering.
  *
@@ -21,9 +19,7 @@ public interface ConnectorPostFilter extends Serializable {
     /**
      * Test whether a message should be included in the output.
      *
-     * @param messageBody the raw message body bytes
-     * @param applicationProperties the AMQP application properties (may be empty, never null)
      * @return {@code true} to include the message, {@code false} to discard it
      */
-    boolean accept(byte[] messageBody, Map<String, String> applicationProperties);
+    boolean accept(ConnectorMessageView message);
 }

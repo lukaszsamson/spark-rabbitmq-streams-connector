@@ -86,8 +86,11 @@ public final class ConnectorOptions implements Serializable {
     public static final String COMPRESSION_CODEC_FACTORY_CLASS = "compressionCodecFactoryClass";
     public static final String ROUTING_STRATEGY = "routingStrategy";
     public static final String PARTITIONER_CLASS = "partitionerClass";
-    public static final String FILTER_VALUE_COLUMN = "filterValueColumn";
+    public static final String FILTER_VALUE_PATH = "filterValuePath";
+    public static final String FILTER_VALUE_EXTRACTOR_CLASS = "filterValueExtractorClass";
     public static final String IGNORE_UNKNOWN_COLUMNS = "ignoreUnknownColumns";
+    public static final String REMOVED_FILTER_VALUE_COLUMN = "filterValueColumn";
+    public static final String REMOVED_FILTER_POST_FILTER_CLASS_V2 = "filterPostFilterClassV2";
 
     // Resource management
     public static final String ENVIRONMENT_IDLE_TIMEOUT_MS = "environmentIdleTimeoutMs";
@@ -184,8 +187,13 @@ public final class ConnectorOptions implements Serializable {
     private final String compressionCodecFactoryClass;
     private final RoutingStrategyType routingStrategy;
     private final String partitionerClass;
-    private final String filterValueColumn;
+    private final String filterValuePath;
+    private final String filterValueExtractorClass;
     private final boolean ignoreUnknownColumns;
+
+    // Removed options (kept only for fail-fast validation)
+    private final String removedFilterValueColumn;
+    private final String removedFilterPostFilterClassV2;
 
     // Resource management
     private final long environmentIdleTimeoutMs;
@@ -275,9 +283,13 @@ public final class ConnectorOptions implements Serializable {
         this.routingStrategy = parseEnum(options, ROUTING_STRATEGY,
                 RoutingStrategyType::fromString, DEFAULT_ROUTING_STRATEGY);
         this.partitionerClass = getString(options, PARTITIONER_CLASS);
-        this.filterValueColumn = getString(options, FILTER_VALUE_COLUMN);
+        this.filterValuePath = getString(options, FILTER_VALUE_PATH);
+        this.filterValueExtractorClass = getString(options, FILTER_VALUE_EXTRACTOR_CLASS);
         this.ignoreUnknownColumns = getBoolean(options, IGNORE_UNKNOWN_COLUMNS,
                 DEFAULT_IGNORE_UNKNOWN_COLUMNS);
+
+        this.removedFilterValueColumn = getString(options, REMOVED_FILTER_VALUE_COLUMN);
+        this.removedFilterPostFilterClassV2 = getString(options, REMOVED_FILTER_POST_FILTER_CLASS_V2);
 
         // Resource management
         this.environmentIdleTimeoutMs = getLongPrimitive(options, ENVIRONMENT_IDLE_TIMEOUT_MS,
@@ -292,6 +304,19 @@ public final class ConnectorOptions implements Serializable {
      * @throws IllegalArgumentException if any common option is invalid
      */
     public void validateCommon() {
+        if (removedFilterValueColumn != null) {
+            throw new IllegalArgumentException(
+                    "'" + REMOVED_FILTER_VALUE_COLUMN + "' has been removed. " +
+                            "Use '" + FILTER_VALUE_PATH + "' or '" +
+                            FILTER_VALUE_EXTRACTOR_CLASS + "' instead.");
+        }
+        if (removedFilterPostFilterClassV2 != null) {
+            throw new IllegalArgumentException(
+                    "'" + REMOVED_FILTER_POST_FILTER_CLASS_V2 + "' has been removed. " +
+                            "Use '" + FILTER_POST_FILTER_CLASS + "' with ConnectorMessageView-based " +
+                            "ConnectorPostFilter implementations.");
+        }
+
         // Exactly one of stream or superstream
         boolean hasStream = stream != null && !stream.isEmpty();
         boolean hasSuperStream = superstream != null && !superstream.isEmpty();
@@ -456,6 +481,10 @@ public final class ConnectorOptions implements Serializable {
             ExtensionLoader.load(filterPostFilterClass, ConnectorPostFilter.class,
                     FILTER_POST_FILTER_CLASS);
         }
+
+        if (filterValuePath != null && !filterValuePath.isEmpty()) {
+            ConnectorMessagePath.validate(filterValuePath, FILTER_VALUE_PATH);
+        }
     }
 
     /**
@@ -517,6 +546,20 @@ public final class ConnectorOptions implements Serializable {
         if (partitionerClass != null && !partitionerClass.isEmpty()) {
             ExtensionLoader.load(partitionerClass, ConnectorRoutingStrategy.class,
                     PARTITIONER_CLASS);
+        }
+
+        if (filterValuePath != null && !filterValuePath.isEmpty()
+                && filterValueExtractorClass != null && !filterValueExtractorClass.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "Only one of '" + FILTER_VALUE_PATH + "' or '" +
+                            FILTER_VALUE_EXTRACTOR_CLASS + "' can be set");
+        }
+        if (filterValuePath != null && !filterValuePath.isEmpty()) {
+            ConnectorMessagePath.validate(filterValuePath, FILTER_VALUE_PATH);
+        }
+        if (filterValueExtractorClass != null && !filterValueExtractorClass.isEmpty()) {
+            ExtensionLoader.load(filterValueExtractorClass, ConnectorFilterValueExtractor.class,
+                    FILTER_VALUE_EXTRACTOR_CLASS);
         }
     }
 
@@ -617,7 +660,8 @@ public final class ConnectorOptions implements Serializable {
     public String getCompressionCodecFactoryClass() { return compressionCodecFactoryClass; }
     public RoutingStrategyType getRoutingStrategy() { return routingStrategy; }
     public String getPartitionerClass() { return partitionerClass; }
-    public String getFilterValueColumn() { return filterValueColumn; }
+    public String getFilterValuePath() { return filterValuePath; }
+    public String getFilterValueExtractorClass() { return filterValueExtractorClass; }
     public boolean isIgnoreUnknownColumns() { return ignoreUnknownColumns; }
 
     // ---- Getters: Resource management ----

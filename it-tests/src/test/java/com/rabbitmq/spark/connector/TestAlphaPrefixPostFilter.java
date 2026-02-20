@@ -1,7 +1,6 @@
 package com.rabbitmq.spark.connector;
 
 import java.nio.charset.StandardCharsets;
-import java.util.Map;
 
 /**
  * Test post-filter that accepts messages whose body starts with "alpha-".
@@ -10,7 +9,8 @@ public class TestAlphaPrefixPostFilter implements ConnectorPostFilter {
     private static final long serialVersionUID = 1L;
 
     @Override
-    public boolean accept(byte[] messageBody, Map<String, String> applicationProperties) {
+    public boolean accept(ConnectorMessageView message) {
+        byte[] messageBody = message.getBody();
         if (messageBody == null) {
             return false;
         }

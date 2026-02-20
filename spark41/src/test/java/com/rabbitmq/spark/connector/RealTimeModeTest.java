@@ -507,7 +507,7 @@ class RealTimeModeTest {
             opts.put("endpoints", "localhost:5552");
             opts.put("stream", "test-stream");
             opts.put("filterValues", "alpha");
-            opts.put("filterValueColumn", "filter");
+            opts.put("filterValuePath", "application_properties.filter");
             opts.put("filterWarningOnMismatch", "false");
             ConnectorOptions options = new ConnectorOptions(opts);
 
@@ -694,7 +694,8 @@ class RealTimeModeTest {
 
     public static class KeepPrefixPostFilter implements ConnectorPostFilter {
         @Override
-        public boolean accept(byte[] messageBody, Map<String, String> applicationProperties) {
+        public boolean accept(ConnectorMessageView message) {
+            byte[] messageBody = message.getBody();
             return new String(messageBody, StandardCharsets.UTF_8).startsWith("keep-");
         }
     }
