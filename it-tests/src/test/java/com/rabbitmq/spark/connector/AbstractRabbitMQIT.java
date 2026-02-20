@@ -23,6 +23,8 @@ import org.apache.spark.sql.types.StructType;
 import com.rabbitmq.stream.NoOffsetException;
 
 import java.nio.charset.StandardCharsets;
+import java.net.InetSocketAddress;
+import java.net.Socket;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -47,6 +49,8 @@ abstract class AbstractRabbitMQIT {
     static final int STREAM_PORT = 5552;
     static final int STREAM_TLS_PORT = 5551;
     static final String ERLANG_COOKIE = "SPARKLINGRABBITINTEGRATIONCOOKIE1234567890";
+    private static final int ENV_BUILD_ATTEMPTS = 8;
+    private static final long ENV_BUILD_RETRY_DELAY_MS = 1500;
 
     /**
      * Shared RabbitMQ container with stream plugin enabled.
@@ -94,6 +98,8 @@ abstract class AbstractRabbitMQIT {
             RABBIT.start();
         }
 
+        waitForRabbitMqStartup();
+
         // Set system properties for the TestAddressResolver used by the connector
         System.setProperty("rabbitmq.test.host", RABBIT.getHost());
         System.setProperty("rabbitmq.test.port",
@@ -107,18 +113,14 @@ abstract class AbstractRabbitMQIT {
                     .appName("rabbitmq-streams-it")
                     .config("spark.ui.enabled", "false")
                     .config("spark.sql.shuffle.partitions", "4")
+                    .config("spark.driver.host", "127.0.0.1")
+                    .config("spark.driver.bindAddress", "127.0.0.1")
+                    .config("spark.local.ip", "127.0.0.1")
                     .config("spark.sql.codegen.wholeStage", "false")
                     .getOrCreate();
         }
 
-        if (testEnv == null) {
-            String host = RABBIT.getHost();
-            int port = RABBIT.getMappedPort(STREAM_PORT);
-            testEnv = Environment.builder()
-                    .uri("rabbitmq-stream://guest:guest@" + host + ":" + port)
-                    .addressResolver(addr -> new Address(host, port))
-                    .build();
-        }
+        ensureTestEnvironmentReady();
     }
 
     @AfterAll
@@ -130,6 +132,97 @@ abstract class AbstractRabbitMQIT {
                 LOG.debug("Error closing test environment", e);
             }
             testEnv = null;
+        }
+    }
+
+    private static void waitForRabbitMqStartup() {
+        String host = RABBIT.getHost();
+        int port = RABBIT.getMappedPort(STREAM_PORT);
+        RuntimeException lastFailure = null;
+        for (int attempt = 1; attempt <= ENV_BUILD_ATTEMPTS; attempt++) {
+            try {
+                var await = RABBIT.execInContainer("rabbitmqctl", "await_startup");
+                if (await.getExitCode() != 0) {
+                    // If app is stopped, try to bring it up for this class.
+                    RABBIT.execInContainer("rabbitmqctl", "start_app");
+                    await = RABBIT.execInContainer("rabbitmqctl", "await_startup");
+                }
+                if (await.getExitCode() != 0) {
+                    throw new RuntimeException("rabbitmqctl await_startup failed: " + await.getStderr());
+                }
+
+                try (Socket socket = new Socket()) {
+                    socket.connect(new InetSocketAddress(host, port), 2000);
+                }
+                return;
+            } catch (Exception e) {
+                lastFailure = new RuntimeException(
+                        "RabbitMQ stream endpoint not ready on attempt " + attempt + "/" + ENV_BUILD_ATTEMPTS, e);
+                LOG.warn(lastFailure.getMessage());
+                sleepQuietly(ENV_BUILD_RETRY_DELAY_MS);
+            }
+        }
+        throw new RuntimeException("RabbitMQ did not become ready for stream tests", lastFailure);
+    }
+
+    private static void ensureTestEnvironmentReady() {
+        if (testEnv != null) {
+            return;
+        }
+        String host = RABBIT.getHost();
+        int port = RABBIT.getMappedPort(STREAM_PORT);
+        RuntimeException lastFailure = null;
+        for (int attempt = 1; attempt <= ENV_BUILD_ATTEMPTS; attempt++) {
+            try {
+                testEnv = Environment.builder()
+                        .uri("rabbitmq-stream://guest:guest@" + host + ":" + port)
+                        .addressResolver(addr -> new Address(host, port))
+                        .build();
+                return;
+            } catch (Exception e) {
+                lastFailure = new RuntimeException(
+                        "Failed to create RabbitMQ stream Environment on attempt "
+                                + attempt + "/" + ENV_BUILD_ATTEMPTS, e);
+                LOG.warn(lastFailure.getMessage());
+                closeTestEnvironmentQuietly();
+                sleepQuietly(ENV_BUILD_RETRY_DELAY_MS);
+            }
+        }
+        throw new RuntimeException("Unable to create RabbitMQ stream Environment", lastFailure);
+    }
+
+    private static Environment getHealthyTestEnvironment() {
+        ensureTestEnvironmentReady();
+        try {
+            // Touch the environment; closed instances throw IllegalStateException here.
+            testEnv.streamCreator();
+            return testEnv;
+        } catch (IllegalStateException closed) {
+            LOG.warn("Test environment is closed; recreating it");
+            closeTestEnvironmentQuietly();
+            ensureTestEnvironmentReady();
+            return testEnv;
+        }
+    }
+
+    private static void closeTestEnvironmentQuietly() {
+        if (testEnv != null) {
+            try {
+                testEnv.close();
+            } catch (Exception e) {
+                LOG.debug("Error closing test environment", e);
+            } finally {
+                testEnv = null;
+            }
+        }
+    }
+
+    private static void sleepQuietly(long millis) {
+        try {
+            Thread.sleep(millis);
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("Interrupted while waiting for RabbitMQ readiness", ie);
         }
     }
 
@@ -159,14 +252,14 @@ abstract class AbstractRabbitMQIT {
 
     /** Create a stream on the broker. */
     void createStream(String name) {
-        testEnv.streamCreator().stream(name).create();
+        getHealthyTestEnvironment().streamCreator().stream(name).create();
         LOG.info("Created stream '{}'", name);
     }
 
     /** Delete a stream from the broker (best-effort). */
     void deleteStream(String name) {
         try {
-            testEnv.deleteStream(name);
+            getHealthyTestEnvironment().deleteStream(name);
             LOG.info("Deleted stream '{}'", name);
         } catch (Exception e) {
             LOG.debug("Failed to delete stream '{}': {}", name, e.getMessage());
@@ -291,6 +384,7 @@ abstract class AbstractRabbitMQIT {
             if (await.getExitCode() != 0) {
                 throw new RuntimeException("RabbitMQ did not start: " + await.getStderr());
             }
+            waitForRabbitMqStartup();
             LOG.info("RabbitMQ app started");
         } catch (RuntimeException e) {
             throw e;
@@ -328,7 +422,7 @@ abstract class AbstractRabbitMQIT {
 
     /** Publish N messages to a stream with body "{prefix}{i}". */
     void publishMessages(String stream, int count, String prefix) {
-        try (Producer producer = testEnv.producerBuilder().stream(stream).build()) {
+        try (Producer producer = getHealthyTestEnvironment().producerBuilder().stream(stream).build()) {
             CountDownLatch latch = new CountDownLatch(count);
             for (int i = 0; i < count; i++) {
                 byte[] body = (prefix + i).getBytes(StandardCharsets.UTF_8);
@@ -360,7 +454,7 @@ abstract class AbstractRabbitMQIT {
         CopyOnWriteArrayList<Message> messages = new CopyOnWriteArrayList<>();
         CountDownLatch latch = new CountDownLatch(count);
 
-        Consumer consumer = testEnv.consumerBuilder()
+        Consumer consumer = getHealthyTestEnvironment().consumerBuilder()
                 .stream(stream)
                 .offset(offsetSpec)
                 .messageHandler((ctx, msg) -> {
@@ -392,7 +486,7 @@ abstract class AbstractRabbitMQIT {
      */
     void createStreamWithRetention(String name, long maxLengthBytes,
                                     long maxSegmentSizeBytes) {
-        testEnv.streamCreator()
+        getHealthyTestEnvironment().streamCreator()
                 .stream(name)
                 .maxLengthBytes(
                         com.rabbitmq.stream.ByteCapacity.B(maxLengthBytes))
@@ -411,7 +505,7 @@ abstract class AbstractRabbitMQIT {
         long deadline = System.currentTimeMillis() + maxWaitMs;
         while (System.currentTimeMillis() < deadline) {
             try {
-                long firstOffset = testEnv.queryStreamStats(stream).firstOffset();
+                long firstOffset = getHealthyTestEnvironment().queryStreamStats(stream).firstOffset();
                 if (firstOffset > 0) {
                     LOG.info("Stream '{}' truncated, firstOffset={}", stream, firstOffset);
                     return firstOffset;
@@ -448,7 +542,7 @@ abstract class AbstractRabbitMQIT {
                     continue;
                 }
                 try {
-                    long firstOffset = testEnv.queryStreamStats(stream).firstOffset();
+                    long firstOffset = getHealthyTestEnvironment().queryStreamStats(stream).firstOffset();
                     if (firstOffset > 0) {
                         LOG.info("Stream '{}' truncated, firstOffset={}", stream, firstOffset);
                         firstOffsets.put(stream, firstOffset);
@@ -511,7 +605,7 @@ abstract class AbstractRabbitMQIT {
     long queryStoredOffset(String consumerName, String stream) {
         IllegalStateException lastStateError = null;
         for (int i = 0; i < 20; i++) {
-            var consumer = testEnv.consumerBuilder()
+            var consumer = getHealthyTestEnvironment().consumerBuilder()
                     .stream(stream)
                     .name(consumerName)
                     .manualTrackingStrategy()
@@ -558,7 +652,7 @@ abstract class AbstractRabbitMQIT {
 
     void publishMessagesWithFilterValue(String stream, int count,
                                          String prefix, String filterValue) {
-        try (Producer producer = testEnv.producerBuilder()
+        try (Producer producer = getHealthyTestEnvironment().producerBuilder()
                 .stream(stream)
                 .filterValue(msg -> {
                     var props = msg.getApplicationProperties();

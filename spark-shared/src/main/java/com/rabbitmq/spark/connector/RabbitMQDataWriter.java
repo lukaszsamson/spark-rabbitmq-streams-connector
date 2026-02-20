@@ -284,8 +284,8 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
         if (options.getPublisherConfirmTimeoutMs() != null) {
             long configuredMs = options.getPublisherConfirmTimeoutMs();
             long clientMinMs = 1_000L;
-            long effectiveMs = Math.max(configuredMs, clientMinMs);
-            if (configuredMs < clientMinMs) {
+            long effectiveMs = configuredMs == 0 ? 0 : Math.max(configuredMs, clientMinMs);
+            if (configuredMs > 0 && configuredMs < clientMinMs) {
                 LOG.warn("publisherConfirmTimeoutMs={}ms is below client minimum; using {}ms for producer confirm timeout",
                         configuredMs, effectiveMs);
             }

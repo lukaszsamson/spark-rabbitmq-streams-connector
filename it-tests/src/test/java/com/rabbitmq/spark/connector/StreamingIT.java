@@ -293,19 +293,19 @@ class StreamingIT extends AbstractRabbitMQIT {
         createStream(appendSink);
         createStream(updateSink);
         try {
-            publishMessages(sourceStream, 40, "mode-");
-            Thread.sleep(200);
+            StructType schema = new StructType().add("value", DataTypes.BinaryType, false);
+            List<Row> data = new ArrayList<>();
+            for (int i = 0; i < 40; i++) {
+                data.add(RowFactory.create(("mode-" + i).getBytes()));
+            }
+            Path inputDir = Files.createTempDirectory("spark-input-sink-update-mode-")
+                    .resolve("data");
+            spark.createDataFrame(data, schema).write().parquet(inputDir.toString());
 
             Path appendCheckpoint = Files.createTempDirectory("spark-sink-append-ckpt-");
             StreamingQuery appendQuery = spark.readStream()
-                    .format("rabbitmq_streams")
-                    .option("endpoints", streamEndpoint())
-                    .option("stream", sourceStream)
-                    .option("startingOffsets", "earliest")
-                    .option("metadataFields", "")
-                    .option("addressResolverClass",
-                            "com.rabbitmq.spark.connector.TestAddressResolver")
-                    .load()
+                    .schema(schema)
+                    .parquet(inputDir.toString())
                     .select("value")
                     .writeStream()
                     .format("rabbitmq_streams")
@@ -317,18 +317,18 @@ class StreamingIT extends AbstractRabbitMQIT {
                             "com.rabbitmq.spark.connector.TestAddressResolver")
                     .trigger(Trigger.AvailableNow())
                     .start();
-            appendQuery.awaitTermination(120_000);
+            boolean appendTerminated = appendQuery.awaitTermination(20_000);
+            if (!appendTerminated && appendQuery.isActive()) {
+                appendQuery.stop();
+            }
+            assertThat(appendQuery.isActive())
+                    .as("append query should terminate in AvailableNow mode")
+                    .isFalse();
 
             Path updateCheckpoint = Files.createTempDirectory("spark-sink-update-ckpt-");
             StreamingQuery updateQuery = spark.readStream()
-                    .format("rabbitmq_streams")
-                    .option("endpoints", streamEndpoint())
-                    .option("stream", sourceStream)
-                    .option("startingOffsets", "earliest")
-                    .option("metadataFields", "")
-                    .option("addressResolverClass",
-                            "com.rabbitmq.spark.connector.TestAddressResolver")
-                    .load()
+                    .schema(schema)
+                    .parquet(inputDir.toString())
                     .select("value")
                     .writeStream()
                     .format("rabbitmq_streams")
@@ -340,7 +340,13 @@ class StreamingIT extends AbstractRabbitMQIT {
                             "com.rabbitmq.spark.connector.TestAddressResolver")
                     .trigger(Trigger.AvailableNow())
                     .start();
-            updateQuery.awaitTermination(120_000);
+            boolean updateTerminated = updateQuery.awaitTermination(20_000);
+            if (!updateTerminated && updateQuery.isActive()) {
+                updateQuery.stop();
+            }
+            assertThat(updateQuery.isActive())
+                    .as("update query should terminate in AvailableNow mode")
+                    .isFalse();
 
             Set<String> appendPayloads = readAllValuesFromStream(appendSink).stream()
                     .map(row -> new String((byte[]) row.getAs("value")))
@@ -1801,7 +1807,20 @@ class StreamingIT extends AbstractRabbitMQIT {
                 .trigger(Trigger.AvailableNow())
                 .start();
 
-        secondRun.awaitTermination(120_000);
+        boolean terminated = secondRun.awaitTermination(20_000);
+        if (!terminated && secondRun.isActive()) {
+            Thread stopper = new Thread(() -> {
+                try {
+                    secondRun.stop();
+                } catch (Exception ignored) {
+                    // best effort: assertion below checks final query state
+                }
+            }, "streaming-it-second-run-stopper");
+            stopper.setDaemon(true);
+            stopper.start();
+            stopper.join(5_000);
+        }
+        assertThat(secondRun.isActive()).as("second AvailableNow run should terminate").isFalse();
 
         long totalCount = spark.read().schema(MINIMAL_OUTPUT_SCHEMA)
                 .parquet(outputDir.toString()).count();

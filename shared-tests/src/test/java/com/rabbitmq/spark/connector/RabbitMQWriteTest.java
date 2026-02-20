@@ -752,6 +752,38 @@ class RabbitMQWriteTest {
         }
 
         @Test
+        void initProducerPreservesZeroConfirmTimeout() throws Exception {
+            Map<String, String> opts = minimalSinkMap();
+            opts.put("publisherConfirmTimeoutMs", "0");
+            ConnectorOptions options = new ConnectorOptions(opts);
+
+            RabbitMQDataWriter writer = new RabbitMQDataWriter(
+                    options, minimalSinkSchema(), 0, 1, -1);
+            CapturingProducerBuilder builder = new CapturingProducerBuilder();
+            seedEnvironmentPool(options, new BuilderEnvironment(builder));
+
+            writer.write(new GenericInternalRow(new Object[]{"x".getBytes()}));
+
+            assertThat(builder.confirmTimeoutMs).isEqualTo(0L);
+        }
+
+        @Test
+        void initProducerClampsSubSecondConfirmTimeout() throws Exception {
+            Map<String, String> opts = minimalSinkMap();
+            opts.put("publisherConfirmTimeoutMs", "800");
+            ConnectorOptions options = new ConnectorOptions(opts);
+
+            RabbitMQDataWriter writer = new RabbitMQDataWriter(
+                    options, minimalSinkSchema(), 0, 1, -1);
+            CapturingProducerBuilder builder = new CapturingProducerBuilder();
+            seedEnvironmentPool(options, new BuilderEnvironment(builder));
+
+            writer.write(new GenericInternalRow(new Object[]{"x".getBytes()}));
+
+            assertThat(builder.confirmTimeoutMs).isEqualTo(1000L);
+        }
+
+        @Test
         void initProducerListenerSetsSendErrorOnClosed() throws Exception {
             RabbitMQDataWriter writer = new RabbitMQDataWriter(
                     minimalSinkOptions(), minimalSinkSchema(), 0, 1, -1);
