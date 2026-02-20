@@ -86,6 +86,7 @@ public final class ConnectorOptions implements Serializable {
     public static final String DYNAMIC_BATCH = "dynamicBatch";
     public static final String COMPRESSION_CODEC_FACTORY_CLASS = "compressionCodecFactoryClass";
     public static final String ROUTING_STRATEGY = "routingStrategy";
+    public static final String HASH_FUNCTION_CLASS = "hashFunctionClass";
     public static final String PARTITIONER_CLASS = "partitionerClass";
     public static final String FILTER_VALUE_PATH = "filterValuePath";
     public static final String FILTER_VALUE_EXTRACTOR_CLASS = "filterValueExtractorClass";
@@ -188,6 +189,7 @@ public final class ConnectorOptions implements Serializable {
     private final Boolean dynamicBatch;
     private final String compressionCodecFactoryClass;
     private final RoutingStrategyType routingStrategy;
+    private final String hashFunctionClass;
     private final String partitionerClass;
     private final String filterValuePath;
     private final String filterValueExtractorClass;
@@ -285,6 +287,7 @@ public final class ConnectorOptions implements Serializable {
         this.compressionCodecFactoryClass = getString(options, COMPRESSION_CODEC_FACTORY_CLASS);
         this.routingStrategy = parseEnum(options, ROUTING_STRATEGY,
                 RoutingStrategyType::fromString, DEFAULT_ROUTING_STRATEGY);
+        this.hashFunctionClass = getString(options, HASH_FUNCTION_CLASS);
         this.partitionerClass = getString(options, PARTITIONER_CLASS);
         this.filterValuePath = getString(options, FILTER_VALUE_PATH);
         this.filterValueExtractorClass = getString(options, FILTER_VALUE_EXTRACTOR_CLASS);
@@ -528,6 +531,18 @@ public final class ConnectorOptions implements Serializable {
                                 "' is 'custom'");
             }
         }
+        if (hashFunctionClass != null && !hashFunctionClass.isEmpty()) {
+            if (!isSuperStreamMode()) {
+                throw new IllegalArgumentException(
+                        "'" + HASH_FUNCTION_CLASS + "' is only valid for superstream sink mode");
+            }
+            if (routingStrategy != RoutingStrategyType.HASH) {
+                throw new IllegalArgumentException(
+                        "'" + HASH_FUNCTION_CLASS + "' requires '" + ROUTING_STRATEGY + "' to be 'hash'");
+            }
+            ExtensionLoader.load(hashFunctionClass, ConnectorHashFunction.class,
+                    HASH_FUNCTION_CLASS);
+        }
 
         // Numeric range checks
         if (maxInFlight != null && maxInFlight <= 0) {
@@ -670,6 +685,7 @@ public final class ConnectorOptions implements Serializable {
     public Boolean getDynamicBatch() { return dynamicBatch; }
     public String getCompressionCodecFactoryClass() { return compressionCodecFactoryClass; }
     public RoutingStrategyType getRoutingStrategy() { return routingStrategy; }
+    public String getHashFunctionClass() { return hashFunctionClass; }
     public String getPartitionerClass() { return partitionerClass; }
     public String getFilterValuePath() { return filterValuePath; }
     public String getFilterValueExtractorClass() { return filterValueExtractorClass; }

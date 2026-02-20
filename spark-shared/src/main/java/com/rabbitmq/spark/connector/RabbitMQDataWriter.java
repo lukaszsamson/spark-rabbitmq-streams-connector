@@ -361,7 +361,18 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
         });
 
         switch (options.getRoutingStrategy()) {
-            case HASH -> routing.hash().producerBuilder();
+            case HASH -> {
+                String hashFunctionClass = options.getHashFunctionClass();
+                if (hashFunctionClass != null && !hashFunctionClass.isEmpty()) {
+                    ConnectorHashFunction hashFunction = ExtensionLoader.load(
+                            hashFunctionClass,
+                            ConnectorHashFunction.class,
+                            ConnectorOptions.HASH_FUNCTION_CLASS);
+                    routing.hash(hashFunction::hash).producerBuilder();
+                } else {
+                    routing.hash().producerBuilder();
+                }
+            }
             case KEY -> routing.key().producerBuilder();
             case CUSTOM -> {
                 ConnectorRoutingStrategy customStrategy = ExtensionLoader.load(
@@ -369,15 +380,10 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
                         ConnectorRoutingStrategy.class,
                         ConnectorOptions.PARTITIONER_CLASS);
                 routing.strategy((message, metadata) -> {
-                    String routingKey = null;
-                    var appProps = message.getApplicationProperties();
-                    if (appProps != null) {
-                        Object rk = appProps.get("routing_key");
-                        if (rk != null) {
-                            routingKey = rk.toString();
-                        }
-                    }
-                    return customStrategy.route(routingKey, metadata.partitions());
+                    ConnectorMessageView messageView = toMessageView(message);
+                    return customStrategy.route(
+                            messageView,
+                            new ConnectorRoutingMetadataView(metadata));
                 }).producerBuilder();
             }
         }
@@ -418,6 +424,20 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
             return message.getProperties().getSubject();
         }
         return null;
+    }
+
+    private record ConnectorRoutingMetadataView(
+            com.rabbitmq.stream.RoutingStrategy.Metadata delegate)
+            implements ConnectorRoutingStrategy.Metadata {
+        @Override
+        public java.util.List<String> partitions() {
+            return delegate.partitions();
+        }
+
+        @Override
+        public java.util.List<String> route(String routingKey) {
+            return delegate.route(routingKey);
+        }
     }
 
     private static ConnectorFilterValueExtractor createFilterValueExtractor(

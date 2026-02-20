@@ -122,6 +122,19 @@ class RabbitMQWriteTest {
                     .isInstanceOf(IllegalArgumentException.class)
                     .hasMessageContaining("partitionerClass");
         }
+
+        @Test
+        void validatesHashFunctionClassRequiresSuperStreamHashRouting() {
+            Map<String, String> map = new LinkedHashMap<>();
+            map.put("endpoints", "localhost:5552");
+            map.put("stream", "my-stream");
+            map.put("hashFunctionClass", TestHashFunction.class.getName());
+            ConnectorOptions opts = new ConnectorOptions(map);
+            assertThatThrownBy(() ->
+                    new RabbitMQWriteBuilder(opts, minimalSinkSchema(), "q"))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("hashFunctionClass");
+        }
     }
 
     // ======================================================================
@@ -520,6 +533,7 @@ class RabbitMQWriteTest {
         @Test
         void writeWithoutRoutingKeyDoesNotInvokeCustomRoutingStrategy() throws Exception {
             TestRoutingStrategy.invoked = false;
+            TestRoutingStrategy.routeLookupInvoked = false;
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
             opts.put("superstream", "super");
@@ -536,6 +550,7 @@ class RabbitMQWriteTest {
 
             writer.write(row);
             assertThat(TestRoutingStrategy.invoked).isFalse();
+            assertThat(TestRoutingStrategy.routeLookupInvoked).isFalse();
         }
 
         @Test
@@ -804,6 +819,7 @@ class RabbitMQWriteTest {
         @Test
         void superstreamCustomRoutingStrategyInvokesStrategy() throws Exception {
             TestRoutingStrategy.invoked = false;
+            TestRoutingStrategy.routeLookupInvoked = false;
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
             opts.put("superstream", "super");
@@ -811,14 +827,49 @@ class RabbitMQWriteTest {
             opts.put("partitionerClass", TestRoutingStrategy.class.getName());
             ConnectorOptions options = new ConnectorOptions(opts);
 
+            StructType schema = new StructType(new StructField[]{
+                    new StructField("value", DataTypes.BinaryType, false, Metadata.empty()),
+                    new StructField("routing_key", DataTypes.StringType, true, Metadata.empty()),
+            });
             RabbitMQDataWriter writer = new RabbitMQDataWriter(
-                    options, minimalSinkSchema(), 0, 1, -1);
+                    options, schema, 0, 1, -1);
             CapturingProducerBuilder builder = new CapturingProducerBuilder();
             seedEnvironmentPool(options, new BuilderEnvironment(builder));
 
-            writer.write(new GenericInternalRow(new Object[]{"x".getBytes()}));
+            writer.write(new GenericInternalRow(new Object[]{
+                    "x".getBytes(), UTF8String.fromString("rk-1")
+            }));
 
             assertThat(TestRoutingStrategy.invoked).isTrue();
+            assertThat(TestRoutingStrategy.routeLookupInvoked).isTrue();
+        }
+
+        @Test
+        void superstreamHashRoutingUsesCustomHashFunction() throws Exception {
+            TestHashFunction.invoked = false;
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("superstream", "super");
+            opts.put("routingStrategy", "hash");
+            opts.put("hashFunctionClass", TestHashFunction.class.getName());
+            ConnectorOptions options = new ConnectorOptions(opts);
+
+            StructType schema = new StructType(new StructField[]{
+                    new StructField("value", DataTypes.BinaryType, false, Metadata.empty()),
+                    new StructField("routing_key", DataTypes.StringType, true, Metadata.empty()),
+            });
+            RabbitMQDataWriter writer = new RabbitMQDataWriter(
+                    options, schema, 0, 1, -1);
+            CapturingProducerBuilder builder = new CapturingProducerBuilder();
+            seedEnvironmentPool(options, new BuilderEnvironment(builder));
+
+            writer.write(new GenericInternalRow(new Object[]{
+                    "x".getBytes(), UTF8String.fromString("rk-1")
+            }));
+
+            assertThat(builder.customHashConfigured).isTrue();
+            assertThat(builder.customHashSampleValue).isEqualTo(7);
+            assertThat(TestHashFunction.invoked).isTrue();
         }
     }
 
@@ -1249,6 +1300,8 @@ class RabbitMQWriteTest {
         private Boolean dynamicBatch;
         private com.rabbitmq.stream.Resource.StateListener listener;
         private String name;
+        private boolean customHashConfigured;
+        private int customHashSampleValue;
 
         private CapturingProducerBuilder() {
             this(false);
@@ -1446,6 +1499,8 @@ class RabbitMQWriteTest {
         @Override
         public com.rabbitmq.stream.ProducerBuilder.RoutingConfiguration hash(
                 java.util.function.ToIntFunction<String> hash) {
+            builder.customHashConfigured = true;
+            builder.customHashSampleValue = hash.applyAsInt("sample-routing-key");
             return this;
         }
 
@@ -1457,7 +1512,11 @@ class RabbitMQWriteTest {
         @Override
         public com.rabbitmq.stream.ProducerBuilder.RoutingConfiguration strategy(
                 com.rabbitmq.stream.RoutingStrategy routingStrategy) {
-            com.rabbitmq.stream.Message message = CODEC.messageBuilder().addData(new byte[0]).build();
+            com.rabbitmq.stream.Message message = CODEC.messageBuilder()
+                    .applicationProperties().entry("routing_key", "rk-1")
+                    .messageBuilder()
+                    .addData(new byte[0])
+                    .build();
             routingStrategy.route(message, new RoutingMetadata(java.util.List.of("p1")));
             return this;
         }
@@ -1497,11 +1556,31 @@ class RabbitMQWriteTest {
 
     public static final class TestRoutingStrategy implements ConnectorRoutingStrategy {
         static boolean invoked = false;
+        static boolean routeLookupInvoked = false;
 
         @Override
-        public java.util.List<String> route(String routingKey, java.util.List<String> partitions) {
+        public java.util.List<String> route(
+                ConnectorMessageView message, ConnectorRoutingStrategy.Metadata metadata) {
             invoked = true;
-            return java.util.List.of(partitions.get(0));
+            String routingKey = message.valueAtPath("application_properties.routing_key");
+            if (routingKey != null) {
+                routeLookupInvoked = true;
+                java.util.List<String> resolved = metadata.route(routingKey);
+                if (!resolved.isEmpty()) {
+                    return java.util.List.of(resolved.get(0));
+                }
+            }
+            return java.util.List.of(metadata.partitions().get(0));
+        }
+    }
+
+    public static final class TestHashFunction implements ConnectorHashFunction {
+        static boolean invoked = false;
+
+        @Override
+        public int hash(String routingKey) {
+            invoked = true;
+            return 7;
         }
     }
 

@@ -251,6 +251,7 @@ By default, unrecognized columns cause an error. Set `ignoreUnknownColumns=true`
 | `dynamicBatch` | bool | — | Enable dynamic batching |
 | `compressionCodecFactoryClass` | string | — | Custom compression codec factory (connector interface) |
 | `routingStrategy` | string | hash | Superstream routing: `hash`, `key`, or `custom` |
+| `hashFunctionClass` | string | — | Custom hash function class (optional, only for `routingStrategy=hash`) |
 | `partitionerClass` | string | — | Custom routing strategy class (required when `routingStrategy=custom`) |
 | `filterValuePath` | string | — | Producer-side filter value path (`application_properties.*`, `message_annotations.*`, `properties.*`) |
 | `filterValueExtractorClass` | string | — | Custom producer-side filter value extractor class |
@@ -297,8 +298,10 @@ One Spark input partition is created per partition stream. Offsets are tracked p
 
 Routing is handled by the RabbitMQ superstream producer. Available routing strategies:
 - **`hash`** (default): Hashes the routing key (MurmurHash3 32-bit) modulo partition count.
+- `hashFunctionClass` can override the default hash when `routingStrategy=hash`.
 - **`key`**: Routes using superstream bindings; can route to multiple partition streams.
-- **`custom`**: User-provided `RoutingStrategy` via `partitionerClass`.
+- **`custom`**: User-provided routing via `partitionerClass` with access to full
+  `ConnectorMessageView` and routing metadata (`partitions()` and `route(routingKey)`).
 
 The `stream` column is ignored in superstream mode; routing determines the target partition stream.
 
@@ -346,7 +349,8 @@ The connector provides extension points via connector-defined interfaces (not Ra
 | `addressResolverClass` | `ConnectorAddressResolver` | Driver | Custom address resolution |
 | `filterPostFilterClass` | `ConnectorPostFilter` | Executors | Client-side message filtering |
 | `filterValueExtractorClass` | `ConnectorFilterValueExtractor` | Executors | Producer-side filter value derivation |
-| `partitionerClass` | `ConnectorRoutingStrategy` | Executors | Custom superstream routing (must be deterministic) |
+| `hashFunctionClass` | `ConnectorHashFunction` | Executors | Custom hash function for superstream hash routing |
+| `partitionerClass` | `ConnectorRoutingStrategy` | Executors | Custom superstream routing with message view + metadata lookup |
 | `observationCollectorClass` | `ConnectorObservationCollectorFactory` | Both | Custom observability |
 | `observationRegistryProviderClass` | `ConnectorObservationRegistryProvider` | Both | Provide Micrometer observation registry |
 | `compressionCodecFactoryClass` | `ConnectorCompressionCodecFactory` | Executors | Custom compression codec |

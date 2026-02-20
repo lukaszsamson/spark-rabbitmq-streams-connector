@@ -38,6 +38,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Compression support (`gzip`, `snappy`, `lz4`, `zstd`) with sub-entry batching.
 - RabbitMQ Stream Java client baseline upgraded to `1.5.x`.
 - Producer option support for `dynamicBatch`, `retryOnRecovery`, and `compressionCodecFactoryClass`.
+- Superstream hash routing option support for `hashFunctionClass`.
+- Custom superstream routing strategy now receives full message view and metadata route lookup.
 - Environment option support for `observationCollectorClass`, `requestedHeartbeatSeconds`,
   `locatorConnectionCount`, `forceReplicaForConsumers`, `forceLeaderForProducers`,
   and connection backoff policy options.

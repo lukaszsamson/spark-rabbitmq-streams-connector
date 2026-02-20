@@ -19,12 +19,31 @@ import java.util.List;
 public interface ConnectorRoutingStrategy extends Serializable {
 
     /**
+     * Metadata about the superstream routing topology.
+     */
+    interface Metadata extends Serializable {
+        /**
+         * @return all partition stream names of the target superstream
+         */
+        List<String> partitions();
+
+        /**
+         * Resolve candidate partition streams for a routing key according to
+         * broker superstream binding metadata.
+         *
+         * @param routingKey routing key to resolve
+         * @return partition stream names matching the routing key
+         */
+        List<String> route(String routingKey);
+    }
+
+    /**
      * Determine the target partition streams for a message.
      *
-     * @param routingKey the routing key extracted from the message (may be null)
-     * @param partitions the list of partition stream names in the superstream
-     * @return the list of partition stream names to publish to (must be non-empty
-     *         and a subset of {@code partitions})
+     * @param message connector view of the message, including body,
+     *                application properties, annotations, and properties
+     * @param metadata routing metadata with partition list and key-based lookup
+     * @return partition stream names to publish to
      */
-    List<String> route(String routingKey, List<String> partitions);
+    List<String> route(ConnectorMessageView message, Metadata metadata);
 }

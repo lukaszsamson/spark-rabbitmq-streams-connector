@@ -9,7 +9,7 @@ import java.util.List;
 public class TestRoutingStrategy implements ConnectorRoutingStrategy {
 
     @Override
-    public List<String> route(String routingKey, List<String> partitions) {
-        return List.of(partitions.get(0));
+    public List<String> route(ConnectorMessageView message, Metadata metadata) {
+        return List.of(metadata.partitions().get(0));
     }
 }

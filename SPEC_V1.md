@@ -315,8 +315,9 @@ Type coercion notes:
 - Routing is handled by the RabbitMQ superstream producer.
 - Routing strategies:
   - `hash`: default; hashes routing key (MurmurHash3 32-bit) modulo partition count.
+    - Optional `hashFunctionClass` can override the default hash function.
   - `key`: resolves routes using superstream bindings; can route to multiple partition streams.
-  - `custom`: user-provided `RoutingStrategy`.
+  - `custom`: user-provided connector routing strategy with full message view and routing metadata lookup (`route(routingKey)`).
 - Default behavior when routing key is absent and routing strategy requires it: fail fast with a clear error. Users must provide a routing key or a custom routing strategy. This matches the client requirement that applications provide a routing key extractor for superstream producers.
 - `stream` column is ignored in superstream mode; routing determines the partition stream.
 - Reconfiguration: on query restart, refresh superstream topology from the broker.
@@ -379,6 +380,7 @@ Type coercion notes:
 - `compression` (none|gzip|snappy|lz4|zstd; requires sub-entry batching)
 - `subEntrySize` (int; >1 enables batching/compression; disables dedup guarantees)
 - `routingStrategy` (hash|key|custom)
+- `hashFunctionClass` (string; optional custom hash when `routingStrategy=hash`)
 - `partitionerClass` (string; for custom routing)
 - `filterValuePath` (string; producer-side filter path: `application_properties.*`, `message_annotations.*`, or `properties.*`)
 - `filterValueExtractorClass` (string; custom producer-side filter extractor class)
@@ -428,6 +430,7 @@ Type coercion notes:
 - `addressResolverClass` must implement a connector-defined interface (not RabbitMQ client types), have a public no-arg constructor, and run on the driver.
 - `observationCollectorClass` must implement a connector-defined factory interface and run on driver/executors.
 - `observationRegistryProviderClass` must implement a connector-defined Micrometer `ObservationRegistry` provider interface and run on driver/executors.
+- `hashFunctionClass` must implement a connector-defined hash interface and runs on executors.
 - `filterPostFilterClass` must implement a connector-defined filter interface (not RabbitMQ client types), have a public no-arg constructor, and run on executors.
 - `partitionerClass` must implement a connector-defined routing interface (not RabbitMQ client types) and run on executors; routing must be deterministic for a given input.
 

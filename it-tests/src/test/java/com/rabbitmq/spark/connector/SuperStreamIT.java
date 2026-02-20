@@ -1128,6 +1128,103 @@ class SuperStreamIT extends AbstractRabbitMQIT {
         assertThat(countsByStream).doesNotContainKey(superStream + "-2");
     }
 
+    @Test
+    void batchWriteCustomRoutingStrategyWithMetadataRouteLookup() throws Exception {
+        String metadataSuper = uniqueStreamName();
+        deleteSuperStream(metadataSuper);
+        createSuperStreamWithBindingKeys(metadataSuper, "amer", "emea", "apac");
+
+        StructType schema = new StructType()
+                .add("value", DataTypes.BinaryType, false)
+                .add("routing_key", DataTypes.StringType, false);
+
+        List<Row> data = new ArrayList<>();
+        for (int i = 0; i < 10; i++) {
+            data.add(RowFactory.create(("amer-meta-" + i).getBytes(), "amer"));
+            data.add(RowFactory.create(("emea-meta-" + i).getBytes(), "emea"));
+            data.add(RowFactory.create(("apac-meta-" + i).getBytes(), "apac"));
+        }
+
+        spark.createDataFrame(data, schema)
+                .write()
+                .format("rabbitmq_streams")
+                .mode("append")
+                .option("endpoints", streamEndpoint())
+                .option("superstream", metadataSuper)
+                .option("routingStrategy", "custom")
+                .option("partitionerClass",
+                        "com.rabbitmq.spark.connector.TestMetadataRouteRoutingStrategy")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .save();
+
+        Dataset<Row> readDf = spark.read()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("superstream", metadataSuper)
+                .option("startingOffsets", "earliest")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load();
+
+        List<Row> rows = readDf.collectAsList();
+        assertThat(rows).hasSize(30);
+
+        Map<String, List<String>> byStream = rows.stream()
+                .collect(Collectors.groupingBy(
+                        row -> row.getAs("stream").toString(),
+                        Collectors.mapping(row -> new String((byte[]) row.getAs("value")),
+                                Collectors.toList())));
+
+        assertThat(byStream.get(metadataSuper + "-amer")).allMatch(v -> v.startsWith("amer-meta-"));
+        assertThat(byStream.get(metadataSuper + "-emea")).allMatch(v -> v.startsWith("emea-meta-"));
+        assertThat(byStream.get(metadataSuper + "-apac")).allMatch(v -> v.startsWith("apac-meta-"));
+
+        deleteSuperStream(metadataSuper);
+    }
+
+    @Test
+    void batchWriteHashRoutingWithCustomHashFunction() throws Exception {
+        StructType schema = new StructType()
+                .add("value", DataTypes.BinaryType, false)
+                .add("routing_key", DataTypes.StringType, true);
+
+        List<Row> data = new ArrayList<>();
+        for (int i = 0; i < 30; i++) {
+            data.add(RowFactory.create(("custom-hash-" + i).getBytes(), "rk-" + i));
+        }
+
+        spark.createDataFrame(data, schema)
+                .write()
+                .format("rabbitmq_streams")
+                .mode("append")
+                .option("endpoints", streamEndpoint())
+                .option("superstream", superStream)
+                .option("routingStrategy", "hash")
+                .option("hashFunctionClass", "com.rabbitmq.spark.connector.TestHashFunction")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .save();
+
+        Dataset<Row> readDf = spark.read()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("superstream", superStream)
+                .option("startingOffsets", "earliest")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load();
+
+        List<Row> rows = readDf.collectAsList();
+        assertThat(rows).hasSize(30);
+        assertThat(rows.stream()
+                .map(row -> row.getAs("stream").toString())
+                .distinct()
+                .count()).isEqualTo(1L);
+    }
+
     // ---- S4: key-based routing with binding-key partitions ----
 
     @Test

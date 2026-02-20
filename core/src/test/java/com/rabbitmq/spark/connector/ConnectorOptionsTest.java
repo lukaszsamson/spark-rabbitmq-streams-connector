@@ -685,6 +685,15 @@ class ConnectorOptionsTest {
         }
 
         @Test
+        void parsesHashFunctionClass() {
+            var map = minimalSuperStreamOptions();
+            map.put("routingStrategy", "hash");
+            map.put("hashFunctionClass", TestHashFunction.class.getName());
+            var opts = new ConnectorOptions(map);
+            assertThat(opts.getHashFunctionClass()).isEqualTo(TestHashFunction.class.getName());
+        }
+
+        @Test
         void routingStrategyDefaultsToHash() {
             var opts = new ConnectorOptions(minimalStreamOptions());
             assertThat(opts.getRoutingStrategy()).isEqualTo(RoutingStrategyType.HASH);
@@ -1436,6 +1445,55 @@ class ConnectorOptionsTest {
         }
 
         @Test
+        void rejectsHashFunctionClassOutsideSuperStreamMode() {
+            var map = minimalStreamOptions();
+            map.put("routingStrategy", "hash");
+            map.put("hashFunctionClass", TestHashFunction.class.getName());
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateForSink)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("hashFunctionClass")
+                    .hasMessageContaining("superstream");
+        }
+
+        @Test
+        void rejectsHashFunctionClassWhenRoutingStrategyIsNotHash() {
+            var map = minimalSuperStreamOptions();
+            map.put("routingStrategy", "key");
+            map.put("hashFunctionClass", TestHashFunction.class.getName());
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateForSink)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("hashFunctionClass")
+                    .hasMessageContaining("routingStrategy")
+                    .hasMessageContaining("hash");
+        }
+
+        @Test
+        void rejectsInvalidHashFunctionClassNotFound() {
+            var map = minimalSuperStreamOptions();
+            map.put("routingStrategy", "hash");
+            map.put("hashFunctionClass", "com.nonexistent.HashFunction");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateForSink)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("hashFunctionClass")
+                    .hasMessageContaining("not found");
+        }
+
+        @Test
+        void rejectsHashFunctionClassWrongType() {
+            var map = minimalSuperStreamOptions();
+            map.put("routingStrategy", "hash");
+            map.put("hashFunctionClass", "java.lang.String");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateForSink)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("hashFunctionClass")
+                    .hasMessageContaining("does not implement");
+        }
+
+        @Test
         void rejectsPartitionerClassWrongType() {
             var map = minimalStreamOptions();
             map.put("routingStrategy", "custom");
@@ -1547,6 +1605,13 @@ class ConnectorOptionsTest {
         @Override
         public String extract(ConnectorMessageView message) {
             return message.valueAtPath("application_properties.region");
+        }
+    }
+
+    public static final class TestHashFunction implements ConnectorHashFunction {
+        @Override
+        public int hash(String routingKey) {
+            return 0;
         }
     }
 
