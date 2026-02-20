@@ -112,6 +112,7 @@ Type coercion notes:
 ## Sink schema handling
 - By default, fail-fast on unrecognized columns to avoid silent misconfiguration.
 - Optional `ignoreUnknownColumns` (bool; default false) can allow extra columns to be ignored.
+- Optional `publishing_id` (long) allows explicit per-row publishing ID control for deduplication workflows.
 
 ## Source design
 ### Read modes
@@ -249,6 +250,7 @@ Type coercion notes:
 ### Producer behavior
 - Uses RabbitMQ Streams `Producer` with publisher confirms enabled.
 - Optional deduplication is enabled via `producerName` and monotonically increasing `publishingId` per writer task.
+- When `publishing_id` is present in a sink row, it overrides auto-generated publishing IDs for that row.
 - Derived producer name for streaming writes: `producerName` + `-p` + `partitionId` + `-t` + `taskId` (avoids speculative conflicts; cross-retry dedup not guaranteed).
 - Deduplication constraints:
   - Only one live producer per `producerName`.
@@ -344,6 +346,12 @@ Type coercion notes:
 - `addressResolverClass` (string, optional; connector-specific interface to avoid shaded RabbitMQ types)
 - `observationCollectorClass` (string, optional; custom `ObservationCollector` factory)
 - `observationRegistryProviderClass` (string, optional; Micrometer `ObservationRegistry` provider for built-in Rabbit observation collector)
+- `lazyInitialization` (bool; default false)
+- `scheduledExecutorService` (string, optional; custom scheduled executor service factory)
+- `netty.eventLoopGroup` (string, optional; custom Netty event loop group factory)
+- `netty.byteBufAllocator` (string, optional; custom Netty byte buffer allocator factory)
+- `netty.channelCustomizer` (string, optional; custom Netty channel customizer)
+- `netty.bootstrapCustomizer` (string, optional; custom Netty bootstrap customizer)
 
 ### Options validation
 - Validate options at `TableProvider.getTable()` / `ScanBuilder` construction.
@@ -373,6 +381,7 @@ Type coercion notes:
 
 ### Sink options
 - `producerName` (string; enables deduplication if set)
+- `publishing_id` (long sink column; optional explicit publishing ID override)
 - `publisherConfirmTimeoutMs` (long)
 - `maxInFlight` (int; maps to `maxUnconfirmedMessages`)
 - `enqueueTimeoutMs` (long; default 10000; controls how long `send()` blocks when `maxInFlight` is reached before failing)

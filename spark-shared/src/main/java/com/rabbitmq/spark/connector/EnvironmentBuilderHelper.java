@@ -5,6 +5,10 @@ import com.rabbitmq.stream.BackOffDelayPolicy;
 import com.rabbitmq.stream.Environment;
 import com.rabbitmq.stream.EnvironmentBuilder;
 import com.rabbitmq.stream.observation.micrometer.MicrometerObservationCollectorBuilder;
+import io.netty.bootstrap.Bootstrap;
+import io.netty.buffer.ByteBufAllocator;
+import io.netty.channel.Channel;
+import io.netty.channel.EventLoopGroup;
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslContextBuilder;
 import org.slf4j.Logger;
@@ -51,6 +55,7 @@ final class EnvironmentBuilderHelper {
         configureObservationCollector(builder, options);
         configureCompressionCodecFactory(builder, options);
         configureTuning(builder, options);
+        configureExecutorAndNetty(builder, options);
 
         return builder.build();
     }
@@ -188,6 +193,8 @@ final class EnvironmentBuilderHelper {
     }
 
     private static void configureTuning(EnvironmentBuilder builder, ConnectorOptions options) {
+        builder.lazyInitialization(options.isLazyInitialization());
+
         if (options.getEnvironmentId() != null && !options.getEnvironmentId().isEmpty()) {
             builder.id(options.getEnvironmentId());
         }
@@ -226,6 +233,92 @@ final class EnvironmentBuilderHelper {
         }
         if (options.getMaxTrackingConsumersByConnection() != null) {
             builder.maxTrackingConsumersByConnection(options.getMaxTrackingConsumersByConnection());
+        }
+    }
+
+    private static void configureExecutorAndNetty(EnvironmentBuilder builder, ConnectorOptions options) {
+        String schedulerFactoryClass = options.getScheduledExecutorService();
+        if (schedulerFactoryClass != null && !schedulerFactoryClass.isEmpty()) {
+            ConnectorScheduledExecutorServiceFactory factory = ExtensionLoader.load(
+                    schedulerFactoryClass,
+                    ConnectorScheduledExecutorServiceFactory.class,
+                    ConnectorOptions.SCHEDULED_EXECUTOR_SERVICE);
+            var scheduler = factory.create(options);
+            if (scheduler == null) {
+                throw new IllegalArgumentException(
+                        "Class specified by '" + ConnectorOptions.SCHEDULED_EXECUTOR_SERVICE +
+                                "' returned null ScheduledExecutorService");
+            }
+            builder.scheduledExecutorService(scheduler);
+        }
+
+        EnvironmentBuilder.NettyConfiguration netty = null;
+        boolean configured = false;
+
+        String eventLoopFactoryClass = options.getNettyEventLoopGroup();
+        if (eventLoopFactoryClass != null && !eventLoopFactoryClass.isEmpty()) {
+            ConnectorNettyEventLoopGroupFactory factory = ExtensionLoader.load(
+                    eventLoopFactoryClass,
+                    ConnectorNettyEventLoopGroupFactory.class,
+                    ConnectorOptions.NETTY_EVENT_LOOP_GROUP);
+            EventLoopGroup eventLoopGroup = factory.create(options);
+            if (eventLoopGroup == null) {
+                throw new IllegalArgumentException(
+                        "Class specified by '" + ConnectorOptions.NETTY_EVENT_LOOP_GROUP +
+                                "' returned null EventLoopGroup");
+            }
+            netty = builder.netty();
+            configured = true;
+            netty.eventLoopGroup(eventLoopGroup);
+        }
+
+        String allocatorFactoryClass = options.getNettyByteBufAllocator();
+        if (allocatorFactoryClass != null && !allocatorFactoryClass.isEmpty()) {
+            ConnectorNettyByteBufAllocatorFactory factory = ExtensionLoader.load(
+                    allocatorFactoryClass,
+                    ConnectorNettyByteBufAllocatorFactory.class,
+                    ConnectorOptions.NETTY_BYTE_BUF_ALLOCATOR);
+            ByteBufAllocator allocator = factory.create(options);
+            if (allocator == null) {
+                throw new IllegalArgumentException(
+                        "Class specified by '" + ConnectorOptions.NETTY_BYTE_BUF_ALLOCATOR +
+                                "' returned null ByteBufAllocator");
+            }
+            if (!configured) {
+                netty = builder.netty();
+                configured = true;
+            }
+            netty.byteBufAllocator(allocator);
+        }
+
+        String channelCustomizerClass = options.getNettyChannelCustomizer();
+        if (channelCustomizerClass != null && !channelCustomizerClass.isEmpty()) {
+            ConnectorNettyChannelCustomizer customizer = ExtensionLoader.load(
+                    channelCustomizerClass,
+                    ConnectorNettyChannelCustomizer.class,
+                    ConnectorOptions.NETTY_CHANNEL_CUSTOMIZER);
+            if (!configured) {
+                netty = builder.netty();
+                configured = true;
+            }
+            netty.channelCustomizer((Channel channel) -> customizer.customize(channel));
+        }
+
+        String bootstrapCustomizerClass = options.getNettyBootstrapCustomizer();
+        if (bootstrapCustomizerClass != null && !bootstrapCustomizerClass.isEmpty()) {
+            ConnectorNettyBootstrapCustomizer customizer = ExtensionLoader.load(
+                    bootstrapCustomizerClass,
+                    ConnectorNettyBootstrapCustomizer.class,
+                    ConnectorOptions.NETTY_BOOTSTRAP_CUSTOMIZER);
+            if (!configured) {
+                netty = builder.netty();
+                configured = true;
+            }
+            netty.bootstrapCustomizer((Bootstrap bootstrap) -> customizer.customize(bootstrap));
+        }
+
+        if (configured) {
+            netty.environmentBuilder();
         }
     }
 

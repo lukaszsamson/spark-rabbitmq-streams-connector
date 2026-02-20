@@ -38,6 +38,12 @@ public final class ConnectorOptions implements Serializable {
     public static final String OBSERVATION_COLLECTOR_CLASS = "observationCollectorClass";
     public static final String OBSERVATION_REGISTRY_PROVIDER_CLASS =
             "observationRegistryProviderClass";
+    public static final String LAZY_INITIALIZATION = "lazyInitialization";
+    public static final String SCHEDULED_EXECUTOR_SERVICE = "scheduledExecutorService";
+    public static final String NETTY_EVENT_LOOP_GROUP = "netty.eventLoopGroup";
+    public static final String NETTY_BYTE_BUF_ALLOCATOR = "netty.byteBufAllocator";
+    public static final String NETTY_CHANNEL_CUSTOMIZER = "netty.channelCustomizer";
+    public static final String NETTY_BOOTSTRAP_CUSTOMIZER = "netty.bootstrapCustomizer";
     public static final String ENVIRONMENT_ID = "environmentId";
     public static final String RPC_TIMEOUT_MS = "rpcTimeoutMs";
     public static final String REQUESTED_HEARTBEAT_SECONDS = "requestedHeartbeatSeconds";
@@ -143,6 +149,12 @@ public final class ConnectorOptions implements Serializable {
     private final String addressResolverClass;
     private final String observationCollectorClass;
     private final String observationRegistryProviderClass;
+    private final boolean lazyInitialization;
+    private final String scheduledExecutorService;
+    private final String nettyEventLoopGroup;
+    private final String nettyByteBufAllocator;
+    private final String nettyChannelCustomizer;
+    private final String nettyBootstrapCustomizer;
     private final String environmentId;
     private final Long rpcTimeoutMs;
     private final Long requestedHeartbeatSeconds;
@@ -230,6 +242,12 @@ public final class ConnectorOptions implements Serializable {
         this.addressResolverClass = getString(options, ADDRESS_RESOLVER_CLASS);
         this.observationCollectorClass = getString(options, OBSERVATION_COLLECTOR_CLASS);
         this.observationRegistryProviderClass = getString(options, OBSERVATION_REGISTRY_PROVIDER_CLASS);
+        this.lazyInitialization = getBoolean(options, LAZY_INITIALIZATION, false);
+        this.scheduledExecutorService = getString(options, SCHEDULED_EXECUTOR_SERVICE);
+        this.nettyEventLoopGroup = getString(options, NETTY_EVENT_LOOP_GROUP);
+        this.nettyByteBufAllocator = getString(options, NETTY_BYTE_BUF_ALLOCATOR);
+        this.nettyChannelCustomizer = getString(options, NETTY_CHANNEL_CUSTOMIZER);
+        this.nettyBootstrapCustomizer = getString(options, NETTY_BOOTSTRAP_CUSTOMIZER);
         this.environmentId = getString(options, ENVIRONMENT_ID);
         this.rpcTimeoutMs = getLong(options, RPC_TIMEOUT_MS);
         this.requestedHeartbeatSeconds = getLong(options, REQUESTED_HEARTBEAT_SECONDS);
@@ -372,6 +390,31 @@ public final class ConnectorOptions implements Serializable {
             ExtensionLoader.load(observationRegistryProviderClass,
                     ConnectorObservationRegistryProvider.class,
                     OBSERVATION_REGISTRY_PROVIDER_CLASS);
+        }
+        if (scheduledExecutorService != null && !scheduledExecutorService.isEmpty()) {
+            ExtensionLoader.load(scheduledExecutorService,
+                    ConnectorScheduledExecutorServiceFactory.class,
+                    SCHEDULED_EXECUTOR_SERVICE);
+        }
+        if (nettyEventLoopGroup != null && !nettyEventLoopGroup.isEmpty()) {
+            ExtensionLoader.load(nettyEventLoopGroup,
+                    ConnectorNettyEventLoopGroupFactory.class,
+                    NETTY_EVENT_LOOP_GROUP);
+        }
+        if (nettyByteBufAllocator != null && !nettyByteBufAllocator.isEmpty()) {
+            ExtensionLoader.load(nettyByteBufAllocator,
+                    ConnectorNettyByteBufAllocatorFactory.class,
+                    NETTY_BYTE_BUF_ALLOCATOR);
+        }
+        if (nettyChannelCustomizer != null && !nettyChannelCustomizer.isEmpty()) {
+            ExtensionLoader.load(nettyChannelCustomizer,
+                    ConnectorNettyChannelCustomizer.class,
+                    NETTY_CHANNEL_CUSTOMIZER);
+        }
+        if (nettyBootstrapCustomizer != null && !nettyBootstrapCustomizer.isEmpty()) {
+            ExtensionLoader.load(nettyBootstrapCustomizer,
+                    ConnectorNettyBootstrapCustomizer.class,
+                    NETTY_BOOTSTRAP_CUSTOMIZER);
         }
         if (compressionCodecFactoryClass != null && !compressionCodecFactoryClass.isEmpty()) {
             ExtensionLoader.load(compressionCodecFactoryClass,
@@ -635,6 +678,12 @@ public final class ConnectorOptions implements Serializable {
     public String getAddressResolverClass() { return addressResolverClass; }
     public String getObservationCollectorClass() { return observationCollectorClass; }
     public String getObservationRegistryProviderClass() { return observationRegistryProviderClass; }
+    public boolean isLazyInitialization() { return lazyInitialization; }
+    public String getScheduledExecutorService() { return scheduledExecutorService; }
+    public String getNettyEventLoopGroup() { return nettyEventLoopGroup; }
+    public String getNettyByteBufAllocator() { return nettyByteBufAllocator; }
+    public String getNettyChannelCustomizer() { return nettyChannelCustomizer; }
+    public String getNettyBootstrapCustomizer() { return nettyBootstrapCustomizer; }
     public String getEnvironmentId() { return environmentId; }
     public Long getRpcTimeoutMs() { return rpcTimeoutMs; }
     public Long getRequestedHeartbeatSeconds() { return requestedHeartbeatSeconds; }

@@ -703,6 +703,40 @@ class RabbitMQWriteTest {
         }
 
         @Test
+        void explicitPublishingIdColumnOverridesAutoPublishingId() throws Exception {
+            Map<String, String> opts = minimalSinkMap();
+            opts.put("producerName", "dedup");
+            ConnectorOptions options = new ConnectorOptions(opts);
+
+            CapturingPublishingIdProducer producer = new CapturingPublishingIdProducer();
+            RabbitMQDataWriter writer = new RabbitMQDataWriter(
+                    options, sinkSchemaWithPublishingId(), 0, 1, -1);
+            setPrivateField(writer, "producer", producer);
+            setPrivateField(writer, "nextPublishingId", 6L);
+
+            writer.write(new GenericInternalRow(new Object[]{"a".getBytes(), 10L}));
+            writer.write(new GenericInternalRow(new Object[]{"b".getBytes(), null}));
+
+            assertThat(producer.publishingIds).containsExactly(10L, 11L);
+            long nextId = (long) getPrivateField(writer, "nextPublishingId");
+            assertThat(nextId).isEqualTo(12L);
+        }
+
+        @Test
+        void rejectsNegativeExplicitPublishingId() throws Exception {
+            ConnectorOptions options = minimalSinkOptions();
+            RabbitMQDataWriter writer = new RabbitMQDataWriter(
+                    options, sinkSchemaWithPublishingId(), 0, 1, -1);
+            setPrivateField(writer, "producer", new NoopProducer());
+
+            assertThatThrownBy(() -> writer.write(
+                    new GenericInternalRow(new Object[]{"a".getBytes(), -1L})))
+                    .isInstanceOf(IOException.class)
+                    .hasMessageContaining("publishing_id")
+                    .hasMessageContaining(">= 0");
+        }
+
+        @Test
         void abortClosesResourcesEvenWhenProducerInitFailed() throws Exception {
             RabbitMQDataWriter writer = new RabbitMQDataWriter(
                     minimalSinkOptions(), minimalSinkSchema(), 0, 1, -1);
@@ -939,6 +973,13 @@ class RabbitMQWriteTest {
         });
     }
 
+    private static StructType sinkSchemaWithPublishingId() {
+        return new StructType(new StructField[]{
+                new StructField("value", DataTypes.BinaryType, false, Metadata.empty()),
+                new StructField("publishing_id", DataTypes.LongType, true, Metadata.empty()),
+        });
+    }
+
     private static Write buildWrite() {
         return new RabbitMQWriteBuilder(minimalSinkOptions(), minimalSinkSchema(), "q").build();
     }
@@ -1151,6 +1192,35 @@ class RabbitMQWriteTest {
         @Override
         public void send(com.rabbitmq.stream.Message message,
                          com.rabbitmq.stream.ConfirmationHandler confirmationHandler) {
+            confirmationHandler.handle(new com.rabbitmq.stream.ConfirmationStatus(message, true, (short) 0));
+        }
+
+        @Override
+        public void close() {
+        }
+    }
+
+    private static final class CapturingPublishingIdProducer implements com.rabbitmq.stream.Producer {
+        private static final com.rabbitmq.stream.codec.QpidProtonCodec CODEC =
+                new com.rabbitmq.stream.codec.QpidProtonCodec();
+        private final java.util.List<Long> publishingIds = new java.util.ArrayList<>();
+
+        @Override
+        public com.rabbitmq.stream.MessageBuilder messageBuilder() {
+            return CODEC.messageBuilder();
+        }
+
+        @Override
+        public long getLastPublishingId() {
+            return 0L;
+        }
+
+        @Override
+        public void send(com.rabbitmq.stream.Message message,
+                         com.rabbitmq.stream.ConfirmationHandler confirmationHandler) {
+            if (message.hasPublishingId()) {
+                publishingIds.add(message.getPublishingId());
+            }
             confirmationHandler.handle(new com.rabbitmq.stream.ConfirmationStatus(message, true, (short) 0));
         }
 

@@ -49,6 +49,13 @@ final class EnvironmentPool {
             String tlsKeystorePassword,
             String addressResolverClass,
             String observationCollectorClass,
+            String observationRegistryProviderClass,
+            boolean lazyInitialization,
+            String scheduledExecutorService,
+            String nettyEventLoopGroup,
+            String nettyByteBufAllocator,
+            String nettyChannelCustomizer,
+            String nettyBootstrapCustomizer,
             String compressionCodecFactoryClass
     ) {
         static EnvironmentKey from(ConnectorOptions options) {
@@ -66,6 +73,13 @@ final class EnvironmentPool {
                     options.getTlsKeystorePassword(),
                     options.getAddressResolverClass(),
                     options.getObservationCollectorClass(),
+                    options.getObservationRegistryProviderClass(),
+                    options.isLazyInitialization(),
+                    options.getScheduledExecutorService(),
+                    options.getNettyEventLoopGroup(),
+                    options.getNettyByteBufAllocator(),
+                    options.getNettyChannelCustomizer(),
+                    options.getNettyBootstrapCustomizer(),
                     options.getCompressionCodecFactoryClass()
             );
         }

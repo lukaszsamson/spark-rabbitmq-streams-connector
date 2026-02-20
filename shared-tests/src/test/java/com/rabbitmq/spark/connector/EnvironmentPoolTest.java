@@ -165,6 +165,36 @@ class EnvironmentPoolTest {
         }
 
         @Test
+        void keyIncludesLazyInitialization() {
+            Map<String, String> map1 = minimalMap("localhost:5552", "test-stream");
+
+            Map<String, String> map2 = minimalMap("localhost:5552", "test-stream");
+            map2.put("lazyInitialization", "true");
+
+            var key1 = EnvironmentPool.EnvironmentKey.from(new ConnectorOptions(map1));
+            var key2 = EnvironmentPool.EnvironmentKey.from(new ConnectorOptions(map2));
+
+            assertThat(key1).isNotEqualTo(key2);
+        }
+
+        @Test
+        void keyIncludesNettyAndExecutorCustomizationClasses() {
+            Map<String, String> map1 = minimalMap("localhost:5552", "test-stream");
+
+            Map<String, String> map2 = minimalMap("localhost:5552", "test-stream");
+            map2.put("scheduledExecutorService", "com.example.ExecFactory");
+            map2.put("netty.eventLoopGroup", "com.example.EventLoopFactory");
+            map2.put("netty.byteBufAllocator", "com.example.AllocatorFactory");
+            map2.put("netty.channelCustomizer", "com.example.ChannelCustomizer");
+            map2.put("netty.bootstrapCustomizer", "com.example.BootstrapCustomizer");
+
+            var key1 = EnvironmentPool.EnvironmentKey.from(new ConnectorOptions(map1));
+            var key2 = EnvironmentPool.EnvironmentKey.from(new ConnectorOptions(map2));
+
+            assertThat(key1).isNotEqualTo(key2);
+        }
+
+        @Test
         void uriBasedKeyDiffersFromEndpointBased() {
             Map<String, String> map1 = minimalMap("localhost:5552", "test-stream");
 

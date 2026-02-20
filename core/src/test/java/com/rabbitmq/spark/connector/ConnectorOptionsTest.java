@@ -1,12 +1,18 @@
 package com.rabbitmq.spark.connector;
 
 import io.micrometer.observation.ObservationRegistry;
+import io.netty.bootstrap.Bootstrap;
+import io.netty.buffer.ByteBufAllocator;
+import io.netty.channel.Channel;
+import io.netty.channel.EventLoopGroup;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 
 import static org.assertj.core.api.Assertions.*;
 
@@ -174,6 +180,30 @@ class ConnectorOptionsTest {
             var opts = new ConnectorOptions(map);
             assertThat(opts.getObservationRegistryProviderClass())
                     .isEqualTo(TestObservationRegistryProvider.class.getName());
+        }
+
+        @Test
+        void parsesLazyAndNettyCustomizationOptions() {
+            var map = minimalStreamOptions();
+            map.put("lazyInitialization", "true");
+            map.put("scheduledExecutorService", TestScheduledExecutorServiceFactory.class.getName());
+            map.put("netty.eventLoopGroup", TestNettyEventLoopGroupFactory.class.getName());
+            map.put("netty.byteBufAllocator", TestNettyByteBufAllocatorFactory.class.getName());
+            map.put("netty.channelCustomizer", TestNettyChannelCustomizer.class.getName());
+            map.put("netty.bootstrapCustomizer", TestNettyBootstrapCustomizer.class.getName());
+
+            var opts = new ConnectorOptions(map);
+            assertThat(opts.isLazyInitialization()).isTrue();
+            assertThat(opts.getScheduledExecutorService())
+                    .isEqualTo(TestScheduledExecutorServiceFactory.class.getName());
+            assertThat(opts.getNettyEventLoopGroup())
+                    .isEqualTo(TestNettyEventLoopGroupFactory.class.getName());
+            assertThat(opts.getNettyByteBufAllocator())
+                    .isEqualTo(TestNettyByteBufAllocatorFactory.class.getName());
+            assertThat(opts.getNettyChannelCustomizer())
+                    .isEqualTo(TestNettyChannelCustomizer.class.getName());
+            assertThat(opts.getNettyBootstrapCustomizer())
+                    .isEqualTo(TestNettyBootstrapCustomizer.class.getName());
         }
 
         @Test
@@ -953,6 +983,28 @@ class ConnectorOptionsTest {
         }
 
         @Test
+        void rejectsScheduledExecutorServiceFactoryWrongType() {
+            var map = minimalStreamOptions();
+            map.put("scheduledExecutorService", "java.lang.String");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateCommon)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("scheduledExecutorService")
+                    .hasMessageContaining("does not implement");
+        }
+
+        @Test
+        void rejectsNettyEventLoopGroupFactoryWrongType() {
+            var map = minimalStreamOptions();
+            map.put("netty.eventLoopGroup", "java.lang.String");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateCommon)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("netty.eventLoopGroup")
+                    .hasMessageContaining("does not implement");
+        }
+
+        @Test
         void rejectsNonPositiveRpcTimeout() {
             var map = minimalStreamOptions();
             map.put("rpcTimeoutMs", "0");
@@ -1619,6 +1671,42 @@ class ConnectorOptionsTest {
         @Override
         public boolean accept(ConnectorMessageView message) {
             return true;
+        }
+    }
+
+    public static final class TestScheduledExecutorServiceFactory
+            implements ConnectorScheduledExecutorServiceFactory {
+        @Override
+        public ScheduledExecutorService create(ConnectorOptions options) {
+            return Executors.newSingleThreadScheduledExecutor();
+        }
+    }
+
+    public static final class TestNettyEventLoopGroupFactory
+            implements ConnectorNettyEventLoopGroupFactory {
+        @Override
+        public EventLoopGroup create(ConnectorOptions options) {
+            return null;
+        }
+    }
+
+    public static final class TestNettyByteBufAllocatorFactory
+            implements ConnectorNettyByteBufAllocatorFactory {
+        @Override
+        public ByteBufAllocator create(ConnectorOptions options) {
+            return null;
+        }
+    }
+
+    public static final class TestNettyChannelCustomizer implements ConnectorNettyChannelCustomizer {
+        @Override
+        public void customize(Channel channel) {
+        }
+    }
+
+    public static final class TestNettyBootstrapCustomizer implements ConnectorNettyBootstrapCustomizer {
+        @Override
+        public void customize(Bootstrap bootstrap) {
         }
     }
 }

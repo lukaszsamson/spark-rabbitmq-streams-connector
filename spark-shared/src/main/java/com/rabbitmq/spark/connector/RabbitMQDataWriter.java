@@ -96,9 +96,19 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
             }
         }
 
-        // Build message, with publishingId if deduplication is enabled
+        // Build message, with explicit per-row publishing_id override when present.
         MessageBuilder builder = producer.messageBuilder();
-        if (nextPublishingId >= 0) {
+        Long explicitPublishingId = converter.getPublishingId(record);
+        if (explicitPublishingId != null) {
+            if (explicitPublishingId < 0) {
+                throw new IOException(
+                        "Column 'publishing_id' must be >= 0, got: " + explicitPublishingId);
+            }
+            builder.publishingId(explicitPublishingId);
+            if (nextPublishingId >= 0 && explicitPublishingId >= nextPublishingId) {
+                nextPublishingId = explicitPublishingId + 1;
+            }
+        } else if (nextPublishingId >= 0) {
             builder.publishingId(nextPublishingId++);
         }
         Message message = converter.convert(record, builder);

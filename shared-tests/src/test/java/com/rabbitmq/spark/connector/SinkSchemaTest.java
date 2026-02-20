@@ -18,7 +18,7 @@ class SinkSchemaTest {
     void fullSchemaContainsAllColumns() {
         StructType schema = SinkSchema.fullSchema();
         assertThat(schema.fieldNames()).containsExactly(
-                "value", "stream", "routing_key", "properties",
+                "value", "publishing_id", "stream", "routing_key", "properties",
                 "application_properties", "message_annotations", "creation_time");
     }
 
@@ -31,7 +31,7 @@ class SinkSchemaTest {
     @Test
     void fullSchemaOptionalColumnsAreNullable() {
         StructType schema = SinkSchema.fullSchema();
-        for (String name : new String[]{"stream", "routing_key", "properties",
+        for (String name : new String[]{"publishing_id", "stream", "routing_key", "properties",
                 "application_properties", "message_annotations", "creation_time"}) {
             assertThat(schema.apply(name).nullable())
                     .as("Column '%s' should be nullable", name)
@@ -148,6 +148,19 @@ class SinkSchemaTest {
         assertThatThrownBy(() -> SinkSchema.validate(schema, false))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("creation_time")
+                .hasMessageContaining("bigint");
+    }
+
+    @Test
+    void rejectsWrongPublishingIdType() {
+        StructType schema = new StructType(new StructField[]{
+                new StructField("value", DataTypes.BinaryType, false, Metadata.empty()),
+                new StructField("publishing_id", DataTypes.StringType, true, Metadata.empty()),
+        });
+        assertThatThrownBy(() -> SinkSchema.validate(schema, false))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("publishing_id")
+                .hasMessageContaining("string")
                 .hasMessageContaining("bigint");
     }
 

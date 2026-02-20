@@ -1,6 +1,10 @@
 package com.rabbitmq.spark.connector;
 
 import com.rabbitmq.stream.impl.StreamEnvironmentBuilder;
+import io.netty.bootstrap.Bootstrap;
+import io.netty.buffer.UnpooledByteBufAllocator;
+import io.netty.channel.DefaultEventLoopGroup;
+import io.netty.channel.socket.nio.NioSocketChannel;
 import io.micrometer.observation.ObservationRegistry;
 import org.junit.jupiter.api.Test;
 
@@ -8,6 +12,8 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -326,6 +332,58 @@ class EnvironmentBuilderHelperTest {
                 .hasMessageContaining("not-a-duration");
     }
 
+    @Test
+    void appliesLazyInitializationAndNettyCustomizationOptions() throws Exception {
+        TestNettyChannelCustomizer.invoked = false;
+        TestNettyBootstrapCustomizer.invoked = false;
+
+        ConnectorOptions options = new ConnectorOptions(Map.of(
+                "endpoints", "hostA:5552",
+                "stream", "test-stream",
+                "lazyInitialization", "true",
+                "scheduledExecutorService",
+                TestScheduledExecutorServiceFactory.class.getName(),
+                "netty.eventLoopGroup",
+                TestNettyEventLoopGroupFactory.class.getName(),
+                "netty.byteBufAllocator",
+                TestNettyByteBufAllocatorFactory.class.getName(),
+                "netty.channelCustomizer",
+                TestNettyChannelCustomizer.class.getName(),
+                "netty.bootstrapCustomizer",
+                TestNettyBootstrapCustomizer.class.getName()
+        ));
+
+        StreamEnvironmentBuilder builder = new StreamEnvironmentBuilder();
+        invokeConfigureExecutorAndNetty(builder, options);
+        invokeConfigureTuning(builder, options);
+
+        assertThat(getFieldValue(builder, "lazyInit")).isEqualTo(true);
+        assertThat(getFieldValue(builder, "scheduledExecutorService"))
+                .isSameAs(TestScheduledExecutorServiceFactory.lastCreated);
+
+        Object nettyConfig = getFieldValue(builder, "netty");
+        assertThat(getFieldValue(nettyConfig, "eventLoopGroup"))
+                .isSameAs(TestNettyEventLoopGroupFactory.lastCreated);
+        assertThat(getFieldValue(nettyConfig, "byteBufAllocator"))
+                .isSameAs(UnpooledByteBufAllocator.DEFAULT);
+
+        @SuppressWarnings("unchecked")
+        java.util.function.Consumer<Object> channelCustomizer =
+                (java.util.function.Consumer<Object>) getFieldValue(nettyConfig, "channelCustomizer");
+        channelCustomizer.accept(null);
+        assertThat(TestNettyChannelCustomizer.invoked).isTrue();
+
+        @SuppressWarnings("unchecked")
+        java.util.function.Consumer<Bootstrap> bootstrapCustomizer =
+                (java.util.function.Consumer<Bootstrap>) getFieldValue(nettyConfig, "bootstrapCustomizer");
+        Bootstrap bootstrap = new Bootstrap().channel(NioSocketChannel.class);
+        bootstrapCustomizer.accept(bootstrap);
+        assertThat(TestNettyBootstrapCustomizer.invoked).isTrue();
+
+        TestScheduledExecutorServiceFactory.lastCreated.shutdownNow();
+        TestNettyEventLoopGroupFactory.lastCreated.shutdownGracefully().syncUninterruptibly();
+    }
+
     private static List<String> getUris(StreamEnvironmentBuilder builder) throws Exception {
         Field urisField = StreamEnvironmentBuilder.class.getDeclaredField("uris");
         urisField.setAccessible(true);
@@ -398,6 +456,16 @@ class EnvironmentBuilderHelperTest {
                                                                ConnectorOptions options) throws Exception {
         Method method = EnvironmentBuilderHelper.class.getDeclaredMethod(
                 "configureCompressionCodecFactory",
+                com.rabbitmq.stream.EnvironmentBuilder.class,
+                ConnectorOptions.class);
+        method.setAccessible(true);
+        method.invoke(null, builder, options);
+    }
+
+    private static void invokeConfigureExecutorAndNetty(StreamEnvironmentBuilder builder,
+                                                        ConnectorOptions options) throws Exception {
+        Method method = EnvironmentBuilderHelper.class.getDeclaredMethod(
+                "configureExecutorAndNetty",
                 com.rabbitmq.stream.EnvironmentBuilder.class,
                 ConnectorOptions.class);
         method.setAccessible(true);
@@ -525,6 +593,54 @@ class EnvironmentBuilderHelperTest {
         public com.rabbitmq.stream.compression.CompressionCodecFactory create(
                 ConnectorOptions options) {
             return null;
+        }
+    }
+
+    public static final class TestScheduledExecutorServiceFactory
+            implements ConnectorScheduledExecutorServiceFactory {
+        static ScheduledExecutorService lastCreated;
+
+        @Override
+        public ScheduledExecutorService create(ConnectorOptions options) {
+            lastCreated = Executors.newSingleThreadScheduledExecutor();
+            return lastCreated;
+        }
+    }
+
+    public static final class TestNettyEventLoopGroupFactory
+            implements ConnectorNettyEventLoopGroupFactory {
+        static DefaultEventLoopGroup lastCreated;
+
+        @Override
+        public DefaultEventLoopGroup create(ConnectorOptions options) {
+            lastCreated = new DefaultEventLoopGroup(1);
+            return lastCreated;
+        }
+    }
+
+    public static final class TestNettyByteBufAllocatorFactory
+            implements ConnectorNettyByteBufAllocatorFactory {
+        @Override
+        public io.netty.buffer.ByteBufAllocator create(ConnectorOptions options) {
+            return UnpooledByteBufAllocator.DEFAULT;
+        }
+    }
+
+    public static final class TestNettyChannelCustomizer implements ConnectorNettyChannelCustomizer {
+        static volatile boolean invoked;
+
+        @Override
+        public void customize(io.netty.channel.Channel channel) {
+            invoked = true;
+        }
+    }
+
+    public static final class TestNettyBootstrapCustomizer implements ConnectorNettyBootstrapCustomizer {
+        static volatile boolean invoked;
+
+        @Override
+        public void customize(Bootstrap bootstrap) {
+            invoked = true;
         }
     }
 }

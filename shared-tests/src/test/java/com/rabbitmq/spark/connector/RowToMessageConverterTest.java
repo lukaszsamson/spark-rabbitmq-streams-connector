@@ -49,6 +49,13 @@ class RowToMessageConverterTest {
         });
     }
 
+    private static StructType schemaWithPublishingId() {
+        return new StructType(new StructField[]{
+                new StructField("value", DataTypes.BinaryType, false, Metadata.empty()),
+                new StructField("publishing_id", DataTypes.LongType, true, Metadata.empty()),
+        });
+    }
+
     private static StructType schemaWithCreationTime() {
         return new StructType(new StructField[]{
                 new StructField("value", DataTypes.BinaryType, false, Metadata.empty()),
@@ -279,6 +286,22 @@ class RowToMessageConverterTest {
             });
 
             assertThat(converter.getValue(row)).isEqualTo("body".getBytes());
+        }
+
+        @Test
+        void extractsPublishingIdWhenPresent() {
+            var converter = new RowToMessageConverter(schemaWithPublishingId());
+            InternalRow row = new GenericInternalRow(new Object[]{"body".getBytes(), 42L});
+
+            assertThat(converter.getPublishingId(row)).isEqualTo(42L);
+        }
+
+        @Test
+        void publishingIdNullWhenAbsent() {
+            var converter = new RowToMessageConverter(valueOnlySchema());
+            InternalRow row = new GenericInternalRow(new Object[]{"body".getBytes()});
+
+            assertThat(converter.getPublishingId(row)).isNull();
         }
     }
 

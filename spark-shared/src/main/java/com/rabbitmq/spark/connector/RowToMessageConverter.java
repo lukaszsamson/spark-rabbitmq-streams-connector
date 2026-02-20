@@ -23,6 +23,7 @@ public final class RowToMessageConverter implements Serializable {
     private static final long serialVersionUID = 1L;
 
     private final int valueIndex;
+    private final int publishingIdIndex;
     private final int streamIndex;
     private final int routingKeyIndex;
     private final int propertiesIndex;
@@ -63,6 +64,7 @@ public final class RowToMessageConverter implements Serializable {
      */
     public RowToMessageConverter(StructType schema) {
         this.valueIndex = fieldIndex(schema, "value");
+        this.publishingIdIndex = fieldIndex(schema, "publishing_id");
         this.streamIndex = fieldIndex(schema, "stream");
         this.routingKeyIndex = fieldIndex(schema, "routing_key");
         this.propertiesIndex = fieldIndex(schema, "properties");
@@ -160,6 +162,16 @@ public final class RowToMessageConverter implements Serializable {
      */
     public byte[] getValue(InternalRow row) {
         return row.getBinary(valueIndex);
+    }
+
+    /**
+     * Extract the explicit publishing ID from the row, or {@code null} if absent.
+     */
+    public Long getPublishingId(InternalRow row) {
+        if (publishingIdIndex < 0 || row.isNullAt(publishingIdIndex)) {
+            return null;
+        }
+        return row.getLong(publishingIdIndex);
     }
 
     // ---- Properties struct → PropertiesBuilder ----

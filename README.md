@@ -151,6 +151,7 @@ The source produces rows with fixed columns and optional metadata columns.
 | Column | Type | Required | Description |
 |--------|------|----------|-------------|
 | `value` | binary | yes | Message body |
+| `publishing_id` | long | no | Explicit publishing ID override for deduplication |
 | `stream` | string | no | Target stream (stream mode only; validated to match configured stream) |
 | `routing_key` | string | no | Routing key (required for superstream if routing strategy needs it) |
 | `properties` | struct | no | AMQP 1.0 properties |
@@ -196,6 +197,12 @@ By default, unrecognized columns cause an error. Set `ignoreUnknownColumns=true`
 |--------|------|---------|-------------|
 | `rpcTimeoutMs` | long | — | RPC timeout for broker operations |
 | `requestedHeartbeatSeconds` | long | — | Heartbeat interval |
+| `lazyInitialization` | bool | false | Delay connection opening until first environment use |
+| `scheduledExecutorService` | string | — | Scheduled executor service factory class |
+| `netty.eventLoopGroup` | string | — | Netty event loop group factory class |
+| `netty.byteBufAllocator` | string | — | Netty byte buffer allocator factory class |
+| `netty.channelCustomizer` | string | — | Netty channel customizer class |
+| `netty.bootstrapCustomizer` | string | — | Netty bootstrap customizer class |
 | `forceReplicaForConsumers` | bool | — | Force consumers to connect to replicas |
 | `forceLeaderForProducers` | bool | — | Force producers to connect to leader |
 | `locatorConnectionCount` | int | — | Number of locator connections |
@@ -241,6 +248,7 @@ By default, unrecognized columns cause an error. Set `ignoreUnknownColumns=true`
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `producerName` | string | — | Producer name (enables deduplication if set) |
+| `publishing_id` | long column | — | Optional per-row publishing ID override in sink schema |
 | `publisherConfirmTimeoutMs` | long | — | Publisher confirm timeout |
 | `maxInFlight` | int | — | Max unconfirmed messages |
 | `enqueueTimeoutMs` | long | 10000 | Send blocking timeout when `maxInFlight` reached |
@@ -353,6 +361,11 @@ The connector provides extension points via connector-defined interfaces (not Ra
 | `partitionerClass` | `ConnectorRoutingStrategy` | Executors | Custom superstream routing with message view + metadata lookup |
 | `observationCollectorClass` | `ConnectorObservationCollectorFactory` | Both | Custom observability |
 | `observationRegistryProviderClass` | `ConnectorObservationRegistryProvider` | Both | Provide Micrometer observation registry |
+| `scheduledExecutorService` | `ConnectorScheduledExecutorServiceFactory` | Both | Custom scheduled executor service |
+| `netty.eventLoopGroup` | `ConnectorNettyEventLoopGroupFactory` | Both | Custom Netty event loop group |
+| `netty.byteBufAllocator` | `ConnectorNettyByteBufAllocatorFactory` | Both | Custom Netty byte buffer allocator |
+| `netty.channelCustomizer` | `ConnectorNettyChannelCustomizer` | Both | Customize Netty channel setup |
+| `netty.bootstrapCustomizer` | `ConnectorNettyBootstrapCustomizer` | Both | Customize Netty bootstrap setup |
 | `compressionCodecFactoryClass` | `ConnectorCompressionCodecFactory` | Executors | Custom compression codec |
 
 All extension classes must have a public no-arg constructor.

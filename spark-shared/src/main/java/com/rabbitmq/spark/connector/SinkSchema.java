@@ -23,6 +23,7 @@ public final class SinkSchema {
     static {
         VALID_COLUMNS = new LinkedHashMap<>();
         VALID_COLUMNS.put("value", DataTypes.BinaryType);
+        VALID_COLUMNS.put("publishing_id", DataTypes.LongType);
         VALID_COLUMNS.put("stream", DataTypes.StringType);
         VALID_COLUMNS.put("routing_key", DataTypes.StringType);
         VALID_COLUMNS.put("properties", RabbitMQStreamTable.PROPERTIES_STRUCT);
@@ -41,6 +42,7 @@ public final class SinkSchema {
     public static StructType fullSchema() {
         List<StructField> fields = new ArrayList<>();
         fields.add(new StructField("value", DataTypes.BinaryType, false, Metadata.empty()));
+        fields.add(new StructField("publishing_id", DataTypes.LongType, true, Metadata.empty()));
         fields.add(new StructField("stream", DataTypes.StringType, true, Metadata.empty()));
         fields.add(new StructField("routing_key", DataTypes.StringType, true, Metadata.empty()));
         fields.add(new StructField("properties", RabbitMQStreamTable.PROPERTIES_STRUCT,
