@@ -26,6 +26,7 @@ Provides a Spark DataSource V2 connector that reads from and writes to [RabbitMQ
 | Apache Spark | 3.5.x, 4.0.x, 4.1.x |
 | Java | 17, 21 |
 | RabbitMQ | 3.11+ (minimum), 3.13+ (filtering), 4.0+ (superstreams improvements), 4.3+ (precise tail offsets via `committedOffset()`) |
+| rabbitmq-stream-java-client | 1.5.x |
 | Scala | 2.12 (Spark 3.5 only), 2.13 |
 
 ### Artifacts
@@ -242,7 +243,6 @@ By default, unrecognized columns cause an error. Set `ignoreUnknownColumns=true`
 | `publisherConfirmTimeoutMs` | long | — | Publisher confirm timeout |
 | `maxInFlight` | int | — | Max unconfirmed messages |
 | `enqueueTimeoutMs` | long | 10000 | Send blocking timeout when `maxInFlight` reached |
-| `batchSize` | int | — | Sub-entry batch size |
 | `batchPublishingDelayMs` | long | — | Batch publishing delay |
 | `compression` | string | none | Compression: `none`, `gzip`, `snappy`, `lz4`, `zstd` (requires `subEntrySize > 1`) |
 | `subEntrySize` | int | — | Sub-entry size (>1 enables batching/compression; disables dedup guarantees) |

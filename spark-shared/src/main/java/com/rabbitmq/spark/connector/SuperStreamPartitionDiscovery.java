@@ -1,18 +1,14 @@
 package com.rabbitmq.spark.connector;
 
-import com.rabbitmq.stream.impl.Client;
-
-import java.net.URI;
-import java.util.Arrays;
+import com.rabbitmq.stream.Environment;
+import com.rabbitmq.stream.Producer;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Discovers partition streams for a RabbitMQ superstream.
  */
 final class SuperStreamPartitionDiscovery {
-
-    private static final int DEFAULT_STREAM_PORT = 5552;
-    private static final int DEFAULT_STREAM_TLS_PORT = 5551;
 
     private SuperStreamPartitionDiscovery() {}
 
@@ -24,12 +20,13 @@ final class SuperStreamPartitionDiscovery {
      * @return ordered list of partition stream names
      */
     static List<String> discoverPartitions(ConnectorOptions options, String superStream) {
-        Client.ClientParameters params = buildClientParams(options);
-        return discoverPartitions(superStream, stream -> {
-            try (Client client = new Client(params)) {
-                return client.partitions(stream);
-            }
-        });
+        Environment environment = EnvironmentPool.getInstance().acquire(options);
+        try {
+            return discoverPartitions(superStream,
+                    stream -> discoverPartitionsViaEnvironment(environment, stream));
+        } finally {
+            EnvironmentPool.getInstance().release(options);
+        }
     }
 
     static List<String> discoverPartitions(String superStream, PartitionsQuery query) {
@@ -41,49 +38,25 @@ final class SuperStreamPartitionDiscovery {
         }
     }
 
-    private static Client.ClientParameters buildClientParams(ConnectorOptions options) {
-        Client.ClientParameters params = new Client.ClientParameters();
-        if (hasText(options.getUris())) {
-            List<URI> uris = Arrays.stream(options.getUris().split(","))
-                    .map(String::trim)
-                    .filter(s -> !s.isEmpty())
-                    .map(URI::create)
-                    .toList();
-            params = Client.maybeSetUpClientParametersFromUris(uris, params);
-        } else {
-            applyHostAndPort(params, options);
+    private static List<String> discoverPartitionsViaEnvironment(Environment environment,
+                                                                 String superStream) {
+        AtomicReference<List<String>> partitions = new AtomicReference<>(List.of());
+        Producer producer = environment.producerBuilder()
+                .superStream(superStream)
+                .routing(message -> "")
+                .strategy((message, metadata) -> {
+                    partitions.set(List.copyOf(metadata.partitions()));
+                    return List.of();
+                })
+                .producerBuilder()
+                .build();
+        try {
+            producer.send(producer.messageBuilder().addData(new byte[0]).build(),
+                    status -> {});
+            return partitions.get();
+        } finally {
+            producer.close();
         }
-        if (hasText(options.getUsername())) {
-            params.username(options.getUsername());
-        }
-        if (hasText(options.getPassword())) {
-            params.password(options.getPassword());
-        }
-        if (hasText(options.getVhost())) {
-            params.virtualHost(options.getVhost());
-        }
-        return params;
-    }
-
-    private static void applyHostAndPort(Client.ClientParameters params, ConnectorOptions options) {
-        String endpoint = Arrays.stream(options.getEndpoints().split(","))
-                .map(String::trim)
-                .filter(s -> !s.isEmpty())
-                .findFirst()
-                .orElse(null);
-        if (endpoint == null) {
-            return;
-        }
-        String[] parts = endpoint.split(":");
-        String host = parts[0];
-        int port = parts.length > 1
-                ? Integer.parseInt(parts[1].trim())
-                : (options.isTls() ? DEFAULT_STREAM_TLS_PORT : DEFAULT_STREAM_PORT);
-        params.host(host).port(port);
-    }
-
-    private static boolean hasText(String value) {
-        return value != null && !value.isBlank();
     }
 
     @FunctionalInterface

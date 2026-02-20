@@ -534,13 +534,14 @@ class ConnectorOptionsTest {
         }
 
         @Test
-        void rejectsInvalidIntegerBatchSize() {
+        void rejectsRemovedBatchSizeOption() {
             var map = minimalStreamOptions();
             map.put("batchSize", "big");
-            assertThatThrownBy(() -> new ConnectorOptions(map))
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateForSink)
                     .isInstanceOf(IllegalArgumentException.class)
                     .hasMessageContaining("batchSize")
-                    .hasMessageContaining("big");
+                    .hasMessageContaining("removed");
         }
 
         @Test
@@ -632,13 +633,13 @@ class ConnectorOptionsTest {
         @Test
         void parsesBatchingOptions() {
             var map = minimalStreamOptions();
-            map.put("batchSize", "50");
             map.put("batchPublishingDelayMs", "200");
             map.put("subEntrySize", "10");
+            map.put("dynamicBatch", "true");
             var opts = new ConnectorOptions(map);
-            assertThat(opts.getBatchSize()).isEqualTo(50);
             assertThat(opts.getBatchPublishingDelayMs()).isEqualTo(200L);
             assertThat(opts.getSubEntrySize()).isEqualTo(10);
+            assertThat(opts.getDynamicBatch()).isEqualTo(Boolean.TRUE);
         }
 
         @Test
@@ -1340,13 +1341,14 @@ class ConnectorOptionsTest {
         }
 
         @Test
-        void rejectsNonPositiveBatchSize() {
+        void rejectsBatchSizeOption() {
             var map = minimalStreamOptions();
-            map.put("batchSize", "-1");
+            map.put("batchSize", "10");
             var opts = new ConnectorOptions(map);
             assertThatThrownBy(opts::validateForSink)
                     .isInstanceOf(IllegalArgumentException.class)
-                    .hasMessageContaining("batchSize");
+                    .hasMessageContaining("batchSize")
+                    .hasMessageContaining("removed");
         }
 
         @Test

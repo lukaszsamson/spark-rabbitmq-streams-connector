@@ -272,9 +272,6 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
         }
 
         // Batch settings
-        if (options.getBatchSize() != null) {
-            builder.batchSize(options.getBatchSize());
-        }
         if (options.getBatchPublishingDelayMs() != null) {
             builder.batchPublishingDelay(
                     Duration.ofMillis(options.getBatchPublishingDelayMs()));

@@ -373,7 +373,6 @@ Type coercion notes:
 - `publisherConfirmTimeoutMs` (long)
 - `maxInFlight` (int; maps to `maxUnconfirmedMessages`)
 - `enqueueTimeoutMs` (long; default 10000; controls how long `send()` blocks when `maxInFlight` is reached before failing)
-- `batchSize` (int)
 - `batchPublishingDelayMs` (long; may be overridden by dynamic batching)
 - `compression` (none|gzip|snappy|lz4|zstd; requires sub-entry batching)
 - `subEntrySize` (int; >1 enables batching/compression; disables dedup guarantees)

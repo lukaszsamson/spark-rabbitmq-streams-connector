@@ -1523,6 +1523,89 @@ class StreamingIT extends AbstractRabbitMQIT {
         EnvironmentPool.getInstance().closeAll();
     }
 
+    @Test
+    void streamingNamedConsumerRecoversAfterBrokerRestart() throws Exception {
+        String consumerName = "it-named-recovery-" + System.currentTimeMillis();
+        publishMessages(sourceStream, 45, "named-reco-");
+        long preRestartCount = waitForStreamCountAtLeast(sourceStream, 45L, 5_000);
+        assertThat(preRestartCount).isGreaterThanOrEqualTo(45L);
+
+        Path outputDir = Files.createTempDirectory("spark-output-named-retry-read-");
+        Path checkpointDir = Files.createTempDirectory("spark-checkpoint-named-retry-read-");
+        EnvironmentPool.getInstance().closeAll();
+
+        java.util.concurrent.ExecutorService executor = java.util.concurrent.Executors.newSingleThreadExecutor();
+        java.util.concurrent.Future<?> stopper = executor.submit(() -> {
+            Thread.sleep(300);
+            stopRabbitMqApp();
+            Thread.sleep(300);
+            startRabbitMqApp();
+            return null;
+        });
+
+        StreamingQuery query = spark.readStream()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", sourceStream)
+                .option("startingOffsets", "earliest")
+                .option("consumerName", consumerName)
+                .option("pollTimeoutMs", "300")
+                .option("serverSideOffsetTracking", "true")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load()
+                .writeStream()
+                .format("parquet")
+                .option("path", outputDir.toString())
+                .option("checkpointLocation", checkpointDir.toString())
+                .trigger(Trigger.AvailableNow())
+                .start();
+
+        query.awaitTermination(120_000);
+        stopper.get(5, TimeUnit.SECONDS);
+        executor.shutdownNow();
+
+        List<Row> rows = spark.read().schema(MINIMAL_OUTPUT_SCHEMA)
+                .parquet(outputDir.toString())
+                .collectAsList();
+        assertThat(rows).hasSize(45);
+        assertThat(rows.stream().map(r -> (Long) r.getAs("offset")).collect(Collectors.toSet()))
+                .hasSize(45);
+        assertThat(hasStoredOffset(consumerName, sourceStream)).isTrue();
+
+        publishMessages(sourceStream, 12, "named-reco-next-");
+        Thread.sleep(200);
+
+        Path resumedOutputDir = Files.createTempDirectory("spark-output-named-retry-resume-");
+        Path resumedCheckpoint = Files.createTempDirectory("spark-checkpoint-named-retry-resume-");
+        StreamingQuery resumedQuery = spark.readStream()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", sourceStream)
+                .option("startingOffsets", "earliest")
+                .option("consumerName", consumerName)
+                .option("serverSideOffsetTracking", "true")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load()
+                .writeStream()
+                .format("parquet")
+                .option("path", resumedOutputDir.toString())
+                .option("checkpointLocation", resumedCheckpoint.toString())
+                .trigger(Trigger.AvailableNow())
+                .start();
+        resumedQuery.awaitTermination(120_000);
+
+        long resumedCount = spark.read().schema(MINIMAL_OUTPUT_SCHEMA)
+                .parquet(resumedOutputDir.toString())
+                .count();
+        assertThat(resumedCount).isEqualTo(12L);
+
+        EnvironmentPool.getInstance().closeAll();
+    }
+
     // ---- IT-RETRY-005: broker-offset store timeout path (best effort) ----
 
     @Test

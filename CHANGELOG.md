@@ -36,3 +36,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Sink schema validation with `ignoreUnknownColumns` option.
 - Single active consumer support.
 - Compression support (`gzip`, `snappy`, `lz4`, `zstd`) with sub-entry batching.
+- RabbitMQ Stream Java client baseline upgraded to `1.5.x`.
+- Producer option support for `dynamicBatch`, `retryOnRecovery`, and `compressionCodecFactoryClass`.
+- Environment option support for `observationCollectorClass`, `requestedHeartbeatSeconds`,
+  `locatorConnectionCount`, `forceReplicaForConsumers`, `forceLeaderForProducers`,
+  and connection backoff policy options.

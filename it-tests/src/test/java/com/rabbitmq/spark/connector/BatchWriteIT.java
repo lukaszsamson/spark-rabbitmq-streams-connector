@@ -680,10 +680,10 @@ class BatchWriteIT extends AbstractRabbitMQIT {
                 .allMatch(size -> size == 15 * 1024);
     }
 
-    // ---- IT-SINK-004: batch settings (batchSize, batchPublishingDelayMs, enqueueTimeoutMs) ----
+    // ---- IT-SINK-004: batch settings (dynamicBatch, batchPublishingDelayMs, enqueueTimeoutMs) ----
 
     @Test
-    void batchWriteWithBatchSettings() {
+    void batchWriteWithDynamicBatchSettings() {
         StructType schema = new StructType()
                 .add("value", DataTypes.BinaryType, false);
 
@@ -699,7 +699,7 @@ class BatchWriteIT extends AbstractRabbitMQIT {
                 .mode("append")
                 .option("endpoints", streamEndpoint())
                 .option("stream", stream)
-                .option("batchSize", "10")
+                .option("dynamicBatch", "true")
                 .option("batchPublishingDelayMs", "0")
                 .option("enqueueTimeoutMs", "10000")
                 .option("addressResolverClass",

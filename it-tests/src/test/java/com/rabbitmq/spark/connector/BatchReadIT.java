@@ -833,6 +833,39 @@ class BatchReadIT extends AbstractRabbitMQIT {
         assertThat(values).allMatch(v -> v.startsWith("alpha-") || v.startsWith("beta-"));
     }
 
+    @Test
+    void batchReadTimestampFilterValuesWithSplit() throws Exception {
+        publishMessagesWithFilterValue(stream, 20, "pre-beta-", "beta");
+        Thread.sleep(1200);
+        long boundaryTimestamp = System.currentTimeMillis();
+        Thread.sleep(1200);
+        publishMessagesWithFilterValue(stream, 30, "post-alpha-", "alpha");
+
+        Dataset<Row> df = spark.read()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("startingOffsets", "timestamp")
+                .option("startingTimestamp", String.valueOf(boundaryTimestamp))
+                .option("filterValues", "alpha")
+                .option("filterValuePath", "application_properties.filter")
+                .option("filterMatchUnfiltered", "false")
+                .option("minPartitions", "4")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "com.rabbitmq.spark.connector.TestAddressResolver")
+                .load();
+
+        List<String> values = df.collectAsList().stream()
+                .map(row -> new String((byte[]) row.getAs("value")))
+                .toList();
+        long postAlphaCount = values.stream().filter(v -> v.startsWith("post-alpha-")).count();
+
+        // Bloom filter can add false positives, but matching messages must all be present.
+        assertThat(postAlphaCount).isEqualTo(30);
+        assertThat(values.stream().noneMatch(v -> v.startsWith("pre-beta-"))).isTrue();
+    }
+
     // ---- IT-FILTER-002: filterMatchUnfiltered includes unfiltered messages ----
 
     @Test

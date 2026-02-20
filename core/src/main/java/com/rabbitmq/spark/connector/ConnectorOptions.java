@@ -77,7 +77,6 @@ public final class ConnectorOptions implements Serializable {
     public static final String PUBLISHER_CONFIRM_TIMEOUT_MS = "publisherConfirmTimeoutMs";
     public static final String MAX_IN_FLIGHT = "maxInFlight";
     public static final String ENQUEUE_TIMEOUT_MS = "enqueueTimeoutMs";
-    public static final String BATCH_SIZE = "batchSize";
     public static final String BATCH_PUBLISHING_DELAY_MS = "batchPublishingDelayMs";
     public static final String COMPRESSION = "compression";
     public static final String SUB_ENTRY_SIZE = "subEntrySize";
@@ -89,6 +88,7 @@ public final class ConnectorOptions implements Serializable {
     public static final String FILTER_VALUE_PATH = "filterValuePath";
     public static final String FILTER_VALUE_EXTRACTOR_CLASS = "filterValueExtractorClass";
     public static final String IGNORE_UNKNOWN_COLUMNS = "ignoreUnknownColumns";
+    public static final String REMOVED_BATCH_SIZE = "batchSize";
     public static final String REMOVED_FILTER_VALUE_COLUMN = "filterValueColumn";
     public static final String REMOVED_FILTER_POST_FILTER_CLASS_V2 = "filterPostFilterClassV2";
 
@@ -178,7 +178,6 @@ public final class ConnectorOptions implements Serializable {
     private final Long publisherConfirmTimeoutMs;
     private final Integer maxInFlight;
     private final long enqueueTimeoutMs;
-    private final Integer batchSize;
     private final Long batchPublishingDelayMs;
     private final CompressionType compression;
     private final Integer subEntrySize;
@@ -192,6 +191,7 @@ public final class ConnectorOptions implements Serializable {
     private final boolean ignoreUnknownColumns;
 
     // Removed options (kept only for fail-fast validation)
+    private final String removedBatchSize;
     private final String removedFilterValueColumn;
     private final String removedFilterPostFilterClassV2;
 
@@ -272,7 +272,6 @@ public final class ConnectorOptions implements Serializable {
         this.maxInFlight = getInteger(options, MAX_IN_FLIGHT);
         this.enqueueTimeoutMs = getLongPrimitive(options, ENQUEUE_TIMEOUT_MS,
                 DEFAULT_ENQUEUE_TIMEOUT_MS);
-        this.batchSize = getInteger(options, BATCH_SIZE);
         this.batchPublishingDelayMs = getLong(options, BATCH_PUBLISHING_DELAY_MS);
         this.compression = parseEnum(options, COMPRESSION,
                 CompressionType::fromString, DEFAULT_COMPRESSION);
@@ -288,6 +287,7 @@ public final class ConnectorOptions implements Serializable {
         this.ignoreUnknownColumns = getBoolean(options, IGNORE_UNKNOWN_COLUMNS,
                 DEFAULT_IGNORE_UNKNOWN_COLUMNS);
 
+        this.removedBatchSize = getString(options, REMOVED_BATCH_SIZE);
         this.removedFilterValueColumn = getString(options, REMOVED_FILTER_VALUE_COLUMN);
         this.removedFilterPostFilterClassV2 = getString(options, REMOVED_FILTER_POST_FILTER_CLASS_V2);
 
@@ -304,6 +304,12 @@ public final class ConnectorOptions implements Serializable {
      * @throws IllegalArgumentException if any common option is invalid
      */
     public void validateCommon() {
+        if (removedBatchSize != null) {
+            throw new IllegalArgumentException(
+                    "'" + REMOVED_BATCH_SIZE + "' has been removed for RabbitMQ stream client 1.5+. " +
+                            "Use '" + BATCH_PUBLISHING_DELAY_MS + "' and '" + DYNAMIC_BATCH +
+                            "' instead.");
+        }
         if (removedFilterValueColumn != null) {
             throw new IllegalArgumentException(
                     "'" + REMOVED_FILTER_VALUE_COLUMN + "' has been removed. " +
@@ -523,10 +529,6 @@ public final class ConnectorOptions implements Serializable {
             throw new IllegalArgumentException(
                     "'" + ENQUEUE_TIMEOUT_MS + "' must be >= 0, got: " + enqueueTimeoutMs);
         }
-        if (batchSize != null && batchSize <= 0) {
-            throw new IllegalArgumentException(
-                    "'" + BATCH_SIZE + "' must be > 0, got: " + batchSize);
-        }
         if (subEntrySize != null && subEntrySize <= 0) {
             throw new IllegalArgumentException(
                     "'" + SUB_ENTRY_SIZE + "' must be > 0, got: " + subEntrySize);
@@ -651,7 +653,6 @@ public final class ConnectorOptions implements Serializable {
     public Long getPublisherConfirmTimeoutMs() { return publisherConfirmTimeoutMs; }
     public Integer getMaxInFlight() { return maxInFlight; }
     public long getEnqueueTimeoutMs() { return enqueueTimeoutMs; }
-    public Integer getBatchSize() { return batchSize; }
     public Long getBatchPublishingDelayMs() { return batchPublishingDelayMs; }
     public CompressionType getCompression() { return compression; }
     public Integer getSubEntrySize() { return subEntrySize; }

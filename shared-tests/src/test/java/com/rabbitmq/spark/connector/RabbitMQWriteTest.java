@@ -536,9 +536,8 @@ class RabbitMQWriteTest {
         }
 
         @Test
-        void commitFlushesAtExactBatchSize() throws Exception {
+        void commitFlushesConfirmedMessages() throws Exception {
             Map<String, String> opts = minimalSinkMap();
-            opts.put("batchSize", "5");
             ConnectorOptions options = new ConnectorOptions(opts);
 
             RabbitMQDataWriter writer = new RabbitMQDataWriter(
@@ -729,7 +728,6 @@ class RabbitMQWriteTest {
             opts.put("maxInFlight", "7");
             opts.put("publisherConfirmTimeoutMs", "1234");
             opts.put("enqueueTimeoutMs", "0");
-            opts.put("batchSize", "5");
             opts.put("batchPublishingDelayMs", "9");
             opts.put("retryOnRecovery", "false");
             opts.put("dynamicBatch", "true");
@@ -745,7 +743,6 @@ class RabbitMQWriteTest {
             assertThat(builder.maxInFlight).isEqualTo(7);
             assertThat(builder.confirmTimeoutMs).isEqualTo(1234L);
             assertThat(builder.enqueueTimeoutMs).isEqualTo(0L);
-            assertThat(builder.batchSize).isEqualTo(5);
             assertThat(builder.batchDelayMs).isEqualTo(9L);
             assertThat(builder.retryOnRecovery).isEqualTo(Boolean.FALSE);
             assertThat(builder.dynamicBatch).isEqualTo(Boolean.TRUE);
