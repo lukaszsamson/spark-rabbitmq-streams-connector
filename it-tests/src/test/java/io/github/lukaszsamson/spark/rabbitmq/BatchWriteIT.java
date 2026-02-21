@@ -93,14 +93,7 @@ class BatchWriteIT extends AbstractRabbitMQIT {
 
         Dataset<Row> df = spark.createDataFrame(data, schema);
 
-        java.util.concurrent.ExecutorService executor = java.util.concurrent.Executors.newSingleThreadExecutor();
-        java.util.concurrent.Future<?> stopper = executor.submit(() -> {
-            Thread.sleep(200);
-            stopRabbitMqApp();
-            Thread.sleep(1200);
-            startRabbitMqApp();
-            return null;
-        });
+        stopRabbitMqApp();
 
         try {
             assertThatThrownBy(() -> df.write()
@@ -120,12 +113,7 @@ class BatchWriteIT extends AbstractRabbitMQIT {
                                     "Locator not available",
                                     "Connection is closed"));
         } finally {
-            try {
-                stopper.get(5, java.util.concurrent.TimeUnit.SECONDS);
-            } catch (Exception ignored) {
-                // best effort
-            }
-            executor.shutdownNow();
+            startRabbitMqApp();
         }
     }
 
