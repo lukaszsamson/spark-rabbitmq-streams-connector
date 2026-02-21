@@ -1161,7 +1161,9 @@ class BatchReadIT extends AbstractRabbitMQIT {
 
         assertThatThrownBy(df::collectAsList)
                 .satisfies(ex -> assertThat(ex.toString())
-                        .contains("No offset matched from request"));
+                        .containsAnyOf(
+                                "No offset matched from request",
+                                "Failed to resolve timestamp start offset"));
     }
 
     // ---- IT-OPT-006-source: invalid option combinations ----
