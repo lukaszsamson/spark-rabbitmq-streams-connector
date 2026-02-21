@@ -5,12 +5,12 @@
     <modelVersion>4.0.0</modelVersion>
 
     <parent>
-        <groupId>com.rabbitmq.spark</groupId>
-        <artifactId>sparkling-rabbit-parent</artifactId>
+        <groupId>io.github.lukaszsamson</groupId>
+        <artifactId>spark-rabbitmq-streams-connector-parent</artifactId>
         <version>0.1.0-SNAPSHOT</version>
     </parent>
 
-    <artifactId>sparkling-rabbit-spark35</artifactId>
+    <artifactId>spark-rabbitmq-streams-connector-spark35</artifactId>
     <name>Sparkling Rabbit - Spark 3.5</name>
     <description>RabbitMQ Streams connector for Apache Spark 3.5</description>
 
@@ -20,12 +20,12 @@
 
     <dependencies>
         <dependency>
-            <groupId>com.rabbitmq.spark</groupId>
-            <artifactId>sparkling-rabbit-core</artifactId>
+            <groupId>io.github.lukaszsamson</groupId>
+            <artifactId>spark-rabbitmq-streams-connector-core</artifactId>
         </dependency>
         <dependency>
-            <groupId>com.rabbitmq.spark</groupId>
-            <artifactId>sparkling-rabbit-spark-shared</artifactId>
+            <groupId>io.github.lukaszsamson</groupId>
+            <artifactId>spark-rabbitmq-streams-connector-spark-shared</artifactId>
         </dependency>
         <dependency>
             <groupId>org.apache.spark</groupId>
@@ -101,8 +101,8 @@
                             <createDependencyReducedPom>true</createDependencyReducedPom>
                             <artifactSet>
                                 <includes>
-                                    <include>com.rabbitmq.spark:sparkling-rabbit-core</include>
-                                    <include>com.rabbitmq.spark:sparkling-rabbit-spark-shared</include>
+                                    <include>io.github.lukaszsamson:spark-rabbitmq-streams-connector-core</include>
+                                    <include>io.github.lukaszsamson:spark-rabbitmq-streams-connector-spark-shared</include>
                                     <include>com.rabbitmq:stream-client</include>
                                     <include>io.netty:*</include>
                                     <include>org.apache.qpid:proton-j</include>

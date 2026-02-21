@@ -5,19 +5,19 @@
     <modelVersion>4.0.0</modelVersion>
 
     <parent>
-        <groupId>com.rabbitmq.spark</groupId>
-        <artifactId>sparkling-rabbit-parent</artifactId>
+        <groupId>io.github.lukaszsamson</groupId>
+        <artifactId>spark-rabbitmq-streams-connector-parent</artifactId>
         <version>0.1.0-SNAPSHOT</version>
     </parent>
 
-    <artifactId>sparkling-rabbit-spark35-tests</artifactId>
+    <artifactId>spark-rabbitmq-streams-connector-spark35-tests</artifactId>
     <name>Sparkling Rabbit - Spark 3.5 Tests</name>
     <description>Runs shared unit tests against Spark 3.5</description>
 
     <dependencies>
         <dependency>
-            <groupId>com.rabbitmq.spark</groupId>
-            <artifactId>sparkling-rabbit-spark35</artifactId>
+            <groupId>io.github.lukaszsamson</groupId>
+            <artifactId>spark-rabbitmq-streams-connector-spark35</artifactId>
             <version>${project.version}</version>
             <classifier>unshaded</classifier>
         </dependency>
@@ -28,8 +28,8 @@
             <scope>test</scope>
         </dependency>
         <dependency>
-            <groupId>com.rabbitmq.spark</groupId>
-            <artifactId>sparkling-rabbit-shared-tests</artifactId>
+            <groupId>io.github.lukaszsamson</groupId>
+            <artifactId>spark-rabbitmq-streams-connector-shared-tests</artifactId>
             <version>${project.version}</version>
             <type>test-jar</type>
             <scope>test</scope>
@@ -80,11 +80,11 @@
                             <goal>unpack-dependencies</goal>
                         </goals>
                         <configuration>
-                            <includeGroupIds>com.rabbitmq.spark</includeGroupIds>
-                            <includeArtifactIds>sparkling-rabbit-spark35,sparkling-rabbit-spark-shared</includeArtifactIds>
+                            <includeGroupIds>io.github.lukaszsamson</includeGroupIds>
+                            <includeArtifactIds>spark-rabbitmq-streams-connector-spark35,spark-rabbitmq-streams-connector-spark-shared</includeArtifactIds>
                             <includeClassifiers>unshaded</includeClassifiers>
                             <outputDirectory>${project.build.outputDirectory}</outputDirectory>
-                            <includes>com/rabbitmq/spark/connector/**</includes>
+                            <includes>io/github/lukaszsamson/spark/rabbitmq/**</includes>
                         </configuration>
                     </execution>
                 </executions>
@@ -102,10 +102,10 @@
                 </dependencies>
                 <configuration>
                     <targetClasses>
-                        <param>com.rabbitmq.spark.connector.*</param>
+                        <param>io.github.lukaszsamson.spark.rabbitmq.*</param>
                     </targetClasses>
                     <targetTests>
-                        <param>com.rabbitmq.spark.connector.*</param>
+                        <param>io.github.lukaszsamson.spark.rabbitmq.*</param>
                     </targetTests>
                     <avoidCallsTo>
                         <param>com.rabbitmq.stream</param>

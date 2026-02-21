@@ -5,12 +5,12 @@
     <modelVersion>4.0.0</modelVersion>
 
     <parent>
-        <groupId>com.rabbitmq.spark</groupId>
-        <artifactId>sparkling-rabbit-parent</artifactId>
+        <groupId>io.github.lukaszsamson</groupId>
+        <artifactId>spark-rabbitmq-streams-connector-parent</artifactId>
         <version>0.1.0-SNAPSHOT</version>
     </parent>
 
-    <artifactId>sparkling-rabbit-core</artifactId>
+    <artifactId>spark-rabbitmq-streams-connector-core</artifactId>
     <name>Sparkling Rabbit - Core</name>
     <description>Core library for RabbitMQ Streams Spark connector (no Spark dependency)</description>
 

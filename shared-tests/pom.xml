@@ -5,26 +5,26 @@
     <modelVersion>4.0.0</modelVersion>
 
     <parent>
-        <groupId>com.rabbitmq.spark</groupId>
-        <artifactId>sparkling-rabbit-parent</artifactId>
+        <groupId>io.github.lukaszsamson</groupId>
+        <artifactId>spark-rabbitmq-streams-connector-parent</artifactId>
         <version>0.1.0-SNAPSHOT</version>
     </parent>
 
-    <artifactId>sparkling-rabbit-shared-tests</artifactId>
+    <artifactId>spark-rabbitmq-streams-connector-shared-tests</artifactId>
     <name>Sparkling Rabbit - Shared Tests</name>
     <description>Shared unit tests for Spark 4.0/4.1 modules</description>
 
     <dependencies>
         <dependency>
-            <groupId>com.rabbitmq.spark</groupId>
-            <artifactId>sparkling-rabbit-spark40</artifactId>
+            <groupId>io.github.lukaszsamson</groupId>
+            <artifactId>spark-rabbitmq-streams-connector-spark40</artifactId>
             <version>${project.version}</version>
             <classifier>unshaded</classifier>
             <scope>test</scope>
         </dependency>
         <dependency>
-            <groupId>com.rabbitmq.spark</groupId>
-            <artifactId>sparkling-rabbit-core</artifactId>
+            <groupId>io.github.lukaszsamson</groupId>
+            <artifactId>spark-rabbitmq-streams-connector-core</artifactId>
         </dependency>
         <dependency>
             <groupId>org.apache.spark</groupId>
@@ -70,7 +70,7 @@
                 <artifactId>maven-compiler-plugin</artifactId>
                 <configuration>
                     <testIncludes>
-                        <testInclude>com/rabbitmq/spark/connector/**</testInclude>
+                        <testInclude>io/github/lukaszsamson/spark/rabbitmq/**</testInclude>
                     </testIncludes>
                 </configuration>
             </plugin>

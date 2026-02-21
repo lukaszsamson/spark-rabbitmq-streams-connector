@@ -5,18 +5,18 @@
     <modelVersion>4.0.0</modelVersion>
 
     <parent>
-        <groupId>com.rabbitmq.spark</groupId>
-        <artifactId>sparkling-rabbit-parent</artifactId>
+        <groupId>io.github.lukaszsamson</groupId>
+        <artifactId>spark-rabbitmq-streams-connector-parent</artifactId>
         <version>0.1.0-SNAPSHOT</version>
     </parent>
 
-    <artifactId>sparkling-rabbit-it-tests</artifactId>
+    <artifactId>spark-rabbitmq-streams-connector-it-tests</artifactId>
     <name>Sparkling Rabbit - Integration Tests</name>
     <description>Integration tests for RabbitMQ Streams Spark connector</description>
 
     <properties>
         <spark.version>${spark41.version}</spark.version>
-        <it.connector.artifact>sparkling-rabbit-spark41</it.connector.artifact>
+        <it.connector.artifact>spark-rabbitmq-streams-connector-spark41</it.connector.artifact>
         <!-- Skip install/deploy for test-only module -->
         <maven.install.skip>true</maven.install.skip>
         <maven.deploy.skip>true</maven.deploy.skip>
@@ -27,7 +27,7 @@
             <id>spark35</id>
             <properties>
                 <spark.version>${spark35.version}</spark.version>
-                <it.connector.artifact>sparkling-rabbit-spark35</it.connector.artifact>
+                <it.connector.artifact>spark-rabbitmq-streams-connector-spark35</it.connector.artifact>
             </properties>
             <build>
                 <plugins>
@@ -64,7 +64,7 @@
             <properties>
                 <spark.version>${spark35.version}</spark.version>
                 <scala.binary.version>2.12</scala.binary.version>
-                <it.connector.artifact>sparkling-rabbit-spark35_2.12</it.connector.artifact>
+                <it.connector.artifact>spark-rabbitmq-streams-connector-spark35_2.12</it.connector.artifact>
             </properties>
             <build>
                 <plugins>
@@ -100,21 +100,21 @@
             <id>spark40</id>
             <properties>
                 <spark.version>${spark40.version}</spark.version>
-                <it.connector.artifact>sparkling-rabbit-spark40</it.connector.artifact>
+                <it.connector.artifact>spark-rabbitmq-streams-connector-spark40</it.connector.artifact>
             </properties>
         </profile>
         <profile>
             <id>spark41</id>
             <properties>
                 <spark.version>${spark41.version}</spark.version>
-                <it.connector.artifact>sparkling-rabbit-spark41</it.connector.artifact>
+                <it.connector.artifact>spark-rabbitmq-streams-connector-spark41</it.connector.artifact>
             </properties>
         </profile>
     </profiles>
 
     <dependencies>
         <dependency>
-            <groupId>com.rabbitmq.spark</groupId>
+            <groupId>io.github.lukaszsamson</groupId>
             <artifactId>${it.connector.artifact}</artifactId>
             <version>${project.version}</version>
             <scope>test</scope>

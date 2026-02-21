@@ -4,14 +4,14 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
-    <groupId>com.rabbitmq.spark</groupId>
-    <artifactId>sparkling-rabbit-parent</artifactId>
+    <groupId>io.github.lukaszsamson</groupId>
+    <artifactId>spark-rabbitmq-streams-connector-parent</artifactId>
     <version>0.1.0-SNAPSHOT</version>
     <packaging>pom</packaging>
 
     <name>Sparkling Rabbit - Parent</name>
     <description>RabbitMQ Streams and Superstreams Connector for Apache Spark</description>
-    <url>https://github.com/rabbitmq/sparkling-rabbit</url>
+    <url>https://github.com/lukaszsamson/spark-rabbitmq-streams-connector</url>
 
     <licenses>
         <license>
@@ -22,9 +22,9 @@
     </licenses>
 
     <scm>
-        <connection>scm:git:git://github.com/rabbitmq/sparkling-rabbit.git</connection>
-        <developerConnection>scm:git:ssh://github.com:rabbitmq/sparkling-rabbit.git</developerConnection>
-        <url>https://github.com/rabbitmq/sparkling-rabbit</url>
+        <connection>scm:git:git://github.com/lukaszsamson/spark-rabbitmq-streams-connector.git</connection>
+        <developerConnection>scm:git:ssh://github.com:lukaszsamson/spark-rabbitmq-streams-connector.git</developerConnection>
+        <url>https://github.com/lukaszsamson/spark-rabbitmq-streams-connector</url>
     </scm>
 
     <developers>
@@ -83,7 +83,7 @@
         <pitest.junit5.version>1.2.1</pitest.junit5.version>
 
         <!-- Shading relocation prefix -->
-        <shading.prefix>com.rabbitmq.spark.shaded</shading.prefix>
+        <shading.prefix>io.github.lukaszsamson.spark.shaded</shading.prefix>
 
         <!-- Release plugin versions -->
         <maven-source-plugin.version>3.3.1</maven-source-plugin.version>
@@ -96,13 +96,13 @@
         <dependencies>
             <!-- Internal modules -->
             <dependency>
-                <groupId>com.rabbitmq.spark</groupId>
-                <artifactId>sparkling-rabbit-core</artifactId>
+                <groupId>io.github.lukaszsamson</groupId>
+                <artifactId>spark-rabbitmq-streams-connector-core</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>
-                <groupId>com.rabbitmq.spark</groupId>
-                <artifactId>sparkling-rabbit-spark-shared</artifactId>
+                <groupId>io.github.lukaszsamson</groupId>
+                <artifactId>spark-rabbitmq-streams-connector-spark-shared</artifactId>
                 <version>${project.version}</version>
             </dependency>
 

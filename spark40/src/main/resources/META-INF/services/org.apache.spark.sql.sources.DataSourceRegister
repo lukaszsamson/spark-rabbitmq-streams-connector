@@ -1,1 +1,1 @@
-com.rabbitmq.spark.connector.RabbitMQStreamTableProvider
+io.github.lukaszsamson.spark.rabbitmq.RabbitMQStreamTableProvider

@@ -33,10 +33,10 @@ Provides a Spark DataSource V2 connector that reads from and writes to [RabbitMQ
 
 | Spark version | Scala | Artifact |
 |---------------|-------|----------|
-| 3.5.x | 2.13 | `sparkling-rabbit-spark35` |
-| 3.5.x | 2.12 | `sparkling-rabbit-spark35_2.12` |
-| 4.0.x | 2.13 | `sparkling-rabbit-spark40` |
-| 4.1.x | 2.13 | `sparkling-rabbit-spark41` |
+| 3.5.x | 2.13 | `spark-rabbitmq-streams-connector-spark35` |
+| 3.5.x | 2.12 | `spark-rabbitmq-streams-connector-spark35_2.12` |
+| 4.0.x | 2.13 | `spark-rabbitmq-streams-connector-spark40` |
+| 4.1.x | 2.13 | `spark-rabbitmq-streams-connector-spark41` |
 
 ## Quick start
 
@@ -44,8 +44,8 @@ Provides a Spark DataSource V2 connector that reads from and writes to [RabbitMQ
 
 ```xml
 <dependency>
-    <groupId>com.rabbitmq.spark</groupId>
-    <artifactId>sparkling-rabbit-spark41</artifactId>
+    <groupId>io.github.lukaszsamson</groupId>
+    <artifactId>spark-rabbitmq-streams-connector-spark41</artifactId>
     <version>0.1.0-SNAPSHOT</version>
 </dependency>
 ```
