@@ -1261,8 +1261,11 @@ class BatchReadIT extends AbstractRabbitMQIT {
         Set<String> metrics = collectMetricNames(df.queryExecution().executedPlan());
         assertThat(metrics)
                 .contains("Total records read from RabbitMQ streams")
-                .contains("Total bytes read from RabbitMQ streams")
-                .contains("Total read latency in milliseconds (time spent waiting for messages)");
+                .contains("Total payload bytes read from RabbitMQ streams")
+                .contains("Estimated total wire bytes read (payload + metadata)")
+                .contains("Total queue poll wait time in milliseconds")
+                .contains("Number of offset-out-of-range events (retention truncation)")
+                .contains("Number of detected data loss events");
     }
 
     // ---- IT-OFFSET-009: checkpoint forward compatibility (Spark 3.5 -> 4.x) ----
