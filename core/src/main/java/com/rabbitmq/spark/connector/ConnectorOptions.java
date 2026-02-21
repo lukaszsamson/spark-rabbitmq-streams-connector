@@ -62,11 +62,17 @@ public final class ConnectorOptions implements Serializable {
     public static final String STARTING_OFFSETS = "startingOffsets";
     public static final String STARTING_OFFSET = "startingOffset";
     public static final String STARTING_TIMESTAMP = "startingTimestamp";
+    public static final String STARTING_OFFSETS_BY_TIMESTAMP = "startingOffsetsByTimestamp";
     public static final String ENDING_OFFSETS = "endingOffsets";
     public static final String ENDING_OFFSET = "endingOffset";
+    public static final String ENDING_TIMESTAMP = "endingTimestamp";
+    public static final String ENDING_OFFSETS_BY_TIMESTAMP = "endingOffsetsByTimestamp";
     public static final String MAX_RECORDS_PER_TRIGGER = "maxRecordsPerTrigger";
+    public static final String MIN_OFFSETS_PER_TRIGGER = "minOffsetsPerTrigger";
+    public static final String MAX_TRIGGER_DELAY = "maxTriggerDelay";
     public static final String MAX_BYTES_PER_TRIGGER = "maxBytesPerTrigger";
     public static final String MIN_PARTITIONS = "minPartitions";
+    public static final String MAX_RECORDS_PER_PARTITION = "maxRecordsPerPartition";
     public static final String SERVER_SIDE_OFFSET_TRACKING = "serverSideOffsetTracking";
     public static final String FILTER_VALUES = "filterValues";
     public static final String FILTER_MATCH_UNFILTERED = "filterMatchUnfiltered";
@@ -125,6 +131,7 @@ public final class ConnectorOptions implements Serializable {
     public static final CompressionType DEFAULT_COMPRESSION = CompressionType.NONE;
     public static final RoutingStrategyType DEFAULT_ROUTING_STRATEGY = RoutingStrategyType.HASH;
     public static final boolean DEFAULT_IGNORE_UNKNOWN_COLUMNS = false;
+    public static final long DEFAULT_MAX_TRIGGER_DELAY_MS = 15 * 60 * 1000L; // 15 minutes
     public static final long DEFAULT_ENVIRONMENT_IDLE_TIMEOUT_MS = 60_000L;
 
     // ---- Parsed fields ----
@@ -171,11 +178,17 @@ public final class ConnectorOptions implements Serializable {
     private final StartingOffsetsMode startingOffsets;
     private final Long startingOffset;
     private final Long startingTimestamp;
+    private final Map<String, Long> startingOffsetsByTimestamp;
     private final EndingOffsetsMode endingOffsets;
     private final Long endingOffset;
+    private final Long endingTimestamp;
+    private final Map<String, Long> endingOffsetsByTimestamp;
     private final Long maxRecordsPerTrigger;
+    private final Long minOffsetsPerTrigger;
+    private final long maxTriggerDelayMs;
     private final Long maxBytesPerTrigger;
     private final Integer minPartitions;
+    private final Long maxRecordsPerPartition;
     private final Boolean serverSideOffsetTracking;
     private final List<String> filterValues;
     private final boolean filterMatchUnfiltered;
@@ -267,12 +280,21 @@ public final class ConnectorOptions implements Serializable {
                 StartingOffsetsMode::fromString, DEFAULT_STARTING_OFFSETS);
         this.startingOffset = getLong(options, STARTING_OFFSET);
         this.startingTimestamp = getLong(options, STARTING_TIMESTAMP);
+        this.startingOffsetsByTimestamp = parseJsonLongMap(
+                getString(options, STARTING_OFFSETS_BY_TIMESTAMP));
         this.endingOffsets = parseEnum(options, ENDING_OFFSETS,
                 EndingOffsetsMode::fromString, DEFAULT_ENDING_OFFSETS);
         this.endingOffset = getLong(options, ENDING_OFFSET);
+        this.endingTimestamp = getLong(options, ENDING_TIMESTAMP);
+        this.endingOffsetsByTimestamp = parseJsonLongMap(
+                getString(options, ENDING_OFFSETS_BY_TIMESTAMP));
         this.maxRecordsPerTrigger = getLong(options, MAX_RECORDS_PER_TRIGGER);
+        this.minOffsetsPerTrigger = getLong(options, MIN_OFFSETS_PER_TRIGGER);
+        this.maxTriggerDelayMs = parseDurationMs(options, MAX_TRIGGER_DELAY,
+                DEFAULT_MAX_TRIGGER_DELAY_MS);
         this.maxBytesPerTrigger = getLong(options, MAX_BYTES_PER_TRIGGER);
         this.minPartitions = getInteger(options, MIN_PARTITIONS);
+        this.maxRecordsPerPartition = getLong(options, MAX_RECORDS_PER_PARTITION);
         this.serverSideOffsetTracking = getNullableBoolean(options, SERVER_SIDE_OFFSET_TRACKING);
         this.filterValues = parseCommaSeparated(getString(options, FILTER_VALUES));
         this.filterMatchUnfiltered = getBoolean(options, FILTER_MATCH_UNFILTERED,
@@ -467,17 +489,27 @@ public final class ConnectorOptions implements Serializable {
                     "'" + STARTING_OFFSET + "' is required when '" + STARTING_OFFSETS +
                             "' is 'offset'");
         }
-        // startingOffsets=timestamp requires startingTimestamp
-        if (startingOffsets == StartingOffsetsMode.TIMESTAMP && startingTimestamp == null) {
+        // startingOffsets=timestamp requires startingTimestamp (unless per-stream timestamps given)
+        if (startingOffsets == StartingOffsetsMode.TIMESTAMP
+                && startingTimestamp == null
+                && (startingOffsetsByTimestamp == null || startingOffsetsByTimestamp.isEmpty())) {
             throw new IllegalArgumentException(
-                    "'" + STARTING_TIMESTAMP + "' is required when '" + STARTING_OFFSETS +
-                            "' is 'timestamp'");
+                    "'" + STARTING_TIMESTAMP + "' or '" + STARTING_OFFSETS_BY_TIMESTAMP +
+                            "' is required when '" + STARTING_OFFSETS + "' is 'timestamp'");
         }
         // endingOffsets=offset requires endingOffset
         if (endingOffsets == EndingOffsetsMode.OFFSET && endingOffset == null) {
             throw new IllegalArgumentException(
                     "'" + ENDING_OFFSET + "' is required when '" + ENDING_OFFSETS +
                             "' is 'offset'");
+        }
+        // endingOffsets=timestamp requires endingTimestamp (unless per-stream timestamps given)
+        if (endingOffsets == EndingOffsetsMode.TIMESTAMP
+                && endingTimestamp == null
+                && (endingOffsetsByTimestamp == null || endingOffsetsByTimestamp.isEmpty())) {
+            throw new IllegalArgumentException(
+                    "'" + ENDING_TIMESTAMP + "' or '" + ENDING_OFFSETS_BY_TIMESTAMP +
+                            "' is required when '" + ENDING_OFFSETS + "' is 'timestamp'");
         }
         // Numeric range checks
         if (startingOffset != null && startingOffset < 0) {
@@ -493,9 +525,25 @@ public final class ConnectorOptions implements Serializable {
             throw new IllegalArgumentException(
                     "'" + ENDING_OFFSET + "' must be >= 0, got: " + endingOffset);
         }
+        if (endingTimestamp != null && endingTimestamp <= 0) {
+            throw new IllegalArgumentException(
+                    "'" + ENDING_TIMESTAMP + "' must be > 0 (epoch millis), got: " +
+                            endingTimestamp);
+        }
         if (maxRecordsPerTrigger != null && maxRecordsPerTrigger <= 0) {
             throw new IllegalArgumentException(
                     "'" + MAX_RECORDS_PER_TRIGGER + "' must be > 0, got: " + maxRecordsPerTrigger);
+        }
+        if (minOffsetsPerTrigger != null && minOffsetsPerTrigger <= 0) {
+            throw new IllegalArgumentException(
+                    "'" + MIN_OFFSETS_PER_TRIGGER + "' must be > 0, got: " + minOffsetsPerTrigger);
+        }
+        if (minOffsetsPerTrigger != null && maxRecordsPerTrigger != null
+                && minOffsetsPerTrigger > maxRecordsPerTrigger) {
+            throw new IllegalArgumentException(
+                    "The value of " + MIN_OFFSETS_PER_TRIGGER + "(" + minOffsetsPerTrigger +
+                            ") is higher than the " + MAX_RECORDS_PER_TRIGGER + "(" +
+                            maxRecordsPerTrigger + ")");
         }
         if (maxBytesPerTrigger != null && maxBytesPerTrigger <= 0) {
             throw new IllegalArgumentException(
@@ -504,6 +552,10 @@ public final class ConnectorOptions implements Serializable {
         if (minPartitions != null && minPartitions <= 0) {
             throw new IllegalArgumentException(
                     "'" + MIN_PARTITIONS + "' must be > 0, got: " + minPartitions);
+        }
+        if (maxRecordsPerPartition != null && maxRecordsPerPartition <= 0) {
+            throw new IllegalArgumentException(
+                    "'" + MAX_RECORDS_PER_PARTITION + "' must be > 0, got: " + maxRecordsPerPartition);
         }
         if (pollTimeoutMs <= 0) {
             throw new IllegalArgumentException(
@@ -703,11 +755,17 @@ public final class ConnectorOptions implements Serializable {
     public StartingOffsetsMode getStartingOffsets() { return startingOffsets; }
     public Long getStartingOffset() { return startingOffset; }
     public Long getStartingTimestamp() { return startingTimestamp; }
+    public Map<String, Long> getStartingOffsetsByTimestamp() { return startingOffsetsByTimestamp; }
     public EndingOffsetsMode getEndingOffsets() { return endingOffsets; }
     public Long getEndingOffset() { return endingOffset; }
+    public Long getEndingTimestamp() { return endingTimestamp; }
+    public Map<String, Long> getEndingOffsetsByTimestamp() { return endingOffsetsByTimestamp; }
     public Long getMaxRecordsPerTrigger() { return maxRecordsPerTrigger; }
+    public Long getMinOffsetsPerTrigger() { return minOffsetsPerTrigger; }
+    public long getMaxTriggerDelayMs() { return maxTriggerDelayMs; }
     public Long getMaxBytesPerTrigger() { return maxBytesPerTrigger; }
     public Integer getMinPartitions() { return minPartitions; }
+    public Long getMaxRecordsPerPartition() { return maxRecordsPerPartition; }
     public Boolean getServerSideOffsetTracking() { return serverSideOffsetTracking; }
     public List<String> getFilterValues() { return filterValues; }
     public boolean isFilterMatchUnfiltered() { return filterMatchUnfiltered; }
@@ -853,6 +911,101 @@ public final class ConnectorOptions implements Serializable {
                 .filter(s -> !s.isEmpty())
                 .map(MetadataField::fromString)
                 .collect(Collectors.toCollection(() -> EnumSet.noneOf(MetadataField.class)));
+    }
+
+    /**
+     * Parse a duration string (e.g. "15m", "5s", "1000") to milliseconds.
+     * Supports suffixes: ms, s, m, h. Plain numbers are treated as milliseconds.
+     */
+    private static long parseDurationMs(Map<String, String> options, String key, long defaultValue) {
+        String value = lookupOption(options, key);
+        if (value == null) {
+            return defaultValue;
+        }
+        value = value.trim().toLowerCase(Locale.ROOT);
+        try {
+            if (value.endsWith("ms")) {
+                return Long.parseLong(value.substring(0, value.length() - 2).trim());
+            } else if (value.endsWith("h")) {
+                return Long.parseLong(value.substring(0, value.length() - 1).trim()) * 3600_000L;
+            } else if (value.endsWith("m")) {
+                return Long.parseLong(value.substring(0, value.length() - 1).trim()) * 60_000L;
+            } else if (value.endsWith("s")) {
+                return Long.parseLong(value.substring(0, value.length() - 1).trim()) * 1000L;
+            } else {
+                return Long.parseLong(value);
+            }
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(
+                    "'" + key + "' must be a valid duration (e.g. '5s', '15m', '1000'), got: '" +
+                            lookupOption(options, key) + "'");
+        }
+    }
+
+    /**
+     * Parse a JSON map of string to long, e.g. {@code {"stream-0": 1000, "stream-1": 2000}}.
+     * Returns null if value is null or empty.
+     */
+    private static Map<String, Long> parseJsonLongMap(String value) {
+        if (value == null || value.trim().isEmpty()) {
+            return null;
+        }
+        value = value.trim();
+        if (!value.startsWith("{") || !value.endsWith("}")) {
+            throw new IllegalArgumentException(
+                    "Expected JSON object, got: '" + value + "'");
+        }
+        String inner = value.substring(1, value.length() - 1).trim();
+        if (inner.isEmpty()) {
+            return Collections.emptyMap();
+        }
+        Map<String, Long> result = new LinkedHashMap<>();
+        // Simple JSON parser for {"key": value, ...} where values are longs
+        for (String pair : splitJsonPairs(inner)) {
+            pair = pair.trim();
+            int colonIdx = pair.indexOf(':');
+            if (colonIdx < 0) {
+                throw new IllegalArgumentException(
+                        "Invalid JSON entry (missing ':'): '" + pair + "'");
+            }
+            String key = pair.substring(0, colonIdx).trim();
+            String val = pair.substring(colonIdx + 1).trim();
+            // Remove quotes from key
+            if (key.startsWith("\"") && key.endsWith("\"")) {
+                key = key.substring(1, key.length() - 1);
+            }
+            try {
+                result.put(key, Long.parseLong(val));
+            } catch (NumberFormatException e) {
+                throw new IllegalArgumentException(
+                        "Invalid numeric value for key '" + key + "': '" + val + "'");
+            }
+        }
+        return Collections.unmodifiableMap(result);
+    }
+
+    private static List<String> splitJsonPairs(String inner) {
+        List<String> pairs = new ArrayList<>();
+        int depth = 0;
+        boolean inQuote = false;
+        int start = 0;
+        for (int i = 0; i < inner.length(); i++) {
+            char c = inner.charAt(i);
+            if (c == '"' && (i == 0 || inner.charAt(i - 1) != '\\')) {
+                inQuote = !inQuote;
+            } else if (!inQuote) {
+                if (c == '{') depth++;
+                else if (c == '}') depth--;
+                else if (c == ',' && depth == 0) {
+                    pairs.add(inner.substring(start, i));
+                    start = i + 1;
+                }
+            }
+        }
+        if (start < inner.length()) {
+            pairs.add(inner.substring(start));
+        }
+        return pairs;
     }
 
     private static List<String> parseCommaSeparated(String value) {

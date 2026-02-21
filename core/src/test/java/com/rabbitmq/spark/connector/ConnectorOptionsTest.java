@@ -391,6 +391,14 @@ class ConnectorOptionsTest {
         }
 
         @Test
+        void parsesMaxRecordsPerPartition() {
+            var map = minimalStreamOptions();
+            map.put("maxRecordsPerPartition", "500");
+            var opts = new ConnectorOptions(map);
+            assertThat(opts.getMaxRecordsPerPartition()).isEqualTo(500L);
+        }
+
+        @Test
         void parsesServerSideOffsetTracking() {
             var map = minimalStreamOptions();
             map.put("serverSideOffsetTracking", "false");
@@ -1174,6 +1182,16 @@ class ConnectorOptionsTest {
             assertThatThrownBy(opts::validateForSource)
                     .isInstanceOf(IllegalArgumentException.class)
                     .hasMessageContaining("minPartitions");
+        }
+
+        @Test
+        void rejectsNonPositiveMaxRecordsPerPartition() {
+            var map = minimalStreamOptions();
+            map.put("maxRecordsPerPartition", "0");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateForSource)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("maxRecordsPerPartition");
         }
 
         @Test

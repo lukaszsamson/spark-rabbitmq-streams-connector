@@ -69,6 +69,11 @@ final class RabbitMQScan implements Scan {
                     "endingOffsets=offset is not supported for streaming queries. " +
                             "Use endingOffsets only with batch reads.");
         }
+        if (options.getEndingOffsets() == EndingOffsetsMode.TIMESTAMP) {
+            throw new IllegalArgumentException(
+                    "endingOffsets=timestamp is not supported for streaming queries. " +
+                            "Use endingOffsets only with batch reads.");
+        }
         return new RabbitMQMicroBatchStream(options, schema, checkpointLocation);
     }
 
@@ -205,23 +210,30 @@ final class RabbitMQScan implements Scan {
     }
 
     private long resolveStartOffset(Environment env, String stream, long firstAvailable, StreamStats stats) {
+        // Check for per-stream timestamp override
+        Map<String, Long> perStreamTs = options.getStartingOffsetsByTimestamp();
+        if (perStreamTs != null && perStreamTs.containsKey(stream)) {
+            return resolveTimestampStartingOffset(
+                    env, stream, firstAvailable, stats, perStreamTs.get(stream));
+        }
         return switch (options.getStartingOffsets()) {
             case EARLIEST -> firstAvailable;
             case LATEST -> resolveEndOffset(env, stream, stats);
             case OFFSET -> options.getStartingOffset();
-            case TIMESTAMP -> resolveTimestampStartingOffset(env, stream, firstAvailable, stats);
+            case TIMESTAMP -> resolveTimestampStartingOffset(
+                    env, stream, firstAvailable, stats, options.getStartingTimestamp());
         };
     }
 
     private long resolveTimestampStartingOffset(
-            Environment env, String stream, long firstAvailable, StreamStats stats) {
+            Environment env, String stream, long firstAvailable, StreamStats stats,
+            long timestamp) {
         BlockingQueue<Long> observedOffsets = new LinkedBlockingQueue<>();
         com.rabbitmq.stream.Consumer probe = null;
         try {
             probe = env.consumerBuilder()
                     .stream(stream)
-                    .offset(com.rabbitmq.stream.OffsetSpecification.timestamp(
-                            options.getStartingTimestamp()))
+                    .offset(com.rabbitmq.stream.OffsetSpecification.timestamp(timestamp))
                     .noTrackingStrategy()
                     .messageHandler((context, message) -> observedOffsets.offer(context.offset()))
                     .build();
@@ -232,19 +244,16 @@ final class RabbitMQScan implements Scan {
             }
             throw new IllegalStateException(
                     "No offset matched from request for timestamp "
-                            + options.getStartingTimestamp()
-                            + " in stream '" + stream + "'");
+                            + timestamp + " in stream '" + stream + "'");
         } catch (NoOffsetException e) {
             throw new IllegalStateException(
                     "No offset matched from request for timestamp "
-                            + options.getStartingTimestamp()
-                            + " in stream '" + stream + "'", e);
+                            + timestamp + " in stream '" + stream + "'", e);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new IllegalStateException(
                     "No offset matched from request for timestamp "
-                            + options.getStartingTimestamp()
-                            + " in stream '" + stream + "'", e);
+                            + timestamp + " in stream '" + stream + "'", e);
         } catch (IllegalStateException e) {
             throw e;
         } catch (Exception e) {
@@ -264,8 +273,18 @@ final class RabbitMQScan implements Scan {
     }
 
     private long resolveEndOffset(Environment env, String stream, StreamStats stats) {
+        // Check for per-stream ending timestamp override
+        Map<String, Long> perStreamTs = options.getEndingOffsetsByTimestamp();
+        if (perStreamTs != null && perStreamTs.containsKey(stream)) {
+            return resolveTimestampEndingOffset(env, stream, perStreamTs.get(stream));
+        }
+
         if (options.getEndingOffsets() == EndingOffsetsMode.OFFSET) {
             return options.getEndingOffset();
+        }
+
+        if (options.getEndingOffsets() == EndingOffsetsMode.TIMESTAMP) {
+            return resolveTimestampEndingOffset(env, stream, options.getEndingTimestamp());
         }
 
         // endingOffsets=latest: use the most recent tail we can observe.
@@ -275,6 +294,59 @@ final class RabbitMQScan implements Scan {
         long probedTail = probeTailOffsetFromLastMessageWithTimeout(
                 env, stream, TAIL_PROBE_TIMEOUT_MS);
         return Math.max(statsTail, probedTail);
+    }
+
+    /**
+     * Resolve an ending offset by timestamp using a probe consumer.
+     * Finds the first offset at or after the given timestamp, then returns it as an
+     * exclusive end offset. If no messages exist at/after the timestamp, returns the
+     * stream tail (all available data is before the timestamp).
+     */
+    private long resolveTimestampEndingOffset(Environment env, String stream, long timestamp) {
+        BlockingQueue<Long> observedOffsets = new LinkedBlockingQueue<>();
+        com.rabbitmq.stream.Consumer probe = null;
+        try {
+            probe = env.consumerBuilder()
+                    .stream(stream)
+                    .offset(com.rabbitmq.stream.OffsetSpecification.timestamp(timestamp))
+                    .noTrackingStrategy()
+                    .messageHandler((context, message) -> observedOffsets.offer(context.offset()))
+                    .build();
+
+            Long observed = observedOffsets.poll(250, TimeUnit.MILLISECONDS);
+            if (observed != null) {
+                // The broker returns the first chunk at/after the timestamp.
+                // Use the observed offset as the exclusive end (messages before this
+                // timestamp are included). Note: chunk-granularity boundary may include
+                // a few messages slightly past the target timestamp.
+                return observed;
+            }
+            // No messages at/after timestamp: all data is before the cutoff.
+            // Use stream tail as ending offset (include everything).
+            StreamStats stats = env.queryStreamStats(stream);
+            return resolveTailOffset(stats);
+        } catch (NoOffsetException e) {
+            // Stream is empty
+            return 0;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException(
+                    "Interrupted resolving ending timestamp for stream '" + stream + "'", e);
+        } catch (Exception e) {
+            LOG.warn("Failed to resolve timestamp end offset for stream '{}': {}",
+                    stream, e.getMessage());
+            throw new IllegalStateException(
+                    "Failed to resolve timestamp end offset for stream '" + stream + "'", e);
+        } finally {
+            if (probe != null) {
+                try {
+                    probe.close();
+                } catch (Exception ex) {
+                    LOG.debug("Error closing timestamp-end probe consumer for stream '{}'",
+                            stream, ex);
+                }
+            }
+        }
     }
 
     private long probeTailOffsetFromLastMessageWithTimeout(

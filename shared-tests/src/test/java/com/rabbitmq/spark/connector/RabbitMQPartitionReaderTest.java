@@ -500,11 +500,13 @@ class RabbitMQPartitionReaderTest {
             setPrivateField(reader, "pollWaitMs", 7L);
 
             var metrics = reader.currentMetricsValues();
-            assertThat(metrics).hasSize(4);
+            assertThat(metrics).hasSize(6);
             assertThat(metrics[0].value()).isEqualTo(3L);
             assertThat(metrics[1].value()).isEqualTo(30L);
             assertThat(metrics[2].value()).isEqualTo(45L);
             assertThat(metrics[3].value()).isEqualTo(7L);
+            assertThat(metrics[4].value()).isEqualTo(0L); // offsetOutOfRange
+            assertThat(metrics[5].value()).isEqualTo(0L); // dataLoss
         }
 
         @Test

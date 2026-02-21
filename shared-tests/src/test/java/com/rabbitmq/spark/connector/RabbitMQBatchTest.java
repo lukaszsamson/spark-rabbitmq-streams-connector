@@ -43,6 +43,14 @@ class RabbitMQBatchTest {
         return new ConnectorOptions(opts);
     }
 
+    private static ConnectorOptions optionsWithMaxRecordsPerPartition(long maxRecords) {
+        Map<String, String> opts = new LinkedHashMap<>();
+        opts.put("endpoints", "localhost:5552");
+        opts.put("stream", "test-stream");
+        opts.put("maxRecordsPerPartition", String.valueOf(maxRecords));
+        return new ConnectorOptions(opts);
+    }
+
     // ======================================================================
     // Empty ranges
     // ======================================================================
@@ -274,6 +282,83 @@ class RabbitMQBatchTest {
     }
 
     // ======================================================================
+    // maxRecordsPerPartition splitting
+    // ======================================================================
+
+    @Nested
+    class MaxRecordsPerPartitionSplitting {
+
+        @Test
+        void splitSingleStreamByMaxRecords() {
+            Map<String, long[]> ranges = Map.of("s1", new long[]{0, 1000});
+            ConnectorOptions opts = optionsWithMaxRecordsPerPartition(300);
+            RabbitMQBatch batch = new RabbitMQBatch(opts, SCHEMA, ranges);
+
+            InputPartition[] partitions = batch.planInputPartitions();
+            assertThat(partitions).hasSize(4); // ceil(1000/300) = 4
+
+            // Verify contiguous coverage
+            long prev = 0;
+            for (InputPartition p : partitions) {
+                RabbitMQInputPartition rp = (RabbitMQInputPartition) p;
+                assertThat(rp.getStream()).isEqualTo("s1");
+                assertThat(rp.getStartOffset()).isEqualTo(prev);
+                prev = rp.getEndOffset();
+            }
+            assertThat(prev).isEqualTo(1000);
+        }
+
+        @Test
+        void noSplitWhenRangeFitsInOnePartition() {
+            Map<String, long[]> ranges = Map.of("s1", new long[]{0, 100});
+            ConnectorOptions opts = optionsWithMaxRecordsPerPartition(500);
+            RabbitMQBatch batch = new RabbitMQBatch(opts, SCHEMA, ranges);
+
+            InputPartition[] partitions = batch.planInputPartitions();
+            assertThat(partitions).hasSize(1);
+        }
+
+        @Test
+        void splitMultipleStreamsIndependently() {
+            Map<String, long[]> ranges = new LinkedHashMap<>();
+            ranges.put("s1", new long[]{0, 1000}); // 1000 records -> 5 splits
+            ranges.put("s2", new long[]{0, 100});  // 100 records  -> 1 split
+
+            ConnectorOptions opts = optionsWithMaxRecordsPerPartition(200);
+            RabbitMQBatch batch = new RabbitMQBatch(opts, SCHEMA, ranges);
+
+            InputPartition[] partitions = batch.planInputPartitions();
+            assertThat(partitions).hasSize(6); // 5 + 1
+
+            long s1Count = java.util.Arrays.stream(partitions)
+                    .filter(p -> ((RabbitMQInputPartition) p).getStream().equals("s1"))
+                    .count();
+            long s2Count = java.util.Arrays.stream(partitions)
+                    .filter(p -> ((RabbitMQInputPartition) p).getStream().equals("s2"))
+                    .count();
+            assertThat(s1Count).isEqualTo(5);
+            assertThat(s2Count).isEqualTo(1);
+        }
+
+        @Test
+        void minPartitionsOverridesWhenLarger() {
+            Map<String, long[]> ranges = Map.of("s1", new long[]{0, 1000});
+
+            // maxRecordsPerPartition=500 would give 2 splits, but minPartitions=4 requires more
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("maxRecordsPerPartition", "500");
+            opts.put("minPartitions", "4");
+            ConnectorOptions options = new ConnectorOptions(opts);
+
+            RabbitMQBatch batch = new RabbitMQBatch(options, SCHEMA, ranges);
+            InputPartition[] partitions = batch.planInputPartitions();
+            assertThat(partitions).hasSize(4);
+        }
+    }
+
+    // ======================================================================
     // Reader factory
     // ======================================================================
 
@@ -289,7 +374,7 @@ class RabbitMQBatchTest {
             RabbitMQInputPartition partition = new RabbitMQInputPartition("test-stream", 0, 1, baseOptions());
             var reader = factory.createReader(partition);
             assertThat(reader).isInstanceOf(RabbitMQPartitionReader.class);
-            assertThat(reader.currentMetricsValues()).hasSize(3);
+            assertThat(reader.currentMetricsValues()).hasSize(6);
         }
     }
 

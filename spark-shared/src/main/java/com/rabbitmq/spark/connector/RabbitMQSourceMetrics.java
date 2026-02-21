@@ -20,6 +20,8 @@ public final class RabbitMQSourceMetrics {
     static final String PAYLOAD_BYTES_READ = "payloadBytesRead";
     static final String ESTIMATED_WIRE_BYTES_READ = "estimatedWireBytesRead";
     static final String POLL_WAIT_MS = "pollWaitMs";
+    static final String OFFSET_OUT_OF_RANGE = "offsetOutOfRange";
+    static final String DATA_LOSS = "dataLoss";
 
     // ---- CustomMetric definitions (registered on Scan) ----
 
@@ -28,6 +30,8 @@ public final class RabbitMQSourceMetrics {
             new PayloadBytesReadMetric(),
             new EstimatedWireBytesReadMetric(),
             new PollWaitMsMetric(),
+            new OffsetOutOfRangeMetric(),
+            new DataLossMetric(),
     };
 
     public static final class RecordsReadMetric extends CustomSumMetric {
@@ -83,6 +87,34 @@ public final class RabbitMQSourceMetrics {
         @Override
         public String description() {
             return "Total queue poll wait time in milliseconds";
+        }
+    }
+
+    public static final class OffsetOutOfRangeMetric extends CustomSumMetric {
+        public OffsetOutOfRangeMetric() {}
+
+        @Override
+        public String name() {
+            return OFFSET_OUT_OF_RANGE;
+        }
+
+        @Override
+        public String description() {
+            return "Number of offset-out-of-range events (retention truncation)";
+        }
+    }
+
+    public static final class DataLossMetric extends CustomSumMetric {
+        public DataLossMetric() {}
+
+        @Override
+        public String name() {
+            return DATA_LOSS;
+        }
+
+        @Override
+        public String description() {
+            return "Number of detected data loss events";
         }
     }
 

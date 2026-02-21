@@ -39,9 +39,36 @@ final class RabbitMQBatch implements Batch {
             return new InputPartition[0];
         }
 
+        Long maxRecordsPerPartition = options.getMaxRecordsPerPartition();
         Integer minPartitions = options.getMinPartitions();
-        if (minPartitions != null && minPartitions > offsetRanges.size()) {
+
+        // Phase 1: apply maxRecordsPerPartition — cap each stream's partition size
+        int totalPartitions = 0;
+        Map<String, Integer> splitsPerStream = new LinkedHashMap<>();
+        if (maxRecordsPerPartition != null) {
+            for (Map.Entry<String, long[]> entry : offsetRanges.entrySet()) {
+                long span = Math.max(0L, entry.getValue()[1] - entry.getValue()[0]);
+                int parts = span > 0 ? (int) Math.min(Integer.MAX_VALUE,
+                        (span + maxRecordsPerPartition - 1) / maxRecordsPerPartition) : 0;
+                parts = Math.max(1, parts);
+                splitsPerStream.put(entry.getKey(), parts);
+                totalPartitions += parts;
+            }
+        } else {
+            for (String stream : offsetRanges.keySet()) {
+                splitsPerStream.put(stream, 1);
+            }
+            totalPartitions = offsetRanges.size();
+        }
+
+        // Phase 2: if minPartitions requires more splits, distribute the extra evenly
+        if (minPartitions != null && minPartitions > totalPartitions) {
             return planWithSplitting(minPartitions);
+        }
+
+        // If maxRecordsPerPartition caused splitting, use it
+        if (maxRecordsPerPartition != null && totalPartitions > offsetRanges.size()) {
+            return planWithSplitMap(splitsPerStream);
         }
 
         // Default: one partition per stream
@@ -53,6 +80,20 @@ final class RabbitMQBatch implements Batch {
         return new RabbitMQPartitionReaderFactory(options, schema);
     }
 
+    private InputPartition[] planWithSplitMap(Map<String, Integer> splitsPerStream) {
+        List<InputPartition> partitions = new ArrayList<>();
+        for (Map.Entry<String, long[]> entry : offsetRanges.entrySet()) {
+            String stream = entry.getKey();
+            long start = entry.getValue()[0];
+            long end = entry.getValue()[1];
+            int numSplits = splitsPerStream.getOrDefault(stream, 1);
+            splitStream(partitions, stream, start, end, numSplits);
+        }
+        LOG.info("Planned {} input partitions (with maxRecordsPerPartition={})",
+                partitions.size(), options.getMaxRecordsPerPartition());
+        return partitions.toArray(new InputPartition[0]);
+    }
+
     private InputPartition[] planWithoutSplitting() {
         List<InputPartition> partitions = new ArrayList<>();
         for (Map.Entry<String, long[]> entry : offsetRanges.entrySet()) {
@@ -60,7 +101,8 @@ final class RabbitMQBatch implements Batch {
             long start = entry.getValue()[0];
             long end = entry.getValue()[1];
             boolean useConfiguredStartingOffset = options.getStartingOffsets() == StartingOffsetsMode.TIMESTAMP;
-            partitions.add(new RabbitMQInputPartition(stream, start, end, options, useConfiguredStartingOffset));
+            partitions.add(new RabbitMQInputPartition(stream, start, end, options,
+                    useConfiguredStartingOffset, RabbitMQInputPartition.locationForStream(stream)));
         }
         LOG.info("Planned {} input partitions (one per stream)", partitions.size());
         return partitions.toArray(new InputPartition[0]);
@@ -130,9 +172,11 @@ final class RabbitMQBatch implements Batch {
     private void splitStream(List<InputPartition> partitions, String stream,
                              long start, long end, int numSplits) {
         long offsetSpan = end - start;
+        String[] location = RabbitMQInputPartition.locationForStream(stream);
         if (numSplits <= 1 || offsetSpan <= 1) {
             boolean useConfiguredStartingOffset = options.getStartingOffsets() == StartingOffsetsMode.TIMESTAMP;
-            partitions.add(new RabbitMQInputPartition(stream, start, end, options, useConfiguredStartingOffset));
+            partitions.add(new RabbitMQInputPartition(stream, start, end, options,
+                    useConfiguredStartingOffset, location));
             return;
         }
 
@@ -147,7 +191,7 @@ final class RabbitMQBatch implements Batch {
             boolean useConfiguredStartingOffset = options.getStartingOffsets() == StartingOffsetsMode.TIMESTAMP
                     && currentStart == start;
             partitions.add(new RabbitMQInputPartition(stream, currentStart, splitEnd, options,
-                    useConfiguredStartingOffset));
+                    useConfiguredStartingOffset, location));
             currentStart = splitEnd;
         }
     }

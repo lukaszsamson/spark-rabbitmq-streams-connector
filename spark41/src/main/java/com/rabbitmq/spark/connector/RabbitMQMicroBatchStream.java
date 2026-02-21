@@ -67,6 +67,8 @@ final class RabbitMQMicroBatchStream
 
     /** Running average message size in bytes, for byte-based admission control. */
     private int estimatedMessageSize;
+    /** Timestamp (epoch millis) of the last trigger that produced a non-empty batch. */
+    private volatile long lastTriggerMillis = System.currentTimeMillis();
     /** Initial offsets resolved for this stream instance (used for timestamp first batch seek). */
     private volatile Map<String, Long> initialOffsets;
     /** Last end offsets successfully persisted to broker (next offsets). */
@@ -259,18 +261,45 @@ final class RabbitMQMicroBatchStream
             validRanges.put(stream, new long[]{startOff, endOff});
         }
 
-        // Apply minPartitions splitting if configured
+        // Apply maxRecordsPerPartition and/or minPartitions splitting if configured
         List<InputPartition> partitions = new ArrayList<>();
         Integer minPartitions = options.getMinPartitions();
-        if (minPartitions != null && minPartitions > validRanges.size() && !validRanges.isEmpty()) {
-            planWithSplitting(partitions, validRanges, minPartitions);
-        } else {
+        Long maxRecordsPerPartition = options.getMaxRecordsPerPartition();
+
+        if (!validRanges.isEmpty() &&
+                (minPartitions != null || maxRecordsPerPartition != null)) {
+            // Compute split counts per stream from maxRecordsPerPartition
+            Map<String, Integer> splitsPerStream = new LinkedHashMap<>();
+            int totalPartitions = 0;
             for (Map.Entry<String, long[]> entry : validRanges.entrySet()) {
-                long rangeStart = entry.getValue()[0];
-                partitions.add(new RabbitMQInputPartition(
-                        entry.getKey(), rangeStart, entry.getValue()[1], options,
-                        useConfiguredStartingOffset(entry.getKey(), rangeStart)));
+                long span = Math.max(0L, entry.getValue()[1] - entry.getValue()[0]);
+                int parts = 1;
+                if (maxRecordsPerPartition != null && span > maxRecordsPerPartition) {
+                    parts = (int) Math.min(Integer.MAX_VALUE,
+                            (span + maxRecordsPerPartition - 1) / maxRecordsPerPartition);
+                }
+                splitsPerStream.put(entry.getKey(), parts);
+                totalPartitions += parts;
             }
+
+            // If minPartitions requires more, use the existing even-distribution logic
+            if (minPartitions != null && minPartitions > totalPartitions) {
+                planWithSplitting(partitions, validRanges, minPartitions);
+            } else if (totalPartitions > validRanges.size()) {
+                // maxRecordsPerPartition caused splitting
+                for (Map.Entry<String, long[]> entry : validRanges.entrySet()) {
+                    String stream = entry.getKey();
+                    long rangeStart = entry.getValue()[0];
+                    long rangeEnd = entry.getValue()[1];
+                    int numSplits = splitsPerStream.get(stream);
+                    splitStreamForMaxRecords(partitions, stream, rangeStart, rangeEnd, numSplits);
+                }
+            } else {
+                // Neither caused additional splitting
+                addOnePartitionPerStream(partitions, validRanges);
+            }
+        } else {
+            addOnePartitionPerStream(partitions, validRanges);
         }
 
         LOG.info("Planned {} input partitions for micro-batch [{} → {}]",
@@ -311,11 +340,12 @@ final class RabbitMQMicroBatchStream
             long end = entry.getValue()[1];
             int numSplits = splitsPerStream.getOrDefault(stream, 1);
             long offsetSpan = end - start;
+            String[] location = RabbitMQInputPartition.locationForStream(stream);
 
             if (numSplits <= 1 || offsetSpan <= 1) {
                 partitions.add(new RabbitMQInputPartition(
                         stream, start, end, options,
-                        useConfiguredStartingOffset(stream, start)));
+                        useConfiguredStartingOffset(stream, start), location));
                 continue;
             }
 
@@ -328,13 +358,49 @@ final class RabbitMQMicroBatchStream
                 long splitEnd = currentStart + splitSize;
                 partitions.add(new RabbitMQInputPartition(
                         stream, currentStart, splitEnd, options,
-                        useConfiguredStartingOffset(stream, currentStart)));
+                        useConfiguredStartingOffset(stream, currentStart), location));
                 currentStart = splitEnd;
             }
         }
 
         LOG.info("Applied minPartitions={} splitting: {} partitions from {} streams",
                 minPartitions, partitions.size(), ranges.size());
+    }
+
+    private void addOnePartitionPerStream(List<InputPartition> partitions,
+                                           Map<String, long[]> ranges) {
+        for (Map.Entry<String, long[]> entry : ranges.entrySet()) {
+            String stream = entry.getKey();
+            long rangeStart = entry.getValue()[0];
+            partitions.add(new RabbitMQInputPartition(
+                    stream, rangeStart, entry.getValue()[1], options,
+                    useConfiguredStartingOffset(stream, rangeStart),
+                    RabbitMQInputPartition.locationForStream(stream)));
+        }
+    }
+
+    private void splitStreamForMaxRecords(List<InputPartition> partitions, String stream,
+                                           long start, long end, int numSplits) {
+        long offsetSpan = end - start;
+        String[] location = RabbitMQInputPartition.locationForStream(stream);
+        if (numSplits <= 1 || offsetSpan <= 1) {
+            partitions.add(new RabbitMQInputPartition(
+                    stream, start, end, options,
+                    useConfiguredStartingOffset(stream, start), location));
+            return;
+        }
+        long chunkSize = offsetSpan / numSplits;
+        long rem = offsetSpan % numSplits;
+        long currentStart = start;
+        for (int i = 0; i < numSplits; i++) {
+            long splitSize = chunkSize + (i < rem ? 1 : 0);
+            if (splitSize == 0) break;
+            long splitEnd = currentStart + splitSize;
+            partitions.add(new RabbitMQInputPartition(
+                    stream, currentStart, splitEnd, options,
+                    useConfiguredStartingOffset(stream, currentStart), location));
+            currentStart = splitEnd;
+        }
     }
 
     /**
@@ -402,7 +468,21 @@ final class RabbitMQMicroBatchStream
     public ReadLimit getDefaultReadLimit() {
         Long maxRows = options.getMaxRecordsPerTrigger();
         Long maxBytes = options.getMaxBytesPerTrigger();
+        Long minRows = options.getMinOffsetsPerTrigger();
 
+        ReadLimit upperLimit = buildUpperLimit(maxRows, maxBytes);
+
+        if (minRows != null) {
+            ReadLimit minLimit = ReadLimit.minRows(minRows, options.getMaxTriggerDelayMs());
+            if (upperLimit != null) {
+                return ReadLimit.compositeLimit(new ReadLimit[]{minLimit, upperLimit});
+            }
+            return minLimit;
+        }
+        return upperLimit != null ? upperLimit : ReadLimit.allAvailable();
+    }
+
+    private ReadLimit buildUpperLimit(Long maxRows, Long maxBytes) {
         if (maxRows != null && maxBytes != null) {
             return ReadLimit.compositeLimit(new ReadLimit[]{
                     ReadLimit.maxRows(maxRows),
@@ -415,7 +495,7 @@ final class RabbitMQMicroBatchStream
         if (maxBytes != null) {
             return ReadLimit.maxBytes(maxBytes);
         }
-        return ReadLimit.allAvailable();
+        return null;
     }
 
     @Override
@@ -511,6 +591,10 @@ final class RabbitMQMicroBatchStream
             throw new IllegalArgumentException(
                     "maxRecordsPerTrigger and maxBytesPerTrigger are not supported in real-time mode");
         }
+        if (options.getMinOffsetsPerTrigger() != null) {
+            throw new IllegalArgumentException(
+                    "minOffsetsPerTrigger is not compatible with real-time mode");
+        }
         this.realTimeMode = true;
         LOG.info("Real-time mode activated");
     }
@@ -533,7 +617,8 @@ final class RabbitMQMicroBatchStream
 
             partitions.add(new RabbitMQInputPartition(
                     stream, startOff, Long.MAX_VALUE, options,
-                    useConfiguredStartingOffset(stream, startOff)));
+                    useConfiguredStartingOffset(stream, startOff),
+                    RabbitMQInputPartition.locationForStream(stream)));
         }
 
         LOG.info("Real-time mode: planned {} input partitions from start {}",
@@ -615,6 +700,10 @@ final class RabbitMQMicroBatchStream
                     startOffsets, tailOffsets, maxRows.maxRows());
         }
 
+        if (limit instanceof ReadMinRows minRows) {
+            return handleReadMinRows(minRows, startOffsets, tailOffsets);
+        }
+
         if (limit instanceof ReadMaxBytes maxBytes) {
             return ReadLimitBudget.distributeByteBudget(
                     startOffsets, tailOffsets, maxBytes.maxBytes(), estimatedMessageSize);
@@ -634,6 +723,43 @@ final class RabbitMQMicroBatchStream
         LOG.debug("Unknown ReadLimit type {}, treating as ReadAllAvailable",
                 limit.getClass().getName());
         return tailOffsets;
+    }
+
+    /**
+     * Check whether enough new data is available or the max trigger delay has expired.
+     * If neither, return startOffsets (skip this trigger). Otherwise return tail.
+     */
+    private Map<String, Long> handleReadMinRows(ReadMinRows minRows,
+                                                  Map<String, Long> startOffsets,
+                                                  Map<String, Long> tailOffsets) {
+        long minRowCount = minRows.minRows();
+        long maxDelayMs = minRows.maxTriggerDelayMs();
+
+        // Calculate total available data
+        long totalAvailable = 0;
+        for (Map.Entry<String, Long> entry : tailOffsets.entrySet()) {
+            long startOff = startOffsets.getOrDefault(entry.getKey(), 0L);
+            totalAvailable += Math.max(0, entry.getValue() - startOff);
+        }
+
+        // Enough data available — proceed with the batch
+        if (totalAvailable >= minRowCount) {
+            lastTriggerMillis = System.currentTimeMillis();
+            return tailOffsets;
+        }
+
+        // Max delay expired — proceed even with insufficient data
+        if ((System.currentTimeMillis() - lastTriggerMillis) >= maxDelayMs) {
+            LOG.debug("Max trigger delay of {}ms expired, processing batch with {} records",
+                    maxDelayMs, totalAvailable);
+            lastTriggerMillis = System.currentTimeMillis();
+            return tailOffsets;
+        }
+
+        // Not enough data and delay not expired — skip this trigger
+        LOG.debug("Delaying batch: {} records available < minOffsetsPerTrigger={}, " +
+                "delay not expired", totalAvailable, minRowCount);
+        return startOffsets;
     }
 
     // ---- Internal helpers ----
@@ -836,11 +962,17 @@ final class RabbitMQMicroBatchStream
      * {@code startingOffsets} mode.
      */
     private long resolveStartingOffset(String stream) {
+        // Check for per-stream timestamp override
+        Map<String, Long> perStreamTs = options.getStartingOffsetsByTimestamp();
+        if (perStreamTs != null && perStreamTs.containsKey(stream)) {
+            return resolveTimestampStartingOffset(getEnvironment(), stream, perStreamTs.get(stream));
+        }
         return switch (options.getStartingOffsets()) {
             case EARLIEST -> resolveFirstAvailable(stream);
             case LATEST -> queryStreamTailOffsetForLatest(getEnvironment(), stream);
             case OFFSET -> options.getStartingOffset();
-            case TIMESTAMP -> resolveTimestampStartingOffset(getEnvironment(), stream);
+            case TIMESTAMP -> resolveTimestampStartingOffset(
+                    getEnvironment(), stream, options.getStartingTimestamp());
         };
     }
 
@@ -852,15 +984,14 @@ final class RabbitMQMicroBatchStream
      * when the timestamp maps much later in the stream. This method aligns planning with
      * broker timestamp seek behavior.
      */
-    private long resolveTimestampStartingOffset(Environment env, String stream) {
+    private long resolveTimestampStartingOffset(Environment env, String stream, long timestamp) {
         long firstAvailable = resolveFirstAvailable(stream);
         BlockingQueue<Long> observedOffsets = new LinkedBlockingQueue<>();
         com.rabbitmq.stream.Consumer probe = null;
         try {
             probe = env.consumerBuilder()
                     .stream(stream)
-                    .offset(com.rabbitmq.stream.OffsetSpecification.timestamp(
-                            options.getStartingTimestamp()))
+                    .offset(com.rabbitmq.stream.OffsetSpecification.timestamp(timestamp))
                     .noTrackingStrategy()
                     .messageHandler((context, message) -> observedOffsets.offer(context.offset()))
                     .build();

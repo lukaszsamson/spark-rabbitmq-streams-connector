@@ -68,6 +68,8 @@ final class RabbitMQPartitionReader
     private long payloadBytesRead = 0;
     private long estimatedWireBytesRead = 0;
     private long pollWaitMs = 0;
+    private long offsetOutOfRange = 0;
+    private long dataLoss = 0;
 
     /**
      * A message queued by the consumer callback for pull-based reading.
@@ -111,6 +113,7 @@ final class RabbitMQPartitionReader
                     LOG.warn("Unable to initialize consumer for stream '{}' because stream/partition " +
                                     "is missing; completing split because failOnDataLoss=false",
                             stream);
+                    dataLoss++;
                     finished = true;
                     return false;
                 }
@@ -151,6 +154,7 @@ final class RabbitMQPartitionReader
                         LOG.warn("Consumer for stream '{}' closed and planned range [{}, {}) is no longer " +
                                         "reachable; completing split because failOnDataLoss=false",
                                 stream, startOffset, endOffset);
+                        dataLoss++;
                         finished = true;
                         return false;
                     }
@@ -189,6 +193,7 @@ final class RabbitMQPartitionReader
                         LOG.warn("Reached maxWaitMs={} on stream '{}' and planned range [{}, {}) is no longer " +
                                         "reachable after data loss/recreation; completing split because failOnDataLoss=false",
                                 maxWaitMs, stream, startOffset, endOffset);
+                        dataLoss++;
                         finished = true;
                         return false;
                     }
@@ -433,12 +438,29 @@ final class RabbitMQPartitionReader
                 RabbitMQSourceMetrics.taskMetric(
                         RabbitMQSourceMetrics.ESTIMATED_WIRE_BYTES_READ, estimatedWireBytesRead),
                 RabbitMQSourceMetrics.taskMetric(RabbitMQSourceMetrics.POLL_WAIT_MS, pollWaitMs),
+                RabbitMQSourceMetrics.taskMetric(
+                        RabbitMQSourceMetrics.OFFSET_OUT_OF_RANGE, offsetOutOfRange),
+                RabbitMQSourceMetrics.taskMetric(RabbitMQSourceMetrics.DATA_LOSS, dataLoss),
         };
     }
 
     private void initConsumer() {
         environment = EnvironmentPool.getInstance().acquire(options);
         pooledEnvironment = true;
+
+        // Detect offset-out-of-range (retention truncation)
+        try {
+            StreamStats stats = environment.queryStreamStats(stream);
+            long firstAvailable = stats.firstOffset();
+            if (startOffset < firstAvailable) {
+                offsetOutOfRange++;
+                LOG.warn("Start offset {} is before first available {} in stream '{}' " +
+                        "(retention truncation detected)", startOffset, firstAvailable, stream);
+            }
+        } catch (Exception e) {
+            // Non-fatal: cannot check, proceed without metric
+            LOG.debug("Cannot check offset range for stream '{}': {}", stream, e.getMessage());
+        }
 
         OffsetSpecification offsetSpec = resolveOffsetSpec();
 

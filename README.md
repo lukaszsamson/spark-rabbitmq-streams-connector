@@ -12,7 +12,7 @@ Provides a Spark DataSource V2 connector that reads from and writes to [RabbitMQ
 - Stream-offset-based consumption with Spark checkpoint as source of truth
 - Optional server-side offset tracking (best-effort, aligned with Spark commits)
 - Backpressure via credit-based flow control
-- Admission control (`maxRecordsPerTrigger`, `maxBytesPerTrigger`)
+- Admission control (`maxRecordsPerTrigger`, `maxBytesPerTrigger`, `minOffsetsPerTrigger`)
 - `Trigger.AvailableNow` support
 - Publisher confirms with optional deduplication
 - Stream filtering (RabbitMQ 3.13+)
@@ -220,11 +220,17 @@ By default, unrecognized columns cause an error. Set `ignoreUnknownColumns=true`
 | `startingOffsets` | string | earliest | `earliest`, `latest`, `offset`, or `timestamp` |
 | `startingOffset` | long | — | Starting offset (required when `startingOffsets=offset`) |
 | `startingTimestamp` | long | — | Starting timestamp in epoch millis (required when `startingOffsets=timestamp`) |
-| `endingOffsets` | string | latest | `latest` or `offset` (batch only) |
+| `startingOffsetsByTimestamp` | string | — | Per-stream starting timestamps as JSON map (e.g. `{"stream-0": 1700000000000}`). Overrides `startingTimestamp` for individual streams when `startingOffsets=timestamp` |
+| `endingOffsets` | string | latest | `latest`, `offset`, or `timestamp` (batch only) |
 | `endingOffset` | long | — | Ending offset (required when `endingOffsets=offset`) |
+| `endingTimestamp` | long | — | Ending timestamp in epoch millis (required when `endingOffsets=timestamp`, unless `endingOffsetsByTimestamp` is set) |
+| `endingOffsetsByTimestamp` | string | — | Per-stream ending timestamps as JSON map (e.g. `{"stream-0": 1700000000000}`). Overrides `endingTimestamp` for individual streams when `endingOffsets=timestamp` |
 | `maxRecordsPerTrigger` | long | — | Max records per micro-batch trigger |
 | `maxBytesPerTrigger` | long | — | Max bytes per trigger (best-effort, uses estimated message size) |
+| `minOffsetsPerTrigger` | long | — | Min records before triggering a micro-batch (streaming only). Delays processing until threshold is met or `maxTriggerDelay` expires |
+| `maxTriggerDelay` | string | 15m | Max delay before processing a micro-batch regardless of `minOffsetsPerTrigger`. Duration format (e.g. `30s`, `5m`, `1h`) |
 | `minPartitions` | int | — | Minimum Spark input partitions (splits streams by offset ranges) |
+| `maxRecordsPerPartition` | long | — | Max records per Spark input partition. Streams with more records are split into smaller partitions. Can be combined with `minPartitions` |
 | `serverSideOffsetTracking` | bool | true (streaming) / false (batch) | Store offsets in RabbitMQ broker on commit |
 | `singleActiveConsumer` | bool | false | Enable single active consumer (requires `consumerName`) |
 | `pollTimeoutMs` | long | 30000 | Queue poll timeout per pull |

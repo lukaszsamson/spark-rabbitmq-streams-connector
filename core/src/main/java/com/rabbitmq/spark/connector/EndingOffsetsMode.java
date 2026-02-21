@@ -9,7 +9,9 @@ public enum EndingOffsetsMode {
     /** Read up to the current tail offset at planning time. */
     LATEST,
     /** Read up to a specific numeric offset (exclusive). */
-    OFFSET;
+    OFFSET,
+    /** Read up to offsets resolved from a timestamp. */
+    TIMESTAMP;
 
     public static EndingOffsetsMode fromString(String value) {
         try {
@@ -17,7 +19,7 @@ public enum EndingOffsetsMode {
         } catch (IllegalArgumentException e) {
             throw new IllegalArgumentException(
                     "Invalid endingOffsets value: '" + value +
-                            "'. Must be one of: latest, offset");
+                            "'. Must be one of: latest, offset, timestamp");
         }
     }
 }
