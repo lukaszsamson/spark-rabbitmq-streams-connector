@@ -48,6 +48,11 @@ final class RabbitMQScan implements Scan {
     }
 
     @Override
+    public Scan.ColumnarSupportMode columnarSupportMode() {
+        return Scan.ColumnarSupportMode.UNSUPPORTED;
+    }
+
+    @Override
     public String description() {
         String target = options.isStreamMode()
                 ? "stream=" + options.getStream()
