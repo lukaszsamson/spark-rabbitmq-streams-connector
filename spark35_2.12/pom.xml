@@ -108,6 +108,7 @@
                             <artifactSet>
                                 <includes>
                                     <include>io.github.lukaszsamson:spark-rabbitmq-streams-connector-core</include>
+                                    <include>io.github.lukaszsamson:spark-rabbitmq-streams-connector-spark-shared</include>
                                     <include>com.rabbitmq:stream-client</include>
                                     <include>io.netty:*</include>
                                     <include>org.apache.qpid:proton-j</include>
