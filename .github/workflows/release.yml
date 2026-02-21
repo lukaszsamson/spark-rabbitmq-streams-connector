@@ -85,8 +85,8 @@ jobs:
         with:
           generate_release_notes: true
           files: |
-            core/target/sparkling-rabbit-core-*.jar
-            spark35/target/sparkling-rabbit-spark35-*.jar
-            spark35_2.12/target/sparkling-rabbit-spark35_2.12-*.jar
-            spark40/target/sparkling-rabbit-spark40-*.jar
-            spark41/target/sparkling-rabbit-spark41-*.jar
+            core/target/spark-rabbitmq-streams-connector-core-*.jar
+            spark35/target/spark-rabbitmq-streams-connector-spark35-*.jar
+            spark35_2.12/target/spark-rabbitmq-streams-connector-spark35_2.12-*.jar
+            spark40/target/spark-rabbitmq-streams-connector-spark40-*.jar
+            spark41/target/spark-rabbitmq-streams-connector-spark41-*.jar

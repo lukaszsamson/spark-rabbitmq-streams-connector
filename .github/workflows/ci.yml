@@ -31,19 +31,19 @@ jobs:
 
       - name: Verify spark40 shaded jar contains relocated packages
         run: |
-          jar tf spark40/target/sparkling-rabbit-spark40-*.jar | grep -q 'com/rabbitmq/spark/shaded/com/rabbitmq/stream' \
+          jar tf spark40/target/spark-rabbitmq-streams-connector-spark40-*.jar | grep -q 'io/github/lukaszsamson/spark/shaded/com/rabbitmq/stream' \
             && echo "spark40: RabbitMQ stream classes relocated" \
             || (echo "ERROR: spark40 shaded RabbitMQ classes not found" && exit 1)
-          jar tf spark40/target/sparkling-rabbit-spark40-*.jar | grep -q 'com/rabbitmq/spark/shaded/io/netty' \
+          jar tf spark40/target/spark-rabbitmq-streams-connector-spark40-*.jar | grep -q 'io/github/lukaszsamson/spark/shaded/io/netty' \
             && echo "spark40: Netty classes relocated" \
             || (echo "ERROR: spark40 shaded Netty classes not found" && exit 1)
 
       - name: Verify spark41 shaded jar contains relocated packages
         run: |
-          jar tf spark41/target/sparkling-rabbit-spark41-*.jar | grep -q 'com/rabbitmq/spark/shaded/com/rabbitmq/stream' \
+          jar tf spark41/target/spark-rabbitmq-streams-connector-spark41-*.jar | grep -q 'io/github/lukaszsamson/spark/shaded/com/rabbitmq/stream' \
             && echo "spark41: RabbitMQ stream classes relocated" \
             || (echo "ERROR: spark41 shaded RabbitMQ classes not found" && exit 1)
-          jar tf spark41/target/sparkling-rabbit-spark41-*.jar | grep -q 'com/rabbitmq/spark/shaded/io/netty' \
+          jar tf spark41/target/spark-rabbitmq-streams-connector-spark41-*.jar | grep -q 'io/github/lukaszsamson/spark/shaded/io/netty' \
             && echo "spark41: Netty classes relocated" \
             || (echo "ERROR: spark41 shaded Netty classes not found" && exit 1)
 
