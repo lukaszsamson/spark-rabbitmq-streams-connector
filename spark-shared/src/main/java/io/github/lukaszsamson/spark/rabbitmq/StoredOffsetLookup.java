@@ -103,6 +103,11 @@ final class StoredOffsetLookup {
 
             // Collect results, preserving insertion order
             for (Map.Entry<String, Future<Long>> entry : futures.entrySet()) {
+                if (Thread.currentThread().isInterrupted()) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(
+                            "Interrupted during stored offset lookup");
+                }
                 String stream = entry.getKey();
                 try {
                     Long nextOffset = entry.getValue().get();
