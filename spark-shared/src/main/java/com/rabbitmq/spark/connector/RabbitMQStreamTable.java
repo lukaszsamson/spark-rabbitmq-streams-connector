@@ -60,12 +60,21 @@ public class RabbitMQStreamTable implements Table, SupportsRead, SupportsWrite {
 
     @Override
     public ScanBuilder newScanBuilder(CaseInsensitiveStringMap sparkOptions) {
-        return new RabbitMQScanBuilder(options, schema);
+        // Use per-operation options so that scan-time overrides are honored.
+        ConnectorOptions scanOptions = sparkOptions.isEmpty() ? options
+                : new ConnectorOptions(sparkOptions);
+        StructType scanSchema = sparkOptions.isEmpty() ? schema
+                : buildSourceSchema(scanOptions.getMetadataFields());
+        return new RabbitMQScanBuilder(scanOptions, scanSchema);
     }
 
     @Override
     public WriteBuilder newWriteBuilder(LogicalWriteInfo info) {
-        return new RabbitMQWriteBuilder(options, info.schema(), info.queryId());
+        // Use per-operation options so that write-time overrides are honored.
+        CaseInsensitiveStringMap writeOpts = info.options();
+        ConnectorOptions writeOptions = writeOpts.isEmpty() ? options
+                : new ConnectorOptions(writeOpts);
+        return new RabbitMQWriteBuilder(writeOptions, info.schema(), info.queryId());
     }
 
     /** Returns the parsed connector options. */
