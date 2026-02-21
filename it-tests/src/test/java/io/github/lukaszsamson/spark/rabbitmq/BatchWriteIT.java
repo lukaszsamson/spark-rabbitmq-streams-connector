@@ -486,12 +486,12 @@ class BatchWriteIT extends AbstractRabbitMQIT {
         Row row = rows.get(0);
         assertThat(new String((byte[]) row.getAs("value"))).isEqualTo("complex-0");
         scala.collection.Map<String, String> appPropsOut = row.getAs("application_properties");
-        assertThat(scala.jdk.javaapi.CollectionConverters.asJava(appPropsOut))
+        assertThat(scala.collection.JavaConverters.mapAsJavaMapConverter(appPropsOut).asJava())
                 .containsEntry("region", "emea")
                 .containsEntry("priority", "high");
 
         scala.collection.Map<String, String> annotationsOut = row.getAs("message_annotations");
-        assertThat(scala.jdk.javaapi.CollectionConverters.asJava(annotationsOut))
+        assertThat(scala.collection.JavaConverters.mapAsJavaMapConverter(annotationsOut).asJava())
                 .containsEntry("traceId", "abc-123")
                 .containsEntry("span", "root");
 
