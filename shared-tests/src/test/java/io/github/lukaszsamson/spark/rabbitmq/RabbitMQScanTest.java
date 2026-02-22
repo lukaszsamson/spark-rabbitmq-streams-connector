@@ -73,6 +73,22 @@ class RabbitMQScanTest {
         }
 
         @Test
+        void resolveStartOffsetLatestDoesNotDependOnEndingOffsetMode() throws Exception {
+            Map<String, String> opts = baseOptions();
+            opts.put("startingOffsets", "latest");
+            opts.put("endingOffsets", "offset");
+            opts.put("endingOffset", "5");
+            RabbitMQScan scan = new RabbitMQScan(new ConnectorOptions(opts), schema());
+            StreamStats stats = new Stats(0L, false, false, 5L);
+
+            long start = resolveStartOffset(scan, new ProbeTailEnvironment(), "s1", 0L, stats);
+            long end = resolveEndOffset(scan, new ProbeTailEnvironment(), "s1", stats);
+
+            assertThat(start).isEqualTo(13L);
+            assertThat(end).isEqualTo(5L);
+        }
+
+        @Test
         void timestampStartPlanningUsesTimestampProbeOffset() throws Exception {
             Map<String, String> opts = baseOptions();
             opts.put("startingOffsets", "timestamp");

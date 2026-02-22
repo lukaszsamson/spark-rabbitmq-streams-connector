@@ -224,7 +224,7 @@ final class RabbitMQScan implements Scan {
         }
         return switch (options.getStartingOffsets()) {
             case EARLIEST -> firstAvailable;
-            case LATEST -> resolveEndOffset(env, stream, stats);
+            case LATEST -> resolveLatestOffset(env, stream, stats);
             case OFFSET -> options.getStartingOffset();
             case TIMESTAMP -> resolveTimestampStartingOffset(
                     env, stream, firstAvailable, stats, options.getStartingTimestamp());
@@ -293,6 +293,10 @@ final class RabbitMQScan implements Scan {
             return resolveTimestampEndingOffset(env, stream, options.getEndingTimestamp());
         }
 
+        return resolveLatestOffset(env, stream, stats);
+    }
+
+    private long resolveLatestOffset(Environment env, String stream, StreamStats stats) {
         // endingOffsets=latest: use the most recent tail we can observe.
         // Stream stats can lag behind newly published messages, so keep the probe and
         // take max(statsTail, probedTail). Bound probe latency to avoid planning stalls.
