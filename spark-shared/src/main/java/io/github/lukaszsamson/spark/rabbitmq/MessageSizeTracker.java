@@ -9,10 +9,9 @@ import java.util.concurrent.ConcurrentHashMap;
  * admission control.
  *
  * <p>Metrics are tracked per scope to avoid cross-query contamination in
- * shared-driver JVMs. In Spark local mode, readers and the driver share a JVM,
- * so the running average is exact. In distributed mode, only co-located reader
- * metrics are captured; the estimate starts from the configured
- * {@code estimatedMessageSizeBytes} and improves as local tasks contribute.
+ * shared-driver JVMs. This tracker is a fallback path used when Spark
+ * accumulators are unavailable; in distributed execution, the preferred
+ * transport for reader byte/record totals is driver-visible accumulators.
  */
 final class MessageSizeTracker {
 

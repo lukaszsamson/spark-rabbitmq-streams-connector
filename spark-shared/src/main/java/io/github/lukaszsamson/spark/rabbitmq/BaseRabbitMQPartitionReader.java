@@ -4,6 +4,7 @@ import com.rabbitmq.stream.*;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.connector.metric.CustomTaskMetric;
 import org.apache.spark.sql.connector.read.PartitionReader;
+import org.apache.spark.util.LongAccumulator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -41,6 +42,8 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
     final ConnectorOptions options;
     final boolean useConfiguredStartingOffset;
     final String messageSizeTrackerScope;
+    final LongAccumulator messageSizeBytesAccumulator;
+    final LongAccumulator messageSizeRecordsAccumulator;
     final MessageToRowConverter converter;
     final MessagePostFilter postFilter;
 
@@ -81,6 +84,8 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
         this.options = options;
         this.useConfiguredStartingOffset = partition.isUseConfiguredStartingOffset();
         this.messageSizeTrackerScope = partition.getMessageSizeTrackerScope();
+        this.messageSizeBytesAccumulator = partition.getMessageSizeBytesAccumulator();
+        this.messageSizeRecordsAccumulator = partition.getMessageSizeRecordsAccumulator();
         this.converter = new MessageToRowConverter(options.getMetadataFields());
         this.postFilter = createPostFilter(options);
         this.queue = new LinkedBlockingQueue<>(options.getQueueCapacity());
@@ -295,8 +300,14 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
             return;
         }
         finished = true;
-        // Report actual message sizes for running average estimation
-        MessageSizeTracker.record(messageSizeTrackerScope, payloadBytesRead, recordsRead);
+        // Report actual message sizes for running average estimation.
+        // Prefer Spark accumulators (driver-visible across executors); fall back to JVM-local tracker.
+        if (messageSizeBytesAccumulator != null && messageSizeRecordsAccumulator != null) {
+            messageSizeBytesAccumulator.add(payloadBytesRead);
+            messageSizeRecordsAccumulator.add(recordsRead);
+        } else {
+            MessageSizeTracker.record(messageSizeTrackerScope, payloadBytesRead, recordsRead);
+        }
         try {
             if (consumer != null) {
                 consumer.close();

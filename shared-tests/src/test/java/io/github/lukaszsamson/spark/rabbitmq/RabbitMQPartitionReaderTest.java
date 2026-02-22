@@ -5,6 +5,7 @@ import com.rabbitmq.stream.OffsetSpecification;
 import com.rabbitmq.stream.Properties;
 import com.rabbitmq.stream.codec.QpidProtonCodec;
 import org.apache.spark.sql.catalyst.InternalRow;
+import org.apache.spark.util.LongAccumulator;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
@@ -624,6 +625,25 @@ class RabbitMQPartitionReaderTest {
 
             assertThat(first).isEqualTo(10);
             assertThat(second).isEqualTo(100);
+        }
+
+        @Test
+        void closeDrainsMetricsIntoSparkAccumulatorsWhenPresent() throws Exception {
+            LongAccumulator bytesAccumulator = new LongAccumulator();
+            LongAccumulator recordsAccumulator = new LongAccumulator();
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 0, 10, minimalOptions(), false, null, "scope-x",
+                    bytesAccumulator, recordsAccumulator);
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
+
+            setPrivateField(reader, "payloadBytesRead", 30L);
+            setPrivateField(reader, "recordsRead", 3L);
+
+            reader.close();
+
+            assertThat(bytesAccumulator.value()).isEqualTo(30L);
+            assertThat(recordsAccumulator.value()).isEqualTo(3L);
+            assertThat(MessageSizeTracker.drainAverage("scope-x", 99)).isEqualTo(99);
         }
 
         @Test

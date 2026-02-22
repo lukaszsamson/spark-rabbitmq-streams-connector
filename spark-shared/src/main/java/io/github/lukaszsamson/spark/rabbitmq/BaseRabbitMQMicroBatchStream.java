@@ -5,12 +5,16 @@ import com.rabbitmq.stream.Environment;
 import com.rabbitmq.stream.NoOffsetException;
 import com.rabbitmq.stream.StreamDoesNotExistException;
 import com.rabbitmq.stream.StreamStats;
+import org.apache.spark.SparkContext;
 import org.apache.spark.sql.connector.read.InputPartition;
 import org.apache.spark.sql.connector.read.PartitionReaderFactory;
 import org.apache.spark.sql.connector.read.streaming.*;
+import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.types.StructType;
+import org.apache.spark.util.LongAccumulator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import scala.Option;
 
 import java.util.*;
 import java.util.concurrent.*;
@@ -51,6 +55,8 @@ class BaseRabbitMQMicroBatchStream
     final String effectiveConsumerName;
     final String messageSizeTrackerScope;
     final ExecutorService brokerCommitExecutor;
+    final LongAccumulator messageSizeBytesAccumulator;
+    final LongAccumulator messageSizeRecordsAccumulator;
 
     /** Discovered streams (lazily initialized). */
     volatile List<String> streams;
@@ -81,6 +87,9 @@ class BaseRabbitMQMicroBatchStream
     volatile long lastTriggerMillis = System.currentTimeMillis();
     /** Recent per-stream tail probe results used by latestOffset planning. */
     final ConcurrentHashMap<String, CachedTailProbe> latestTailProbeCache = new ConcurrentHashMap<>();
+    /** Last driver-side accumulator totals already applied to the running estimate. */
+    volatile long lastAccumulatedMessageBytes;
+    volatile long lastAccumulatedMessageRecords;
 
     record CachedTailProbe(long tailExclusive, long expiresAtNanos) {}
 
@@ -96,6 +105,9 @@ class BaseRabbitMQMicroBatchStream
                 Math.max(1, Math.min(
                         Runtime.getRuntime().availableProcessors(),
                         StoredOffsetLookup.MAX_CONCURRENT_LOOKUPS)));
+        LongAccumulator[] accumulators = createMessageSizeAccumulators(this.messageSizeTrackerScope);
+        this.messageSizeBytesAccumulator = accumulators[0];
+        this.messageSizeRecordsAccumulator = accumulators[1];
         this.estimatedMessageSize = options.getEstimatedMessageSizeBytes();
         if (options.getConsumerName() == null && this.effectiveConsumerName != null) {
             LOG.info("consumerName not set; derived stable name '{}' from checkpoint location",
@@ -193,9 +205,13 @@ class BaseRabbitMQMicroBatchStream
 
     @Override
     public void commit(Offset end) {
-        // Update running average message size from completed batch readers
-        int updatedSize = MessageSizeTracker.drainAverage(
-                messageSizeTrackerScope, estimatedMessageSize);
+        // Update running average message size from completed batch readers.
+        // Prefer Spark accumulators so executor JVM metrics are visible to the driver.
+        int updatedSize = drainAverageFromAccumulators(estimatedMessageSize);
+        if (updatedSize == estimatedMessageSize) {
+            updatedSize = MessageSizeTracker.drainAverage(
+                    messageSizeTrackerScope, estimatedMessageSize);
+        }
         if (updatedSize != estimatedMessageSize) {
             LOG.debug("Updated estimated message size: {} -> {} bytes",
                     estimatedMessageSize, updatedSize);
@@ -375,7 +391,9 @@ class BaseRabbitMQMicroBatchStream
                 partitions.add(new RabbitMQInputPartition(
                         stream, start, end, options,
                         useConfiguredStartingOffset(stream, start), location,
-                        messageSizeTrackerScope));
+                        messageSizeTrackerScope,
+                        messageSizeBytesAccumulator,
+                        messageSizeRecordsAccumulator));
                 continue;
             }
 
@@ -389,7 +407,9 @@ class BaseRabbitMQMicroBatchStream
                 partitions.add(new RabbitMQInputPartition(
                         stream, currentStart, splitEnd, options,
                         useConfiguredStartingOffset(stream, currentStart), location,
-                        messageSizeTrackerScope));
+                        messageSizeTrackerScope,
+                        messageSizeBytesAccumulator,
+                        messageSizeRecordsAccumulator));
                 currentStart = splitEnd;
             }
         }
@@ -407,7 +427,9 @@ class BaseRabbitMQMicroBatchStream
                     stream, rangeStart, entry.getValue()[1], options,
                     useConfiguredStartingOffset(stream, rangeStart),
                     RabbitMQInputPartition.locationForStream(stream),
-                    messageSizeTrackerScope));
+                    messageSizeTrackerScope,
+                    messageSizeBytesAccumulator,
+                    messageSizeRecordsAccumulator));
         }
     }
 
@@ -419,7 +441,9 @@ class BaseRabbitMQMicroBatchStream
             partitions.add(new RabbitMQInputPartition(
                     stream, start, end, options,
                     useConfiguredStartingOffset(stream, start), location,
-                    messageSizeTrackerScope));
+                    messageSizeTrackerScope,
+                    messageSizeBytesAccumulator,
+                    messageSizeRecordsAccumulator));
             return;
         }
         long chunkSize = offsetSpan / numSplits;
@@ -432,7 +456,9 @@ class BaseRabbitMQMicroBatchStream
             partitions.add(new RabbitMQInputPartition(
                     stream, currentStart, splitEnd, options,
                     useConfiguredStartingOffset(stream, currentStart), location,
-                    messageSizeTrackerScope));
+                    messageSizeTrackerScope,
+                    messageSizeBytesAccumulator,
+                    messageSizeRecordsAccumulator));
             currentStart = splitEnd;
         }
     }
@@ -1148,6 +1174,47 @@ class BaseRabbitMQMicroBatchStream
             return null;
         }
         return "spark-rmq-" + Integer.toUnsignedString(checkpointLocation.hashCode(), 16);
+    }
+
+    private static LongAccumulator[] createMessageSizeAccumulators(String scope) {
+        try {
+            Option<SparkSession> activeSession = SparkSession.getActiveSession();
+            if (activeSession == null || activeSession.isEmpty()) {
+                return new LongAccumulator[]{null, null};
+            }
+            SparkContext sparkContext = activeSession.get().sparkContext();
+            if (sparkContext == null) {
+                return new LongAccumulator[]{null, null};
+            }
+            String suffix = (scope == null || scope.isBlank())
+                    ? "default"
+                    : Integer.toUnsignedString(scope.hashCode(), 16);
+            LongAccumulator bytes = sparkContext.longAccumulator(
+                    "sparkling-rabbit-message-bytes-" + suffix);
+            LongAccumulator records = sparkContext.longAccumulator(
+                    "sparkling-rabbit-message-records-" + suffix);
+            return new LongAccumulator[]{bytes, records};
+        } catch (RuntimeException e) {
+            LOG.debug("Unable to initialize Spark accumulators for message-size tracking: {}",
+                    e.toString());
+            return new LongAccumulator[]{null, null};
+        }
+    }
+
+    private int drainAverageFromAccumulators(int currentEstimate) {
+        if (messageSizeBytesAccumulator == null || messageSizeRecordsAccumulator == null) {
+            return currentEstimate;
+        }
+        long totalBytes = messageSizeBytesAccumulator.value();
+        long totalRecords = messageSizeRecordsAccumulator.value();
+        long deltaBytes = totalBytes - lastAccumulatedMessageBytes;
+        long deltaRecords = totalRecords - lastAccumulatedMessageRecords;
+        if (deltaBytes < 0 || deltaRecords <= 0) {
+            return currentEstimate;
+        }
+        lastAccumulatedMessageBytes = totalBytes;
+        lastAccumulatedMessageRecords = totalRecords;
+        return Math.max(1, (int) (deltaBytes / deltaRecords));
     }
 
     private static String deriveMessageSizeTrackerScope(

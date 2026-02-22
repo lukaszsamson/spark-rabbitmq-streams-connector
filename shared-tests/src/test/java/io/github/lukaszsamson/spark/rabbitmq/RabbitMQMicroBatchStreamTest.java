@@ -4,6 +4,7 @@ import org.apache.spark.sql.connector.metric.CustomMetric;
 import org.apache.spark.sql.connector.metric.CustomSumMetric;
 import org.apache.spark.sql.connector.read.InputPartition;
 import org.apache.spark.sql.connector.read.streaming.*;
+import org.apache.spark.util.LongAccumulator;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Tag;
@@ -942,6 +943,29 @@ class RabbitMQMicroBatchStreamTest {
         }
 
         @Test
+        void commitUpdatesEstimatedMessageSizeFromSparkAccumulators() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            OffsetTrackingEnvironment env = new OffsetTrackingEnvironment();
+            setPrivateField(stream, "environment", env);
+            setPrivateField(stream, "estimatedMessageSize", 16);
+
+            LongAccumulator bytesAccumulator = new LongAccumulator();
+            LongAccumulator recordsAccumulator = new LongAccumulator();
+            bytesAccumulator.add(1200L);
+            recordsAccumulator.add(3L);
+            setPrivateField(stream, "messageSizeBytesAccumulator", bytesAccumulator);
+            setPrivateField(stream, "messageSizeRecordsAccumulator", recordsAccumulator);
+
+            stream.commit(new RabbitMQStreamOffset(Map.of("test-stream", 10L)));
+
+            assertThat(getPrivateField(stream, "estimatedMessageSize")).isEqualTo(400);
+        }
+
+        @Test
         void persistBrokerOffsetsIgnoresZeroEndOffsets() throws Exception {
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
@@ -1448,6 +1472,13 @@ class RabbitMQMicroBatchStreamTest {
         Field field = findField(target.getClass(), fieldName);
         field.setAccessible(true);
         field.set(target, value);
+    }
+
+    private static Object getPrivateField(Object target, String fieldName)
+            throws Exception {
+        Field field = findField(target.getClass(), fieldName);
+        field.setAccessible(true);
+        return field.get(target);
     }
 
     private static Field findField(Class<?> clazz, String fieldName) throws NoSuchFieldException {

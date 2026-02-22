@@ -1,6 +1,7 @@
 package io.github.lukaszsamson.spark.rabbitmq;
 
 import org.apache.spark.sql.connector.read.InputPartition;
+import org.apache.spark.util.LongAccumulator;
 
 /**
  * A serializable input partition for RabbitMQ stream reads.
@@ -21,6 +22,8 @@ public final class RabbitMQInputPartition implements InputPartition {
     private final boolean useConfiguredStartingOffset;
     private final String[] preferredLocations;
     private final String messageSizeTrackerScope;
+    private final LongAccumulator messageSizeBytesAccumulator;
+    private final LongAccumulator messageSizeRecordsAccumulator;
 
     /**
      * @param stream the RabbitMQ stream name (or partition stream name for superstreams)
@@ -65,6 +68,15 @@ public final class RabbitMQInputPartition implements InputPartition {
     public RabbitMQInputPartition(String stream, long startOffset, long endOffset,
                                   ConnectorOptions options, boolean useConfiguredStartingOffset,
                                   String[] preferredLocations, String messageSizeTrackerScope) {
+        this(stream, startOffset, endOffset, options, useConfiguredStartingOffset,
+                preferredLocations, messageSizeTrackerScope, null, null);
+    }
+
+    public RabbitMQInputPartition(String stream, long startOffset, long endOffset,
+                                  ConnectorOptions options, boolean useConfiguredStartingOffset,
+                                  String[] preferredLocations, String messageSizeTrackerScope,
+                                  LongAccumulator messageSizeBytesAccumulator,
+                                  LongAccumulator messageSizeRecordsAccumulator) {
         this.stream = stream;
         this.startOffset = startOffset;
         this.endOffset = endOffset;
@@ -72,6 +84,8 @@ public final class RabbitMQInputPartition implements InputPartition {
         this.useConfiguredStartingOffset = useConfiguredStartingOffset;
         this.preferredLocations = preferredLocations;
         this.messageSizeTrackerScope = messageSizeTrackerScope;
+        this.messageSizeBytesAccumulator = messageSizeBytesAccumulator;
+        this.messageSizeRecordsAccumulator = messageSizeRecordsAccumulator;
     }
 
     public String getStream() {
@@ -96,6 +110,14 @@ public final class RabbitMQInputPartition implements InputPartition {
 
     public String getMessageSizeTrackerScope() {
         return messageSizeTrackerScope;
+    }
+
+    public LongAccumulator getMessageSizeBytesAccumulator() {
+        return messageSizeBytesAccumulator;
+    }
+
+    public LongAccumulator getMessageSizeRecordsAccumulator() {
+        return messageSizeRecordsAccumulator;
     }
 
     @Override
