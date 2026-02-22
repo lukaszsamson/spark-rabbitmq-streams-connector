@@ -369,10 +369,11 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
                         return;
                     }
                     try {
-                        // Enqueue with a short timeout. context.processed() is NOT called
+                        // Enqueue with a bounded timeout. context.processed() is NOT called
                         // here — it is deferred to the pull side (next()) so that credits
-                        // are granted based on consumption rate, providing natural
-                        // backpressure and avoiding blocking the Netty I/O thread.
+                        // are granted based on consumption rate and provide backpressure.
+                        // This can block the client delivery-dispatch thread briefly, but
+                        // not Netty's socket I/O event loop.
                         if (!queue.offer(new QueuedMessage(
                                 message, context.offset(), context.timestamp(), context),
                                 options.getCallbackEnqueueTimeoutMs(), TimeUnit.MILLISECONDS)) {
