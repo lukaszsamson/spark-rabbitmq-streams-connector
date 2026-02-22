@@ -3,7 +3,6 @@ package io.github.lukaszsamson.spark.rabbitmq;
 import com.rabbitmq.stream.Message;
 import com.rabbitmq.stream.Properties;
 
-import java.nio.charset.StandardCharsets;
 import java.util.Map;
 
 final class MessageSizeEstimator {
@@ -80,6 +79,25 @@ final class MessageSizeEstimator {
     }
 
     private static int utf8Size(String value) {
-        return value == null ? 0 : value.getBytes(StandardCharsets.UTF_8).length;
+        if (value == null) {
+            return 0;
+        }
+        int bytes = 0;
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (c <= 0x7F) {
+                bytes += 1;
+            } else if (c <= 0x7FF) {
+                bytes += 2;
+            } else if (Character.isHighSurrogate(c)
+                    && i + 1 < value.length()
+                    && Character.isLowSurrogate(value.charAt(i + 1))) {
+                bytes += 4;
+                i++;
+            } else {
+                bytes += 3;
+            }
+        }
+        return bytes;
     }
 }
