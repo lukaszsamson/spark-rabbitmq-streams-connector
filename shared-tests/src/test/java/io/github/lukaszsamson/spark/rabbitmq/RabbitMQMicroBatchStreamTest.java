@@ -702,6 +702,23 @@ class RabbitMQMicroBatchStreamTest {
         }
 
         @Test
+        void resolveStartingOffsetTimestampWaitsForProbeWithinConfiguredPollTimeout() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("startingOffsets", "timestamp");
+            opts.put("startingTimestamp", "1700000000000");
+            opts.put("pollTimeoutMs", "1000");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            setPrivateField(stream, "environment",
+                    new TimestampStartEnvironment(10L, java.util.List.of(42L), 400L));
+
+            RabbitMQStreamOffset offset = (RabbitMQStreamOffset) stream.initialOffset();
+            assertThat(offset.getStreamOffsets()).containsEntry("test-stream", 42L);
+        }
+
+        @Test
         void latestOffsetReusesRecentTailProbeAcrossCalls() throws Exception {
             RabbitMQMicroBatchStream stream = createStream(minimalOptions());
             ProbeCountingEnvironment env = new ProbeCountingEnvironment(10L, java.util.List.of(14L));
@@ -1601,10 +1618,16 @@ class RabbitMQMicroBatchStreamTest {
     private static final class TimestampStartEnvironment implements com.rabbitmq.stream.Environment {
         private final long firstOffset;
         private final java.util.List<Long> probedOffsets;
+        private final long delayMs;
 
         private TimestampStartEnvironment(long firstOffset, java.util.List<Long> probedOffsets) {
+            this(firstOffset, probedOffsets, 0L);
+        }
+
+        private TimestampStartEnvironment(long firstOffset, java.util.List<Long> probedOffsets, long delayMs) {
             this.firstOffset = firstOffset;
             this.probedOffsets = probedOffsets;
+            this.delayMs = delayMs;
         }
 
         @Override
@@ -1644,7 +1667,7 @@ class RabbitMQMicroBatchStreamTest {
 
         @Override
         public com.rabbitmq.stream.ConsumerBuilder consumerBuilder() {
-            return new FixedOffsetProbeConsumerBuilder(probedOffsets);
+            return new FixedOffsetProbeConsumerBuilder(probedOffsets, delayMs);
         }
 
         @Override
@@ -2092,10 +2115,16 @@ class RabbitMQMicroBatchStreamTest {
 
     private static final class FixedOffsetProbeConsumerBuilder implements com.rabbitmq.stream.ConsumerBuilder {
         private final java.util.List<Long> offsets;
+        private final long delayMs;
         private com.rabbitmq.stream.MessageHandler handler;
 
         private FixedOffsetProbeConsumerBuilder(java.util.List<Long> offsets) {
+            this(offsets, 0L);
+        }
+
+        private FixedOffsetProbeConsumerBuilder(java.util.List<Long> offsets, long delayMs) {
             this.offsets = offsets;
+            this.delayMs = delayMs;
         }
 
         @Override
@@ -2177,9 +2206,25 @@ class RabbitMQMicroBatchStreamTest {
         @Override
         public com.rabbitmq.stream.Consumer build() {
             if (handler != null) {
-                for (Long offset : offsets) {
-                    handler.handle(new FixedContext(offset),
-                            CODEC.messageBuilder().addData(new byte[0]).build());
+                if (delayMs <= 0L) {
+                    for (Long offset : offsets) {
+                        handler.handle(new FixedContext(offset),
+                                CODEC.messageBuilder().addData(new byte[0]).build());
+                    }
+                } else {
+                    Thread emitter = new Thread(() -> {
+                        try {
+                            Thread.sleep(delayMs);
+                            for (Long offset : offsets) {
+                                handler.handle(new FixedContext(offset),
+                                        CODEC.messageBuilder().addData(new byte[0]).build());
+                            }
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                        }
+                    }, "rabbitmq-microbatch-delayed-probe");
+                    emitter.setDaemon(true);
+                    emitter.start();
                 }
             }
             return new NoopConsumer();

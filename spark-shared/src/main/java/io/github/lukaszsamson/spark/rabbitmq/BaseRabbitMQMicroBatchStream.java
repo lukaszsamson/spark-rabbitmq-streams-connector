@@ -42,6 +42,7 @@ class BaseRabbitMQMicroBatchStream
     static final int COMMIT_TIMEOUT_SECONDS = 30;
     /** Reuse latest-offset tail probe results briefly to avoid per-trigger consumer churn. */
     static final long LATEST_TAIL_PROBE_CACHE_WINDOW_MS = 1_000L;
+    static final long MIN_TIMESTAMP_START_PROBE_TIMEOUT_MS = 250L;
 
     final ConnectorOptions options;
     final StructType schema;
@@ -1011,7 +1012,7 @@ class BaseRabbitMQMicroBatchStream
                     .messageHandler((context, message) -> observedOffsets.offer(context.offset()))
                     .build();
 
-            Long observed = observedOffsets.poll(250, TimeUnit.MILLISECONDS);
+            Long observed = observedOffsets.poll(timestampStartProbeTimeoutMs(), TimeUnit.MILLISECONDS);
             if (observed != null) {
                 return Math.max(firstAvailable, observed);
             }
@@ -1041,6 +1042,10 @@ class BaseRabbitMQMicroBatchStream
                 }
             }
         }
+    }
+
+    private long timestampStartProbeTimeoutMs() {
+        return Math.max(MIN_TIMESTAMP_START_PROBE_TIMEOUT_MS, options.getPollTimeoutMs());
     }
 
     private long queryStreamTailOffsetForLatest(Environment env, String stream) {
