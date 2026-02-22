@@ -516,9 +516,9 @@ public final class ConnectorOptions implements Serializable {
             throw new IllegalArgumentException(
                     "'" + STARTING_OFFSET + "' must be >= 0, got: " + startingOffset);
         }
-        if (startingTimestamp != null && startingTimestamp <= 0) {
+        if (startingTimestamp != null && startingTimestamp < 0) {
             throw new IllegalArgumentException(
-                    "'" + STARTING_TIMESTAMP + "' must be > 0 (epoch millis), got: " +
+                    "'" + STARTING_TIMESTAMP + "' must be >= 0 (epoch millis), got: " +
                             startingTimestamp);
         }
         if (endingOffset != null && endingOffset < 0) {
