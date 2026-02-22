@@ -18,7 +18,7 @@ import java.util.regex.Pattern;
 public final class RabbitMQStreamOffset extends Offset {
 
     private static final Pattern ENTRY_PATTERN =
-            Pattern.compile("\"([^\"]+)\"\\s*:\\s*(-?\\d+)");
+            Pattern.compile("\"((?:\\\\.|[^\"\\\\])*)\"\\s*:\\s*(-?\\d+)");
 
     private final TreeMap<String, Long> streamOffsets;
 
@@ -97,6 +97,6 @@ public final class RabbitMQStreamOffset extends Offset {
     }
 
     private static String unescapeJson(String s) {
-        return s.replace("\\\"", "\"").replace("\\\\", "\\");
+        return s.replace("\\\\", "\\").replace("\\\"", "\"");
     }
 }

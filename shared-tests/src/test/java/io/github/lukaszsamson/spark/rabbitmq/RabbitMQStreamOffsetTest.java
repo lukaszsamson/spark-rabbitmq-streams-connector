@@ -93,6 +93,14 @@ class RabbitMQStreamOffsetTest {
         }
 
         @Test
+        void roundTripStreamNameContainingBackslashAndQuote() {
+            String stream = "foo\\\"bar";
+            RabbitMQStreamOffset original = new RabbitMQStreamOffset(Map.of(stream, 7L));
+            RabbitMQStreamOffset parsed = RabbitMQStreamOffset.fromJson(original.json());
+            assertThat(parsed).isEqualTo(original);
+        }
+
+        @Test
         void roundTripEmptyOffset() {
             RabbitMQStreamOffset original = new RabbitMQStreamOffset(Map.of());
             RabbitMQStreamOffset parsed = RabbitMQStreamOffset.fromJson(original.json());
