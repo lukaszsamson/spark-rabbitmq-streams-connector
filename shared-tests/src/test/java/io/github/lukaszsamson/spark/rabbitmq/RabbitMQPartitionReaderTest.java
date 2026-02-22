@@ -318,6 +318,8 @@ class RabbitMQPartitionReaderTest {
             com.rabbitmq.stream.Environment env = mock(com.rabbitmq.stream.Environment.class);
             com.rabbitmq.stream.StreamStats stats = mock(com.rabbitmq.stream.StreamStats.class);
             com.rabbitmq.stream.ConsumerBuilder builder = mock(com.rabbitmq.stream.ConsumerBuilder.class);
+            com.rabbitmq.stream.ConsumerBuilder.FlowConfiguration flow = mock(
+                    com.rabbitmq.stream.ConsumerBuilder.FlowConfiguration.class);
             com.rabbitmq.stream.Consumer probe = mock(com.rabbitmq.stream.Consumer.class);
 
             when(env.queryStreamStats(anyString())).thenReturn(stats);
@@ -328,6 +330,9 @@ class RabbitMQPartitionReaderTest {
             when(builder.offset(any(OffsetSpecification.class))).thenReturn(builder);
             when(builder.noTrackingStrategy()).thenReturn(builder);
             when(builder.messageHandler(any(com.rabbitmq.stream.MessageHandler.class))).thenReturn(builder);
+            when(builder.flow()).thenReturn(flow);
+            when(flow.strategy(any(com.rabbitmq.stream.ConsumerFlowStrategy.class))).thenReturn(flow);
+            when(flow.builder()).thenReturn(builder);
             when(builder.build()).thenReturn(probe);
 
             setPrivateField(reader, "environment", env);
@@ -824,6 +829,8 @@ class RabbitMQPartitionReaderTest {
 
             com.rabbitmq.stream.Environment env = mock(com.rabbitmq.stream.Environment.class);
             com.rabbitmq.stream.ConsumerBuilder builder = mock(com.rabbitmq.stream.ConsumerBuilder.class);
+            com.rabbitmq.stream.ConsumerBuilder.FlowConfiguration flow = mock(
+                    com.rabbitmq.stream.ConsumerBuilder.FlowConfiguration.class);
             com.rabbitmq.stream.Consumer probe = mock(com.rabbitmq.stream.Consumer.class);
 
             when(env.consumerBuilder()).thenReturn(builder);
@@ -831,6 +838,9 @@ class RabbitMQPartitionReaderTest {
             when(builder.offset(any(OffsetSpecification.class))).thenReturn(builder);
             when(builder.noTrackingStrategy()).thenReturn(builder);
             when(builder.messageHandler(any(com.rabbitmq.stream.MessageHandler.class))).thenReturn(builder);
+            when(builder.flow()).thenReturn(flow);
+            when(flow.strategy(any(com.rabbitmq.stream.ConsumerFlowStrategy.class))).thenReturn(flow);
+            when(flow.builder()).thenReturn(builder);
             when(builder.build()).thenReturn(probe);
 
             setPrivateField(reader, "environment", env);

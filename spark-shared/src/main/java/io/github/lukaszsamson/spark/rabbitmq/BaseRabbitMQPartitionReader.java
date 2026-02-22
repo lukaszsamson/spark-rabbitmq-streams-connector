@@ -616,6 +616,9 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
                     .offset(OffsetSpecification.last())
                     .noTrackingStrategy()
                     .messageHandler((context, message) -> observedOffsets.offer(context.offset()))
+                    .flow()
+                    .strategy(ConsumerFlowStrategy.creditWhenHalfMessagesProcessed(1))
+                    .builder()
                     .build();
             long probeTimeoutMs = Math.max(1L, Math.min(250L, options.getMaxWaitMs()));
             Long observed = observedOffsets.poll(probeTimeoutMs, TimeUnit.MILLISECONDS);
