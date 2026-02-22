@@ -298,6 +298,49 @@ class RabbitMQPartitionReaderTest {
         }
 
         @Test
+        void nextMaxWaitIncludesTailProbeWallClockTime() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("filterValues", "alpha");
+            opts.put("filterValuePath", "application_properties.region");
+            opts.put("pollTimeoutMs", "1");
+            opts.put("maxWaitMs", "40");
+
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 0, 100, new ConnectorOptions(opts));
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
+
+            setPrivateField(reader, "consumer", new NoopConsumer());
+            setPrivateField(reader, "queue", new LinkedBlockingQueue<>());
+            setPrivateField(reader, "lastObservedOffset", 0L);
+
+            com.rabbitmq.stream.Environment env = mock(com.rabbitmq.stream.Environment.class);
+            com.rabbitmq.stream.StreamStats stats = mock(com.rabbitmq.stream.StreamStats.class);
+            com.rabbitmq.stream.ConsumerBuilder builder = mock(com.rabbitmq.stream.ConsumerBuilder.class);
+            com.rabbitmq.stream.Consumer probe = mock(com.rabbitmq.stream.Consumer.class);
+
+            when(env.queryStreamStats(anyString())).thenReturn(stats);
+            when(stats.committedOffset()).thenReturn(0L);
+
+            when(env.consumerBuilder()).thenReturn(builder);
+            when(builder.stream(anyString())).thenReturn(builder);
+            when(builder.offset(any(OffsetSpecification.class))).thenReturn(builder);
+            when(builder.noTrackingStrategy()).thenReturn(builder);
+            when(builder.messageHandler(any(com.rabbitmq.stream.MessageHandler.class))).thenReturn(builder);
+            when(builder.build()).thenReturn(probe);
+
+            setPrivateField(reader, "environment", env);
+
+            long startNanos = System.nanoTime();
+            assertThat(reader.next()).isFalse();
+            long elapsedMs = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(
+                    System.nanoTime() - startNanos);
+
+            assertThat(elapsedMs).isLessThan(500L);
+        }
+
+        @Test
         void nextDedupSkipsDuplicateOffsets() throws Exception {
             RabbitMQInputPartition partition = new RabbitMQInputPartition(
                     "test-stream", 0, 3, minimalOptions());

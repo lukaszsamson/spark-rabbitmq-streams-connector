@@ -121,6 +121,7 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
         long pollTimeoutMs = options.getPollTimeoutMs();
         long maxWaitMs = options.getMaxWaitMs();
         long pollSliceMs = Math.max(1L, Math.min(pollTimeoutMs, CLOSED_CHECK_INTERVAL_MS));
+        long waitStartNanos = System.nanoTime();
 
         while (true) {
             if ((lastEmittedOffset >= 0 && lastEmittedOffset >= endOffset - 1)
@@ -170,7 +171,7 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
                     finished = true;
                     return false;
                 }
-                totalWaitMs += pollSliceMs;
+                totalWaitMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - waitStartNanos);
                 if (totalWaitMs >= maxWaitMs) {
                     if (timestampStart) {
                         LOG.warn("Reached maxWaitMs={} while reading filtered stream '{}'; " +
@@ -242,6 +243,7 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
 
             // Reset wait timer on message receipt
             totalWaitMs = 0;
+            waitStartNanos = System.nanoTime();
 
             // Notify flow strategy that this message has been consumed (pull-side).
             // This ties credit grants to consumption rate rather than enqueue rate,
