@@ -830,14 +830,14 @@ class RabbitMQPartitionReaderTest {
 
     private static OffsetSpecification resolveOffsetSpec(RabbitMQPartitionReader reader)
             throws Exception {
-        Method method = RabbitMQPartitionReader.class.getDeclaredMethod("resolveOffsetSpec");
+        Method method = findMethod(RabbitMQPartitionReader.class, "resolveOffsetSpec");
         method.setAccessible(true);
         return (OffsetSpecification) method.invoke(reader);
     }
 
     private static String resolveSingleActiveConsumerName(RabbitMQPartitionReader reader)
             throws Exception {
-        Method method = RabbitMQPartitionReader.class.getDeclaredMethod(
+        Method method = findMethod(RabbitMQPartitionReader.class,
                 "resolveSingleActiveConsumerName");
         method.setAccessible(true);
         return (String) method.invoke(reader);
@@ -847,7 +847,7 @@ class RabbitMQPartitionReaderTest {
             RabbitMQPartitionReader reader,
             OffsetSpecification subscriptionOffsetSpec,
             OffsetSpecification configuredOffsetSpec) throws Exception {
-        Method method = RabbitMQPartitionReader.class.getDeclaredMethod(
+        Method method = findMethod(RabbitMQPartitionReader.class,
                 "resolveSubscriptionOffsetSpec", OffsetSpecification.class, OffsetSpecification.class);
         method.setAccessible(true);
         return (OffsetSpecification) method.invoke(reader, subscriptionOffsetSpec, configuredOffsetSpec);
@@ -855,7 +855,7 @@ class RabbitMQPartitionReaderTest {
 
     private static Object createPostFilter(ConnectorOptions options)
             throws Exception {
-        Method method = RabbitMQPartitionReader.class.getDeclaredMethod(
+        Method method = findMethod(RabbitMQPartitionReader.class,
                 "createPostFilter", ConnectorOptions.class);
         method.setAccessible(true);
         return method.invoke(null, options);
@@ -868,7 +868,7 @@ class RabbitMQPartitionReaderTest {
     }
 
     private static Object rejectAllPostFilter(RabbitMQPartitionReader reader) throws Exception {
-        Field field = reader.getClass().getDeclaredField("postFilter");
+        Field field = findField(reader.getClass(), "postFilter");
         field.setAccessible(true);
         Class<?> postFilterType = field.getType();
         return java.lang.reflect.Proxy.newProxyInstance(
@@ -885,14 +885,39 @@ class RabbitMQPartitionReaderTest {
 
     private static void setPrivateField(Object target, String fieldName, Object value)
             throws Exception {
-        Field field = target.getClass().getDeclaredField(fieldName);
+        Field field = findField(target.getClass(), fieldName);
         field.setAccessible(true);
         field.set(target, value);
     }
 
+    private static Field findField(Class<?> clazz, String fieldName) throws NoSuchFieldException {
+        Class<?> current = clazz;
+        while (current != null) {
+            try {
+                return current.getDeclaredField(fieldName);
+            } catch (NoSuchFieldException e) {
+                current = current.getSuperclass();
+            }
+        }
+        throw new NoSuchFieldException(fieldName);
+    }
+
+    private static Method findMethod(Class<?> clazz, String methodName, Class<?>... parameterTypes)
+            throws NoSuchMethodException {
+        Class<?> current = clazz;
+        while (current != null) {
+            try {
+                return current.getDeclaredMethod(methodName, parameterTypes);
+            } catch (NoSuchMethodException e) {
+                current = current.getSuperclass();
+            }
+        }
+        throw new NoSuchMethodException(methodName);
+    }
+
     private static Object invokeStatic(String methodName, Class<?>[] parameterTypes, Object... args)
             throws Exception {
-        Method method = RabbitMQPartitionReader.class.getDeclaredMethod(methodName, parameterTypes);
+        Method method = findMethod(RabbitMQPartitionReader.class, methodName, parameterTypes);
         method.setAccessible(true);
         return method.invoke(null, args);
     }
