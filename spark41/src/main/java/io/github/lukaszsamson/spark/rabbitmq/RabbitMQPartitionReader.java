@@ -26,7 +26,9 @@ final class RabbitMQPartitionReader extends BaseRabbitMQPartitionReader
 
     @Override
     public PartitionOffset getOffset() {
-        long nextOffset = lastEmittedOffset >= 0 ? lastEmittedOffset + 1 : startOffset;
+        long nextFromEmitted = lastEmittedOffset >= 0 ? lastEmittedOffset + 1 : startOffset;
+        long nextFromObserved = lastObservedOffset >= 0 ? lastObservedOffset + 1 : startOffset;
+        long nextOffset = Math.max(nextFromEmitted, nextFromObserved);
         return new RabbitMQPartitionOffset(stream, nextOffset);
     }
 

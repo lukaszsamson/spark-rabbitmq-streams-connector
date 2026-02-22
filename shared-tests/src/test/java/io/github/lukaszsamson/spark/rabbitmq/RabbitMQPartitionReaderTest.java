@@ -645,6 +645,29 @@ class RabbitMQPartitionReaderTest {
         }
 
         @Test
+        void realTimeGetOffsetUsesLastObservedOffsetWhenAheadOfLastEmitted() throws Exception {
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 5, 100, minimalOptions());
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
+
+            setPrivateField(reader, "lastEmittedOffset", 6L);
+            setPrivateField(reader, "lastObservedOffset", 11L);
+
+            // Spark 4.1 reader implements SupportsRealTimeRead#getOffset; older Spark variants don't.
+            Method getOffsetMethod;
+            try {
+                getOffsetMethod = findMethod(RabbitMQPartitionReader.class, "getOffset");
+            } catch (NoSuchMethodException ignored) {
+                return;
+            }
+            getOffsetMethod.setAccessible(true);
+            Object partitionOffset = getOffsetMethod.invoke(reader);
+            Method getNextOffsetMethod = partitionOffset.getClass().getMethod("getNextOffset");
+            long nextOffset = (long) getNextOffsetMethod.invoke(partitionOffset);
+            assertThat(nextOffset).isEqualTo(12L);
+        }
+
+        @Test
         void resolveSubscriptionOffsetSpecFallsBackToConfiguredOffsetWhenNoProgress() throws Exception {
             RabbitMQInputPartition partition = new RabbitMQInputPartition(
                     "test-stream", 0, 100, minimalOptions());
