@@ -416,8 +416,9 @@ class RabbitMQMicroBatchStreamTest {
         }
 
         @Test
-        void doesNotBackfillNewStreamWhenMissingFromStartOffset() {
+        void backfillsNewStreamWhenMissingFromStartOffsetUsingConfiguredStartingOffsets() throws Exception {
             RabbitMQMicroBatchStream stream = createStream(minimalOptions());
+            setPrivateField(stream, "environment", new FirstOffsetEnvironment(0L));
 
             RabbitMQStreamOffset start = new RabbitMQStreamOffset(Map.of("s1", 10L));
             Map<String, Long> endMap = new LinkedHashMap<>();
@@ -427,14 +428,14 @@ class RabbitMQMicroBatchStreamTest {
             InputPartition[] partitions = stream.planInputPartitions(
                     start, new RabbitMQStreamOffset(endMap));
 
-            assertThat(partitions).hasSize(1);
+            assertThat(partitions).hasSize(2);
             Map<String, long[]> seen = new LinkedHashMap<>();
             for (InputPartition partition : partitions) {
                 RabbitMQInputPartition rp = (RabbitMQInputPartition) partition;
                 seen.put(rp.getStream(), new long[]{rp.getStartOffset(), rp.getEndOffset()});
             }
             assertThat(seen).containsEntry("s1", new long[]{10L, 100L});
-            assertThat(seen).doesNotContainKey("new-stream");
+            assertThat(seen).containsEntry("new-stream", new long[]{0L, 50L});
         }
 
         @Test

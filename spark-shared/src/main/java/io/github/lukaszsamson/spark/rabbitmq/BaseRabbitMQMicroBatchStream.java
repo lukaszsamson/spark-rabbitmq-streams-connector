@@ -231,10 +231,12 @@ class BaseRabbitMQMicroBatchStream
 
         // Collect validated per-stream ranges
         Map<String, long[]> validRanges = new LinkedHashMap<>();
+        Map<String, Long> startOffsets = startOffset.getStreamOffsets();
         for (Map.Entry<String, Long> entry : endOffset.getStreamOffsets().entrySet()) {
             String stream = entry.getKey();
             long endOff = entry.getValue();
-            long startOff = startOffset.getStreamOffsets().getOrDefault(stream, endOff);
+            Long knownStart = startOffsets.get(stream);
+            long startOff = knownStart != null ? knownStart : resolveStartingOffset(stream);
 
             if (endOff <= startOff) {
                 continue;
