@@ -365,29 +365,7 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
                 .stream(stream)
                 .offset(offsetSpec)
                 .noTrackingStrategy()
-                .messageHandler((context, message) -> {
-                    // Fast exit if we've already reached end offset
-                    if (context.offset() >= endOffset) {
-                        return;
-                    }
-                    try {
-                        // Enqueue with a bounded timeout. context.processed() is NOT called
-                        // here — it is deferred to the pull side (next()) so that credits
-                        // are granted based on consumption rate and provide backpressure.
-                        // This can block the client delivery-dispatch thread briefly, but
-                        // not Netty's socket I/O event loop.
-                        if (!queue.offer(new QueuedMessage(
-                                message, context.offset(), context.timestamp(), context),
-                                options.getCallbackEnqueueTimeoutMs(), TimeUnit.MILLISECONDS)) {
-                            consumerError.compareAndSet(null,
-                                    new IOException("Queue full: timed out enqueuing message " +
-                                            "at offset " + context.offset() +
-                                            " on stream '" + stream + "'"));
-                        }
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                    }
-                })
+                .messageHandler(this::enqueueFromCallback)
                 .flow()
                 .strategy(ConsumerFlowStrategy.creditWhenHalfMessagesProcessed(
                         options.getInitialCredits()))
@@ -445,6 +423,31 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
 
         LOG.info("Opened consumer for stream '{}' with offsets [{}, {})",
                 stream, startOffset, endOffset);
+    }
+
+    void enqueueFromCallback(MessageHandler.Context context, Message message) {
+        if (context.offset() >= endOffset) {
+            return;
+        }
+        try {
+            // Enqueue with a bounded timeout. context.processed() is NOT called
+            // here — it is deferred to the pull side (next()) so that credits
+            // are granted based on consumption rate and provide backpressure.
+            // This can block the client delivery-dispatch thread briefly, but
+            // not Netty's socket I/O event loop.
+            if (!queue.offer(new QueuedMessage(
+                    message, context.offset(), context.timestamp(), context),
+                    options.getCallbackEnqueueTimeoutMs(), TimeUnit.MILLISECONDS)) {
+                consumerError.compareAndSet(null,
+                        new IOException("Queue full: timed out enqueuing message " +
+                                "at offset " + context.offset() +
+                                " on stream '" + stream + "'"));
+            }
+        } catch (InterruptedException e) {
+            consumerError.compareAndSet(null,
+                    new IOException("Interrupted while enqueuing message at offset "
+                            + context.offset() + " on stream '" + stream + "'", e));
+        }
     }
 
     void handleStartOffsetOutOfRange(long firstAvailable) {

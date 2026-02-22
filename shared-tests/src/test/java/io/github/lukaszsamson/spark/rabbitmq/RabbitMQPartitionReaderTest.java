@@ -534,6 +534,32 @@ class RabbitMQPartitionReaderTest {
         }
 
         @Test
+        void callbackEnqueueInterruptSurfacesConsumerErrorWithoutInterruptingThread()
+                throws Exception {
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 0, 10, minimalOptions());
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
+
+            setPrivateField(reader, "queue", new InterruptingOfferQueue<>());
+            assertThat(Thread.currentThread().isInterrupted()).isFalse();
+
+            reader.enqueueFromCallback(new NoopContext(),
+                    CODEC.messageBuilder().addData("x".getBytes()).build());
+
+            assertThat(Thread.currentThread().isInterrupted()).isFalse();
+            setPrivateField(reader, "consumer", new NoopConsumer());
+            setPrivateField(reader, "queue",
+                    new java.util.concurrent.LinkedBlockingQueue<RabbitMQPartitionReader.QueuedMessage>());
+
+            assertThatThrownBy(reader::next)
+                    .isInstanceOf(IOException.class)
+                    .hasMessageContaining("Consumer error")
+                    .satisfies(error -> assertThat(error.getCause())
+                            .isInstanceOf(IOException.class)
+                            .hasMessage("Interrupted while enqueuing message at offset 0 on stream 'test-stream'"));
+        }
+
+        @Test
         void closeDrainsMetricsIntoMessageSizeTrackerOnce() throws Exception {
             RabbitMQInputPartition partition = new RabbitMQInputPartition(
                     "test-stream", 0, 10, minimalOptions());
@@ -1175,6 +1201,15 @@ class RabbitMQPartitionReaderTest {
             extends java.util.concurrent.LinkedBlockingQueue<T> {
         @Override
         public T poll(long timeout, java.util.concurrent.TimeUnit unit)
+                throws InterruptedException {
+            throw new InterruptedException("interrupt");
+        }
+    }
+
+    private static final class InterruptingOfferQueue<T>
+            extends java.util.concurrent.LinkedBlockingQueue<T> {
+        @Override
+        public boolean offer(T value, long timeout, java.util.concurrent.TimeUnit unit)
                 throws InterruptedException {
             throw new InterruptedException("interrupt");
         }
