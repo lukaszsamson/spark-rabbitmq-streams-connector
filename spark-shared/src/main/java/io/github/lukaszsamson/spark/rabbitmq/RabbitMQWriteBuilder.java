@@ -14,7 +14,8 @@ import org.apache.spark.sql.types.StructType;
  *
  * <p>{@link SupportsTruncate} is implemented so that {@code SaveMode.Overwrite}
  * is accepted in batch writes. Since RabbitMQ streams are append-only,
- * truncation is a no-op — the connector simply appends as usual.
+ * truncation is a no-op — the connector simply appends as usual. This is
+ * an intentional design decision to follow Spark Kafka sink behavior.
  */
 final class RabbitMQWriteBuilder
         implements WriteBuilder, SupportsTruncate, SupportsStreamingUpdateAsAppend {
@@ -35,7 +36,7 @@ final class RabbitMQWriteBuilder
 
     @Override
     public WriteBuilder truncate() {
-        // RabbitMQ streams are append-only; truncation is a no-op.
+        // Design decision (Kafka parity): append-only sink, so truncate is a no-op.
         return this;
     }
 
