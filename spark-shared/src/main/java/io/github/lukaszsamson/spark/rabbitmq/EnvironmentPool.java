@@ -134,14 +134,24 @@ final class EnvironmentPool {
                 continue;
             }
 
-            if (!entry.refCount.compareAndSet(current, current + 1)) {
-                continue;
+            if (current == 0) {
+                synchronized (entry) {
+                    if (entry.refCount.get() != 0 || pool.get(key) != entry) {
+                        continue;
+                    }
+                    entry.refCount.set(1);
+                    ScheduledFuture<?> eviction = entry.evictionTask;
+                    if (eviction != null) {
+                        eviction.cancel(false);
+                        entry.evictionTask = null;
+                    }
+                }
+                LOG.debug("Reusing pooled environment for key {}, refCount={}",
+                        key.endpoints(), 1);
+                return entry.environment;
             }
 
-            // If this entry was scheduled for eviction (refCount was 0), ensure it
-            // is still the active mapping. If eviction won the race, retry.
-            if (current == 0 && pool.get(key) != entry) {
-                entry.refCount.decrementAndGet();
+            if (!entry.refCount.compareAndSet(current, current + 1)) {
                 continue;
             }
 
@@ -188,14 +198,22 @@ final class EnvironmentPool {
     }
 
     private void evict(EnvironmentKey key, PooledEntry entry) {
-        // Only evict if refCount is still 0 (no one reacquired)
-        if (entry.refCount.get() == 0 && pool.remove(key, entry)) {
-            LOG.info("Evicting idle environment for key {}", key.endpoints());
-            try {
-                entry.environment.close();
-            } catch (Exception e) {
-                LOG.warn("Error closing evicted environment for key {}", key.endpoints(), e);
+        boolean removed;
+        synchronized (entry) {
+            // Final check + removal must be atomic with 0->1 reacquire.
+            if (entry.refCount.get() != 0) {
+                return;
             }
+            removed = pool.remove(key, entry);
+        }
+        if (!removed) {
+            return;
+        }
+        LOG.info("Evicting idle environment for key {}", key.endpoints());
+        try {
+            entry.environment.close();
+        } catch (Exception e) {
+            LOG.warn("Error closing evicted environment for key {}", key.endpoints(), e);
         }
     }
 

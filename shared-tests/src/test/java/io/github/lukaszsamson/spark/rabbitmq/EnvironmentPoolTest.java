@@ -15,6 +15,7 @@ import java.lang.reflect.Method;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
@@ -356,6 +357,46 @@ class EnvironmentPoolTest {
 
             invokeEvict(pool, EnvironmentPool.EnvironmentKey.from(options), entry);
             assertThat(getPoolMap()).doesNotContainKey(EnvironmentPool.EnvironmentKey.from(options));
+        }
+
+        @Test
+        void evictDoesNotCloseWhenRefCountRevivedBeforeFinalCheck() throws Exception {
+            EnvironmentPool pool = EnvironmentPool.getInstance();
+            ConnectorOptions options = opts("localhost:5552", "test-stream");
+            EnvironmentPool.EnvironmentKey key = EnvironmentPool.EnvironmentKey.from(options);
+            CountingEnvironment env = new CountingEnvironment();
+            Object entry = newEntry(env);
+            setRefCount(entry, 0);
+            putEntry(key, entry);
+
+            CountDownLatch started = new CountDownLatch(1);
+            Throwable[] failure = new Throwable[1];
+            Thread evictThread;
+            synchronized (entry) {
+                evictThread = new Thread(() -> {
+                    started.countDown();
+                    try {
+                        invokeEvict(pool, key, entry);
+                    } catch (Throwable t) {
+                        failure[0] = t;
+                    }
+                }, "env-pool-evict-test");
+                evictThread.start();
+
+                assertThat(started.await(1, TimeUnit.SECONDS)).isTrue();
+                Thread.sleep(30);
+                assertThat(env.closeCount.get()).isZero();
+                assertThat(getPoolMap()).containsKey(key);
+
+                // Simulate a concurrent reacquire from refCount 0 to 1.
+                setRefCount(entry, 1);
+            }
+
+            evictThread.join(1_000);
+            assertThat(evictThread.isAlive()).isFalse();
+            assertThat(failure[0]).isNull();
+            assertThat(env.closeCount.get()).isZero();
+            assertThat(getPoolMap()).containsKey(key);
         }
 
         @Test
