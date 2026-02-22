@@ -572,23 +572,25 @@ class RabbitMQWriteTest {
         }
 
         @Test
-        void deriveProducerNameIncludesTaskIdToAvoidAttemptCollisions() throws Exception {
+        void deriveStreamingProducerNameUsesEpochAndStartsPublishingIdAtZero() throws Exception {
             Map<String, String> opts = minimalSinkMap();
             opts.put("producerName", "dedup");
             ConnectorOptions options = new ConnectorOptions(opts);
 
             RabbitMQDataWriter writer = new RabbitMQDataWriter(
-                    options, minimalSinkSchema(), 2, 7, -1);
+                    options, minimalSinkSchema(), 2, 7, 11);
             CapturingProducerBuilder builder = new CapturingProducerBuilder();
             seedEnvironmentPool(options, new BuilderEnvironment(builder));
 
             writer.write(new GenericInternalRow(new Object[]{"x".getBytes()}));
 
-            assertThat(builder.name).isEqualTo("dedup-p2-t7");
+            assertThat(builder.name).isEqualTo("dedup-p2-e11");
+            long nextId = (long) getPrivateField(writer, "nextPublishingId");
+            assertThat(nextId).isEqualTo(1L);
         }
 
         @Test
-        void dedupProducerNamesMustAvoidTaskAttemptCollisions() throws Exception {
+        void dedupProducerNamesInBatchMustAvoidTaskAttemptCollisions() throws Exception {
             Map<String, String> opts = minimalSinkMap();
             opts.put("producerName", "dedup");
             ConnectorOptions options = new ConnectorOptions(opts);

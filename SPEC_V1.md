@@ -249,14 +249,16 @@ Type coercion notes:
 
 ### Producer behavior
 - Uses RabbitMQ Streams `Producer` with publisher confirms enabled.
-- Optional deduplication is enabled via `producerName` and monotonically increasing `publishingId` per writer task.
+- Optional deduplication is enabled via `producerName` and monotonically increasing `publishingId` per writer.
 - When `publishing_id` is present in a sink row, it overrides auto-generated publishing IDs for that row.
-- Derived producer name for streaming writes: `producerName` + `-p` + `partitionId` + `-t` + `taskId` (avoids speculative conflicts; cross-retry dedup not guaranteed).
+- Derived producer name for streaming writes: `producerName` + `-p` + `partitionId` + `-e` + `epochId`.
+- Streaming dedup publishing IDs start at `0` for each epoch-scoped producer identity.
+- Batch writes keep task-scoped producer names (`... + -t + taskId`) to avoid attempt collisions.
 - Deduplication constraints:
   - Only one live producer per `producerName`.
   - Publishing must be single-threaded per producer name.
   - Deduplication is not guaranteed when sub-entry batching/compression is enabled.
-  - Speculative execution: include `taskId` in derived producer names or disable deduplication when speculative tasks are enabled.
+  - Speculative execution in streaming can still cause producer-name contention for the same `(partitionId, epochId)`.
 - `retryOnRecovery` remains enabled for at-least-once semantics.
 - Register a `Resource.StateListener` on producers to log RECOVERING/CLOSED transitions.
 
@@ -288,17 +290,15 @@ Type coercion notes:
 
 ## Speculative execution
 - Default Spark commit coordinator is enabled.
-- Deduplication must use producer names that avoid collisions across speculative tasks (include `taskId`).
+- Streaming deduplication uses epoch-scoped producer names; speculative attempts for the same partition/epoch may contend on the same identity.
 
 ## Commit coordinator
 - `StreamingWrite.useCommitCoordinator() = true`.
 - `BatchWrite.useCommitCoordinator() = true`.
 
 ## Speculative execution with deduplication
-- If `producerName` is set and Spark speculation is enabled, derive producer names with `taskId` to avoid concurrent name collisions.
-- When speculation is enabled, deduplication is guaranteed only within a single task attempt; cross-retry dedup is not guaranteed.
-- Alternative (optional): detect speculation and force `producerName` to be unset (disable dedup) unless the user explicitly opts in to taskId-based naming.
-- This tradeoff means duplicate messages may still occur across task retries even with dedup enabled.
+- Streaming uses epoch-scoped producer names (`partitionId + epochId`) to make retries of the same micro-batch re-use the same dedup identity.
+- Speculative execution can still create concurrent-producer contention for the same identity; operators should avoid enabling speculation for strict dedup workflows.
 
 ## Superstreams support
 ### Topology discovery

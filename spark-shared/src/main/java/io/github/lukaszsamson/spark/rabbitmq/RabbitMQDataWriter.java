@@ -339,7 +339,7 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
 
         // Initialize dedup publishing ID
         if (derivedName != null) {
-            nextPublishingId = producer.getLastPublishingId() + 1;
+            nextPublishingId = epochId >= 0 ? 0L : producer.getLastPublishingId() + 1;
             LOG.info("Dedup enabled for partition {} with producer '{}', starting publishingId={}",
                     partitionId, derivedName, nextPublishingId);
         }
@@ -404,8 +404,8 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
     /**
      * Derive the producer name for deduplication.
      *
-     * <p>Uses a stable logical name scoped to the Spark partition so retries
-     * and re-executions can resume dedup state with the same producer identity.
+     * <p>Uses an epoch-scoped producer identity for streaming retries and a
+     * task-scoped identity for batch writes.
      *
      * @return the derived name, or null if dedup is not enabled
      */
@@ -413,6 +413,9 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
         String baseName = options.getProducerName();
         if (baseName == null || baseName.isEmpty()) {
             return null;
+        }
+        if (epochId >= 0) {
+            return baseName + "-p" + partitionId + "-e" + epochId;
         }
         return baseName + "-p" + partitionId + "-t" + taskId;
     }
