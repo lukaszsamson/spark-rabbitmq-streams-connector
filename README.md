@@ -255,7 +255,7 @@ By default, unrecognized columns cause an error. Set `ignoreUnknownColumns=true`
 |--------|------|---------|-------------|
 | `producerName` | string | — | Producer name (enables deduplication if set) |
 | `publishing_id` | long column | — | Optional per-row publishing ID override in sink schema |
-| `publisherConfirmTimeoutMs` | long | — | Publisher confirm timeout |
+| `publisherConfirmTimeoutMs` | long | — | Publisher confirm timeout (`0` disables timeout and waits for confirms indefinitely) |
 | `maxInFlight` | int | — | Max unconfirmed messages |
 | `enqueueTimeoutMs` | long | 10000 | Send blocking timeout when `maxInFlight` reached |
 | `batchPublishingDelayMs` | long | — | Batch publishing delay |

@@ -34,6 +34,8 @@ import java.util.concurrent.atomic.AtomicReference;
 final class RabbitMQDataWriter implements DataWriter<InternalRow> {
 
     private static final Logger LOG = LoggerFactory.getLogger(RabbitMQDataWriter.class);
+    private static final long DEFAULT_PUBLISHER_CONFIRM_TIMEOUT_MS = 30_000L;
+    private static final long CLIENT_MIN_CONFIRM_TIMEOUT_MS = 1_000L;
 
     private final ConnectorOptions options;
     private final int partitionId;
@@ -168,30 +170,45 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
     public WriterCommitMessage commit() throws IOException {
         // Wait for all outstanding confirms
         if (outstandingConfirms.get() > 0) {
-            long timeoutMs = options.getPublisherConfirmTimeoutMs() != null
-                    ? options.getPublisherConfirmTimeoutMs()
-                    : 30_000L;
-            long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
+            long timeoutMs = effectivePublisherConfirmTimeoutMs();
             synchronized (confirmMonitor) {
-                while (outstandingConfirms.get() > 0) {
-                    Throwable error = sendError.get();
-                    if (error != null) {
-                        throw new IOException(
-                                "One or more messages failed confirmation on partition "
-                                        + partitionId, error);
+                if (timeoutMs == 0) {
+                    while (outstandingConfirms.get() > 0) {
+                        Throwable error = sendError.get();
+                        if (error != null) {
+                            throw new IOException(
+                                    "One or more messages failed confirmation on partition "
+                                            + partitionId, error);
+                        }
+                        try {
+                            confirmMonitor.wait();
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            throw new IOException("Interrupted waiting for publisher confirms", e);
+                        }
                     }
-                    long remainingNanos = deadlineNanos - System.nanoTime();
-                    if (remainingNanos <= 0) {
-                        throw new IOException(
-                                "Timed out waiting for publisher confirms on partition " +
-                                        partitionId + ". Outstanding: " + outstandingConfirms.get() +
-                                        ", timeout: " + timeoutMs + "ms");
-                    }
-                    try {
-                        TimeUnit.NANOSECONDS.timedWait(confirmMonitor, remainingNanos);
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                        throw new IOException("Interrupted waiting for publisher confirms", e);
+                } else {
+                    long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
+                    while (outstandingConfirms.get() > 0) {
+                        Throwable error = sendError.get();
+                        if (error != null) {
+                            throw new IOException(
+                                    "One or more messages failed confirmation on partition "
+                                            + partitionId, error);
+                        }
+                        long remainingNanos = deadlineNanos - System.nanoTime();
+                        if (remainingNanos <= 0) {
+                            throw new IOException(
+                                    "Timed out waiting for publisher confirms on partition " +
+                                            partitionId + ". Outstanding: " + outstandingConfirms.get() +
+                                            ", timeout: " + timeoutMs + "ms");
+                        }
+                        try {
+                            TimeUnit.NANOSECONDS.timedWait(confirmMonitor, remainingNanos);
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            throw new IOException("Interrupted waiting for publisher confirms", e);
+                        }
                     }
                 }
             }
@@ -302,9 +319,8 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
         }
         if (options.getPublisherConfirmTimeoutMs() != null) {
             long configuredMs = options.getPublisherConfirmTimeoutMs();
-            long clientMinMs = 1_000L;
-            long effectiveMs = configuredMs == 0 ? 0 : Math.max(configuredMs, clientMinMs);
-            if (configuredMs > 0 && configuredMs < clientMinMs) {
+            long effectiveMs = effectivePublisherConfirmTimeoutMs();
+            if (configuredMs > 0 && configuredMs < CLIENT_MIN_CONFIRM_TIMEOUT_MS) {
                 LOG.warn("publisherConfirmTimeoutMs={}ms is below client minimum; using {}ms for producer confirm timeout",
                         configuredMs, effectiveMs);
             }
@@ -356,6 +372,17 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
 
         LOG.info("Initialized producer for partition {} (task {}, epoch {})",
                 partitionId, taskId, epochId);
+    }
+
+    private long effectivePublisherConfirmTimeoutMs() {
+        Long configuredMs = options.getPublisherConfirmTimeoutMs();
+        if (configuredMs == null) {
+            return DEFAULT_PUBLISHER_CONFIRM_TIMEOUT_MS;
+        }
+        if (configuredMs == 0) {
+            return 0;
+        }
+        return Math.max(configuredMs, CLIENT_MIN_CONFIRM_TIMEOUT_MS);
     }
 
     private ProducerBuilder buildSuperStreamProducer() {

@@ -652,6 +652,68 @@ class RabbitMQWriteTest {
         }
 
         @Test
+        void commitWithZeroConfirmTimeoutWaitsForCompletionWithoutImmediateTimeout() throws Exception {
+            Map<String, String> opts = minimalSinkMap();
+            opts.put("publisherConfirmTimeoutMs", "0");
+            ConnectorOptions options = new ConnectorOptions(opts);
+
+            RabbitMQDataWriter writer = new RabbitMQDataWriter(
+                    options, minimalSinkSchema(), 0, 1, -1);
+            java.util.concurrent.atomic.AtomicLong outstanding = new java.util.concurrent.atomic.AtomicLong(1);
+            setPrivateField(writer, "outstandingConfirms", outstanding);
+
+            Object confirmMonitor = getPrivateField(writer, "confirmMonitor");
+            Thread confirmer = new Thread(() -> {
+                try {
+                    Thread.sleep(100L);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                outstanding.set(0L);
+                synchronized (confirmMonitor) {
+                    confirmMonitor.notifyAll();
+                }
+            }, "writer-confirm-timeout-zero-test");
+            confirmer.start();
+
+            WriterCommitMessage msg = writer.commit();
+            confirmer.join(1_000L);
+
+            assertThat(msg).isInstanceOf(RabbitMQWriterCommitMessage.class);
+        }
+
+        @Test
+        void commitWithSubSecondConfirmTimeoutUsesClientMinimumWindow() throws Exception {
+            Map<String, String> opts = minimalSinkMap();
+            opts.put("publisherConfirmTimeoutMs", "1");
+            ConnectorOptions options = new ConnectorOptions(opts);
+
+            RabbitMQDataWriter writer = new RabbitMQDataWriter(
+                    options, minimalSinkSchema(), 0, 1, -1);
+            java.util.concurrent.atomic.AtomicLong outstanding = new java.util.concurrent.atomic.AtomicLong(1);
+            setPrivateField(writer, "outstandingConfirms", outstanding);
+
+            Object confirmMonitor = getPrivateField(writer, "confirmMonitor");
+            Thread confirmer = new Thread(() -> {
+                try {
+                    Thread.sleep(100L);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                outstanding.set(0L);
+                synchronized (confirmMonitor) {
+                    confirmMonitor.notifyAll();
+                }
+            }, "writer-confirm-timeout-subsecond-test");
+            confirmer.start();
+
+            WriterCommitMessage msg = writer.commit();
+            confirmer.join(1_000L);
+
+            assertThat(msg).isInstanceOf(RabbitMQWriterCommitMessage.class);
+        }
+
+        @Test
         void commitFailsWhenConfirmationNegative() throws Exception {
             RabbitMQDataWriter writer = new RabbitMQDataWriter(
                     minimalSinkOptions(), minimalSinkSchema(), 0, 1, -1);
