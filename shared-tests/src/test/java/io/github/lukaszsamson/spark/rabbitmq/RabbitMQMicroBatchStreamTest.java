@@ -236,6 +236,42 @@ class RabbitMQMicroBatchStreamTest {
         }
 
         @Test
+        void initialOffsetEarliestStatsFailureFailsFast() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("startingOffsets", "earliest");
+            opts.put("serverSideOffsetTracking", "false");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            Environment env = mock(Environment.class);
+            when(env.queryStreamStats("test-stream"))
+                    .thenThrow(new RuntimeException("transient stats failure"));
+            setPrivateField(stream, "environment", env);
+
+            assertThatThrownBy(stream::initialOffset)
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("Failed to query first offset for stream 'test-stream'");
+        }
+
+        @Test
+        void initialOffsetEarliestNoOffsetStillUsesZero() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("startingOffsets", "earliest");
+            opts.put("serverSideOffsetTracking", "false");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            Environment env = mock(Environment.class);
+            when(env.queryStreamStats("test-stream")).thenThrow(new NoOffsetException("empty stream"));
+            setPrivateField(stream, "environment", env);
+
+            RabbitMQStreamOffset offset = (RabbitMQStreamOffset) stream.initialOffset();
+            assertThat(offset.getStreamOffsets()).containsEntry("test-stream", 0L);
+        }
+
+        @Test
         void initialOffsetTimestampProbeFailureFailsFastInsteadOfFallingBackToEarliest()
                 throws Exception {
             Map<String, String> opts = new LinkedHashMap<>();
@@ -2021,7 +2057,7 @@ class RabbitMQMicroBatchStreamTest {
 
         @Override
         public com.rabbitmq.stream.StreamStats queryStreamStats(String stream) {
-            throw new UnsupportedOperationException();
+            return new FixedStreamStats(0L);
         }
 
         @Override

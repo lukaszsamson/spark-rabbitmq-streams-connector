@@ -1110,9 +1110,11 @@ class BaseRabbitMQMicroBatchStream
             }
             LOG.warn("Stream '{}' does not exist, using offset 0 (failOnDataLoss=false)", stream);
             return 0;
+        } catch (IllegalStateException e) {
+            throw e;
         } catch (Exception e) {
-            LOG.warn("Failed to query first offset for stream '{}': {}", stream, e.getMessage());
-            return 0;
+            throw new IllegalStateException(
+                    "Failed to query first offset for stream '" + stream + "'", e);
         }
     }
 
