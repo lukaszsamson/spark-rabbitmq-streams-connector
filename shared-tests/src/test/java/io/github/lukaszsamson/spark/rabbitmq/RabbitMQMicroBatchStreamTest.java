@@ -1262,14 +1262,36 @@ class RabbitMQMicroBatchStreamTest {
 
     private static void setPrivateField(Object target, String fieldName, Object value)
             throws Exception {
-        Field field = target.getClass().getDeclaredField(fieldName);
+        Field field = findField(target.getClass(), fieldName);
         field.setAccessible(true);
         field.set(target, value);
     }
 
+    private static Field findField(Class<?> clazz, String fieldName) throws NoSuchFieldException {
+        for (Class<?> current = clazz; current != null; current = current.getSuperclass()) {
+            try {
+                return current.getDeclaredField(fieldName);
+            } catch (NoSuchFieldException ignored) {
+            }
+        }
+        throw new NoSuchFieldException(fieldName + " not found in " + clazz.getName() + " hierarchy");
+    }
+
+    private static Method findMethod(Class<?> clazz, String methodName, Class<?>... parameterTypes)
+            throws NoSuchMethodException {
+        for (Class<?> current = clazz; current != null; current = current.getSuperclass()) {
+            try {
+                return current.getDeclaredMethod(methodName, parameterTypes);
+            } catch (NoSuchMethodException ignored) {
+            }
+        }
+        throw new NoSuchMethodException(
+                methodName + " not found in " + clazz.getName() + " hierarchy");
+    }
+
     private static Object invokeStatic(String methodName, Class<?>[] parameterTypes, Object... args)
             throws Exception {
-        Method method = RabbitMQMicroBatchStream.class.getDeclaredMethod(methodName, parameterTypes);
+        Method method = findMethod(RabbitMQMicroBatchStream.class, methodName, parameterTypes);
         method.setAccessible(true);
         return method.invoke(null, args);
     }
@@ -1297,7 +1319,7 @@ class RabbitMQMicroBatchStreamTest {
 
     private static long invokeProbe(RabbitMQMicroBatchStream stream,
                                     com.rabbitmq.stream.Environment env) throws Exception {
-        Method method = RabbitMQMicroBatchStream.class.getDeclaredMethod(
+        Method method = findMethod(RabbitMQMicroBatchStream.class,
                 "probeTailOffsetFromLastMessage",
                 com.rabbitmq.stream.Environment.class, String.class);
         method.setAccessible(true);
