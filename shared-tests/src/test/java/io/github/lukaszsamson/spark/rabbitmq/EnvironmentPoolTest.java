@@ -179,6 +179,47 @@ class EnvironmentPoolTest {
         }
 
         @Test
+        void keyIncludesEnvironmentId() {
+            Map<String, String> map1 = minimalMap("localhost:5552", "test-stream");
+
+            Map<String, String> map2 = minimalMap("localhost:5552", "test-stream");
+            map2.put("environmentId", "spark-rmq-prod");
+
+            var key1 = EnvironmentPool.EnvironmentKey.from(new ConnectorOptions(map1));
+            var key2 = EnvironmentPool.EnvironmentKey.from(new ConnectorOptions(map2));
+
+            assertThat(key1).isNotEqualTo(key2);
+        }
+
+        @Test
+        void keyIncludesEnvironmentTuningOptions() {
+            Map<String, String> optionValues = new LinkedHashMap<>();
+            optionValues.put("rpcTimeoutMs", "15000");
+            optionValues.put("requestedHeartbeatSeconds", "60");
+            optionValues.put("forceReplicaForConsumers", "true");
+            optionValues.put("forceLeaderForProducers", "true");
+            optionValues.put("locatorConnectionCount", "3");
+            optionValues.put("recoveryBackOffDelayPolicy", "fixed:PT1S");
+            optionValues.put("topologyUpdateBackOffDelayPolicy", "fixed:PT2S");
+            optionValues.put("maxProducersByConnection", "64");
+            optionValues.put("maxConsumersByConnection", "128");
+            optionValues.put("maxTrackingConsumersByConnection", "75");
+
+            for (Map.Entry<String, String> option : optionValues.entrySet()) {
+                Map<String, String> baseMap = minimalMap("localhost:5552", "test-stream");
+                Map<String, String> tunedMap = minimalMap("localhost:5552", "test-stream");
+                tunedMap.put(option.getKey(), option.getValue());
+
+                var baseKey = EnvironmentPool.EnvironmentKey.from(new ConnectorOptions(baseMap));
+                var tunedKey = EnvironmentPool.EnvironmentKey.from(new ConnectorOptions(tunedMap));
+
+                assertThat(baseKey)
+                        .as("Option '%s' must affect environment pooling key", option.getKey())
+                        .isNotEqualTo(tunedKey);
+            }
+        }
+
+        @Test
         void keyIncludesNettyAndExecutorCustomizationClasses() {
             Map<String, String> map1 = minimalMap("localhost:5552", "test-stream");
 
