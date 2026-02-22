@@ -185,8 +185,6 @@ public final class MessageToRowConverter implements Serializable {
     }
 
     private static Object longOrNull(long value) {
-        // group_sequence: 0 is ambiguous (could be unset or explicitly 0).
-        // Always include the value; consumers should check the properties object.
-        return value;
+        return value >= 0 ? value : null;
     }
 }

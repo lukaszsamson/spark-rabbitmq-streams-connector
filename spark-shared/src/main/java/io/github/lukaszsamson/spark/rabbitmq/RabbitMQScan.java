@@ -98,19 +98,30 @@ final class RabbitMQScan implements Scan {
             return List.of(options.getStream());
         }
 
-        // Superstream: discover partition streams using low-level Client
-        {
-            List<String> partitions = SuperStreamPartitionDiscovery.discoverPartitions(
-                    options, options.getSuperStream());
-            if (partitions.isEmpty()) {
+        List<String> partitions = SuperStreamPartitionDiscovery.discoverPartitions(
+                options, options.getSuperStream());
+        return resolveSuperStreamPartitions(partitions);
+    }
+
+    List<String> resolveSuperStreamPartitionsForTests(List<String> partitions) {
+        return resolveSuperStreamPartitions(partitions);
+    }
+
+    private List<String> resolveSuperStreamPartitions(List<String> partitions) {
+        if (partitions.isEmpty()) {
+            if (options.isFailOnDataLoss()) {
                 throw new IllegalStateException(
                         "Superstream '" + options.getSuperStream() +
                                 "' has no partition streams");
             }
-            LOG.info("Discovered {} partition streams for superstream '{}'",
-                    partitions.size(), options.getSuperStream());
-            return partitions;
-        } // end superstream discovery
+            LOG.warn("Superstream '{}' currently has no partition streams; returning empty topology "
+                            + "because failOnDataLoss=false",
+                    options.getSuperStream());
+            return List.of();
+        }
+        LOG.info("Discovered {} partition streams for superstream '{}'",
+                partitions.size(), options.getSuperStream());
+        return partitions;
     }
 
     /**

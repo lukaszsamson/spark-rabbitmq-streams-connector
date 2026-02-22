@@ -2,6 +2,7 @@ package io.github.lukaszsamson.spark.rabbitmq;
 
 import com.rabbitmq.stream.Message;
 import com.rabbitmq.stream.OffsetSpecification;
+import com.rabbitmq.stream.Properties;
 import com.rabbitmq.stream.codec.QpidProtonCodec;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.junit.jupiter.api.Nested;
@@ -951,6 +952,16 @@ class RabbitMQPartitionReaderTest {
 
             String resolved = resolveSingleActiveConsumerName(reader);
             assertThat(resolved).isEqualTo("sac-reader-orders-2");
+        }
+
+        @Test
+        void coercePropertiesToStringsIncludesZeroGroupSequence() {
+            Properties props = mock(Properties.class);
+            when(props.getGroupSequence()).thenReturn(0L);
+
+            Map<String, String> coerced = BaseRabbitMQPartitionReader.coercePropertiesToStrings(props);
+
+            assertThat(coerced).containsEntry("group_sequence", "0");
         }
 
         @Test

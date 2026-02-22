@@ -58,6 +58,23 @@ class RabbitMQScanTest {
         }
 
         @Test
+        void discoverSuperStreamEmptyPartitionsRespectsFailOnDataLoss() {
+            Map<String, String> opts = baseOptions();
+            opts.remove("stream");
+            opts.put("superstream", "super");
+            opts.put("failOnDataLoss", "false");
+            RabbitMQScan tolerant = new RabbitMQScan(new ConnectorOptions(opts), schema());
+
+            assertThat(tolerant.resolveSuperStreamPartitionsForTests(java.util.List.of())).isEmpty();
+
+            opts.put("failOnDataLoss", "true");
+            RabbitMQScan strict = new RabbitMQScan(new ConnectorOptions(opts), schema());
+            assertThatThrownBy(() -> strict.resolveSuperStreamPartitionsForTests(java.util.List.of()))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("has no partition streams");
+        }
+
+        @Test
         void resolveStartOffsetLatestEqualsResolvedEndWhenNoData() throws Exception {
             Map<String, String> opts = baseOptions();
             opts.put("startingOffsets", "latest");

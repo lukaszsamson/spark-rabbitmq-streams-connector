@@ -701,7 +701,7 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
             out.put("creation_time", Long.toString(properties.getCreationTime()));
         }
         putIfNotNull(out, "group_id", properties.getGroupId());
-        if (properties.getGroupSequence() > 0) {
+        if (properties.getGroupSequence() >= 0) {
             out.put("group_sequence", Long.toString(properties.getGroupSequence()));
         }
         putIfNotNull(out, "reply_to_group_id", properties.getReplyToGroupId());

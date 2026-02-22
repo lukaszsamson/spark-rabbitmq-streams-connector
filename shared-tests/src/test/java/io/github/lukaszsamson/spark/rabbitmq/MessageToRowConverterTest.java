@@ -143,6 +143,21 @@ class MessageToRowConverterTest {
             assertThat(propsRow.isNullAt(8)).isTrue(); // absolute_expiry_time
             assertThat(propsRow.isNullAt(9)).isTrue(); // creation_time
         }
+
+        @Test
+        void groupSequenceSentinelMapsToNullWhileZeroRemainsValid() {
+            Properties unsetProps = mock(Properties.class);
+            when(unsetProps.getGroupSequence()).thenReturn(-1L);
+
+            InternalRow unsetRow = MessageToRowConverter.convertProperties(unsetProps);
+            assertThat(unsetRow.isNullAt(11)).isTrue();
+
+            Properties zeroProps = mock(Properties.class);
+            when(zeroProps.getGroupSequence()).thenReturn(0L);
+
+            InternalRow zeroRow = MessageToRowConverter.convertProperties(zeroProps);
+            assertThat(zeroRow.getLong(11)).isEqualTo(0L);
+        }
     }
 
     // ========================================================================

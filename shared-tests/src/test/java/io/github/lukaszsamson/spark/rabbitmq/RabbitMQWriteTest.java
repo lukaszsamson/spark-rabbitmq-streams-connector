@@ -23,6 +23,7 @@ import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -609,6 +610,21 @@ class RabbitMQWriteTest {
 
             assertThat(builder.activeProducerNames).contains("dedup-p2-t7", "dedup-p2-t8");
             assertThat(builder.activeProducerNames).hasSize(2);
+        }
+
+        @Test
+        void coercePropertiesToStringsIncludesZeroGroupSequence() throws Exception {
+            com.rabbitmq.stream.Properties props = org.mockito.Mockito.mock(
+                    com.rabbitmq.stream.Properties.class);
+            org.mockito.Mockito.when(props.getGroupSequence()).thenReturn(0L);
+
+            Method method = RabbitMQDataWriter.class.getDeclaredMethod(
+                    "coercePropertiesToStrings", com.rabbitmq.stream.Properties.class);
+            method.setAccessible(true);
+            @SuppressWarnings("unchecked")
+            Map<String, String> coerced = (Map<String, String>) method.invoke(null, props);
+
+            assertThat(coerced).containsEntry("group_sequence", "0");
         }
 
         @Test
