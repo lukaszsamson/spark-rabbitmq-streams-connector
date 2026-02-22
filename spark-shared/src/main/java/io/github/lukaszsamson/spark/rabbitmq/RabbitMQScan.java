@@ -33,6 +33,7 @@ final class RabbitMQScan implements Scan {
 
     private static final Logger LOG = LoggerFactory.getLogger(RabbitMQScan.class);
     private static final long TAIL_PROBE_TIMEOUT_MS = 1_500L;
+    private static final long MIN_TIMESTAMP_PROBE_TIMEOUT_MS = 250L;
 
     private final ConnectorOptions options;
     private final StructType schema;
@@ -243,7 +244,7 @@ final class RabbitMQScan implements Scan {
                     .messageHandler((context, message) -> observedOffsets.offer(context.offset()))
                     .build();
 
-            Long observed = observedOffsets.poll(250, TimeUnit.MILLISECONDS);
+            Long observed = observedOffsets.poll(timestampProbeTimeoutMs(), TimeUnit.MILLISECONDS);
             if (observed != null) {
                 return Math.max(firstAvailable, observed);
             }
@@ -318,7 +319,7 @@ final class RabbitMQScan implements Scan {
                     .messageHandler((context, message) -> observedOffsets.offer(context.offset()))
                     .build();
 
-            Long observed = observedOffsets.poll(250, TimeUnit.MILLISECONDS);
+            Long observed = observedOffsets.poll(timestampProbeTimeoutMs(), TimeUnit.MILLISECONDS);
             if (observed != null) {
                 // The broker returns the first chunk at/after the timestamp.
                 // Use the observed offset as the exclusive end (messages before this
@@ -352,6 +353,10 @@ final class RabbitMQScan implements Scan {
                 }
             }
         }
+    }
+
+    private long timestampProbeTimeoutMs() {
+        return Math.max(MIN_TIMESTAMP_PROBE_TIMEOUT_MS, options.getPollTimeoutMs());
     }
 
     private long probeTailOffsetFromLastMessageWithTimeout(
