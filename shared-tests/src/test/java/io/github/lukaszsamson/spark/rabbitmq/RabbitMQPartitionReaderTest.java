@@ -664,6 +664,22 @@ class RabbitMQPartitionReaderTest {
         }
 
         @Test
+        void resolveOffsetSpecUsesPerStreamTimestampWhenGlobalTimestampMissing() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("startingOffsets", "timestamp");
+            opts.put("startingOffsetsByTimestamp", "{\"test-stream\":1700000001234}");
+
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 0, 100, new ConnectorOptions(opts), true);
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
+
+            OffsetSpecification spec = resolveOffsetSpec(reader);
+            assertThat(spec).isEqualTo(OffsetSpecification.timestamp(1700000001234L));
+        }
+
+        @Test
         void nextTimestampInitialSplitSkipsMessagesBeforeConfiguredTimestamp() throws Exception {
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
@@ -696,6 +712,34 @@ class RabbitMQPartitionReaderTest {
             long elapsedMs = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
             // Regression guard: this path used to block ~300s on default maxWaitMs.
             assertThat(elapsedMs).isLessThan(500L);
+        }
+
+        @Test
+        void nextTimestampInitialSplitAppliesPerStreamTimestampOverride() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("startingOffsets", "timestamp");
+            opts.put("startingTimestamp", "1700000005000");
+            opts.put("startingOffsetsByTimestamp", "{\"test-stream\":1700000000000}");
+            opts.put("pollTimeoutMs", "5");
+            opts.put("maxWaitMs", "20");
+
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 0, 2, new ConnectorOptions(opts), true);
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
+
+            BlockingQueue<RabbitMQPartitionReader.QueuedMessage> queue = new LinkedBlockingQueue<>();
+            queue.add(new RabbitMQPartitionReader.QueuedMessage(
+                    CODEC.messageBuilder().addData("new".getBytes()).build(),
+                    1L, 1700000001000L, new NoopContext()));
+
+            setPrivateField(reader, "queue", queue);
+            setPrivateField(reader, "consumer", new NoopConsumer());
+
+            assertThat(reader.next()).isTrue();
+            assertThat(reader.get().getLong(2)).isEqualTo(1L);
+            assertThat(reader.next()).isFalse();
         }
 
         @Test

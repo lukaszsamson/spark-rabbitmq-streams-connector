@@ -461,7 +461,7 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
 
     OffsetSpecification resolveOffsetSpec() {
         if (useConfiguredStartingOffset && options.getStartingOffsets() == StartingOffsetsMode.TIMESTAMP) {
-            return OffsetSpecification.timestamp(options.getStartingTimestamp());
+            return OffsetSpecification.timestamp(resolveStartingTimestampForStream());
         }
         return OffsetSpecification.offset(startOffset);
     }
@@ -492,12 +492,31 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
     boolean shouldSkipByTimestamp(long chunkTimestampMillis) {
         return useConfiguredStartingOffset
                 && options.getStartingOffsets() == StartingOffsetsMode.TIMESTAMP
-                && chunkTimestampMillis < options.getStartingTimestamp();
+                && chunkTimestampMillis < resolveStartingTimestampForStream();
     }
 
     boolean isTimestampConfiguredStartingOffset() {
         return useConfiguredStartingOffset
                 && options.getStartingOffsets() == StartingOffsetsMode.TIMESTAMP;
+    }
+
+    long resolveStartingTimestampForStream() {
+        Map<String, Long> perStreamTimestamps = options.getStartingOffsetsByTimestamp();
+        if (perStreamTimestamps != null) {
+            Long streamTimestamp = perStreamTimestamps.get(stream);
+            if (streamTimestamp != null) {
+                return streamTimestamp;
+            }
+        }
+        Long defaultTimestamp = options.getStartingTimestamp();
+        if (defaultTimestamp != null) {
+            return defaultTimestamp;
+        }
+        throw new IllegalStateException(
+                "No starting timestamp configured for stream '" + stream + "' while "
+                        + ConnectorOptions.STARTING_OFFSETS + "=timestamp. Configure "
+                        + ConnectorOptions.STARTING_TIMESTAMP + " or provide "
+                        + ConnectorOptions.STARTING_OFFSETS_BY_TIMESTAMP + " for this stream.");
     }
 
     boolean isBrokerFilterConfigured() {
