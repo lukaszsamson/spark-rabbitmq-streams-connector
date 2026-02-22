@@ -1119,11 +1119,6 @@ class BaseRabbitMQMicroBatchStream
         List<Future<?>> futures = new ArrayList<>();
         for (Map.Entry<String, Long> entry : toStore) {
             String stream = entry.getKey();
-            if (!options.isFailOnDataLoss() && isMissingStream(env, stream)) {
-                LOG.debug("Skipping broker offset store for deleted stream '{}' (failOnDataLoss=false)",
-                        stream);
-                continue;
-            }
             long lastProcessed = entry.getValue() - 1;
             futures.add(brokerCommitExecutor.submit(() -> {
                 try {
@@ -1131,6 +1126,12 @@ class BaseRabbitMQMicroBatchStream
                     LOG.debug("Stored offset {} for consumer '{}' on stream '{}'",
                             lastProcessed, consumerName, stream);
                 } catch (Exception e) {
+                    if (!options.isFailOnDataLoss() && isMissingStreamException(e)) {
+                        LOG.debug("Skipping broker offset store for deleted stream '{}' " +
+                                        "(failOnDataLoss=false)",
+                                stream);
+                        return;
+                    }
                     LOG.warn("Failed to store offset {} for consumer '{}' on stream '{}': {}",
                             lastProcessed, consumerName, stream, e.getMessage());
                 }
@@ -1175,14 +1176,20 @@ class BaseRabbitMQMicroBatchStream
         lastStoredEndOffsets = new LinkedHashMap<>(endOffsets);
     }
 
-    private boolean isMissingStream(Environment env, String stream) {
-        try {
-            env.queryStreamStats(stream);
-            return false;
-        } catch (StreamDoesNotExistException e) {
-            return true;
-        } catch (Exception e) {
-            return false;
+    private boolean isMissingStreamException(Throwable throwable) {
+        Throwable current = throwable;
+        while (current != null) {
+            if (current instanceof StreamDoesNotExistException) {
+                return true;
+            }
+            String message = current.getMessage();
+            if (message != null && (message.contains("STREAM_DOES_NOT_EXIST")
+                    || message.contains("does not exist")
+                    || message.contains("has no partition streams"))) {
+                return true;
+            }
+            current = current.getCause();
         }
+        return false;
     }
 }

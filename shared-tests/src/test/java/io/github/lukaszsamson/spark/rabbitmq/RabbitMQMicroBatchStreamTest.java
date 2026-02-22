@@ -846,6 +846,23 @@ class RabbitMQMicroBatchStreamTest {
 
             assertThat(env.recordedOffsets).isEmpty();
         }
+
+        @Test
+        void persistBrokerOffsetsAvoidsSynchronousStreamStatsChecks() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("failOnDataLoss", "false");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            QueryCountingOffsetTrackingEnvironment env = new QueryCountingOffsetTrackingEnvironment();
+            setPrivateField(stream, "environment", env);
+
+            stream.commit(new RabbitMQStreamOffset(Map.of("test-stream", 10L)));
+
+            assertThat(env.recordedOffsets).containsExactly(Map.entry("test-stream", 9L));
+            assertThat(env.queryStatsCalls).isZero();
+        }
     }
 
     @Nested
@@ -2097,8 +2114,8 @@ class RabbitMQMicroBatchStreamTest {
         }
     }
 
-    private static final class OffsetTrackingEnvironment implements com.rabbitmq.stream.Environment {
-        private final java.util.List<Map.Entry<String, Long>> recordedOffsets =
+    private static class OffsetTrackingEnvironment implements com.rabbitmq.stream.Environment {
+        protected final java.util.List<Map.Entry<String, Long>> recordedOffsets =
                 new java.util.ArrayList<>();
 
         @Override
@@ -2143,6 +2160,17 @@ class RabbitMQMicroBatchStreamTest {
 
         @Override
         public void close() {
+        }
+    }
+
+    private static final class QueryCountingOffsetTrackingEnvironment
+            extends OffsetTrackingEnvironment {
+        private int queryStatsCalls;
+
+        @Override
+        public com.rabbitmq.stream.StreamStats queryStreamStats(String stream) {
+            queryStatsCalls++;
+            throw new UnsupportedOperationException();
         }
     }
 
