@@ -417,6 +417,8 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
         if (epochId >= 0) {
             return baseName + "-p" + partitionId + "-e" + epochId;
         }
+        // Batch writes may run concurrent task attempts for one partition; include taskId
+        // to avoid producer-name collisions (RabbitMQ permits only one live producer/name).
         return baseName + "-p" + partitionId + "-t" + taskId;
     }
 
