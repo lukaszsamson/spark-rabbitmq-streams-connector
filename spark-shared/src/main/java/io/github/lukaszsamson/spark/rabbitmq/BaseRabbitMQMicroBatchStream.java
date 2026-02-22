@@ -1005,11 +1005,15 @@ class BaseRabbitMQMicroBatchStream
             return firstAvailable;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            return firstAvailable;
+            throw new IllegalStateException(
+                    "Interrupted resolving timestamp start offset for stream '" + stream + "'", e);
+        } catch (IllegalStateException e) {
+            throw e;
         } catch (Exception e) {
             LOG.warn("Failed to resolve timestamp start offset for stream '{}': {}",
                     stream, e.getMessage());
-            return firstAvailable;
+            throw new IllegalStateException(
+                    "Failed to resolve timestamp start offset for stream '" + stream + "'", e);
         } finally {
             if (probe != null) {
                 try {

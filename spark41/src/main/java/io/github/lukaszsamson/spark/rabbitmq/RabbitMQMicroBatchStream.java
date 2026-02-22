@@ -55,8 +55,8 @@ final class RabbitMQMicroBatchStream extends BaseRabbitMQMicroBatchStream
 
         List<InputPartition> partitions = new ArrayList<>();
         for (String stream : streams) {
-            long startOff = startOffset.getStreamOffsets()
-                    .getOrDefault(stream, resolveStartingOffset(stream));
+            Long knownStart = startOffset.getStreamOffsets().get(stream);
+            long startOff = knownStart != null ? knownStart : resolveStartingOffset(stream);
 
             // Validate against retention truncation
             startOff = validateStartOffset(stream, startOff, Long.MAX_VALUE);

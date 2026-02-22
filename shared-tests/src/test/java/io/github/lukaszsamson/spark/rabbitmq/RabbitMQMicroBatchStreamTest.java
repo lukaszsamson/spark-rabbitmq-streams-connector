@@ -236,6 +236,25 @@ class RabbitMQMicroBatchStreamTest {
         }
 
         @Test
+        void initialOffsetTimestampProbeFailureFailsFastInsteadOfFallingBackToEarliest()
+                throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("startingOffsets", "timestamp");
+            opts.put("startingTimestamp", "1700000000000");
+            opts.put("serverSideOffsetTracking", "false");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            setPrivateField(stream, "environment",
+                    new ThrowingConsumerBuilderEnvironment(new RuntimeException("probe failed")));
+
+            assertThatThrownBy(stream::initialOffset)
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("Failed to resolve timestamp start offset");
+        }
+
+        @Test
         void initialOffsetExplicitConsumerNameNonFatalLookupFailureFailsFast() throws Exception {
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
