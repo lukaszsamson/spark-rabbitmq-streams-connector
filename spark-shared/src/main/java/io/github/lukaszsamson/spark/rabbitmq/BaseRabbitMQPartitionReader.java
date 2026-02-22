@@ -276,14 +276,6 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
                 continue;
             }
 
-            if (postFilter != null && !postFilter.accept(toMessageView(qm.message()))) {
-                if (options.isFilterWarningOnMismatch()) {
-                    LOG.warn("Post-filter dropped message at offset {} on stream '{}'",
-                            qm.offset(), stream);
-                }
-                continue;
-            }
-
             currentRow = converter.convert(
                     qm.message(), stream, qm.offset(), qm.chunkTimestampMillis());
             lastEmittedOffset = qm.offset();
@@ -417,7 +409,6 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
                     .values(options.getFilterValues().toArray(new String[0]))
                     .matchUnfiltered(options.isFilterMatchUnfiltered())
                     // RabbitMQ stream client requires both filter values and post-filter logic.
-                    // Keep this consistent with the connector-level post-filter used in next().
                     .postFilter(msg -> brokerPostFilter == null
                             || brokerPostFilter.accept(toMessageView(msg)))
                     .builder();

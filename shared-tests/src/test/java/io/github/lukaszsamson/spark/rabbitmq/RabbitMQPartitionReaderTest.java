@@ -489,7 +489,7 @@ class RabbitMQPartitionReaderTest {
         }
 
         @Test
-        void nextAppliesPostFilterWithWarningToggle() throws Exception {
+        void nextDoesNotReapplyPostFilterInReaderLoop() throws Exception {
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
             opts.put("stream", "test-stream");
@@ -512,7 +512,8 @@ class RabbitMQPartitionReaderTest {
             setPrivateField(reader, "queue", queue);
             setPrivateField(reader, "consumer", new NoopConsumer());
 
-            assertThat(reader.next()).isFalse();
+            assertThat(reader.next()).isTrue();
+            assertThat(reader.get().getLong(2)).isEqualTo(1L);
         }
 
         @Test

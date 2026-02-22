@@ -105,15 +105,6 @@ final class RabbitMQPartitionReader extends BaseRabbitMQPartitionReader
                 continue;
             }
 
-            // Post-filter
-            if (postFilter != null && !postFilter.accept(toMessageView(qm.message()))) {
-                if (options.isFilterWarningOnMismatch()) {
-                    LOG.warn("Post-filter dropped message at offset {} on stream '{}'",
-                            qm.offset(), stream);
-                }
-                continue;
-            }
-
             currentRow = converter.convert(
                     qm.message(), stream, qm.offset(), qm.chunkTimestampMillis());
             lastEmittedOffset = qm.offset();

@@ -470,7 +470,7 @@ class RealTimeModeTest {
         }
 
         @Test
-        void nextWithTimeoutAppliesConfiguredPostFilter() throws Exception {
+        void nextWithTimeoutDoesNotReapplyPostFilterInReaderLoop() throws Exception {
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
             opts.put("stream", "test-stream");
@@ -497,12 +497,12 @@ class RealTimeModeTest {
             SupportsRealTimeRead.RecordStatus status = reader.nextWithTimeout(5000L);
             assertThat(status.hasRecord()).isTrue();
             InternalRow row = reader.get();
-            assertThat(new String(row.getBinary(0), StandardCharsets.UTF_8)).isEqualTo("keep-1");
-            assertThat(row.getLong(2)).isEqualTo(2L);
+            assertThat(new String(row.getBinary(0), StandardCharsets.UTF_8)).isEqualTo("drop-1");
+            assertThat(row.getLong(2)).isEqualTo(1L);
         }
 
         @Test
-        void nextWithTimeoutAppliesDerivedFilterValuesPostFilter() throws Exception {
+        void nextWithTimeoutDoesNotReapplyDerivedPostFilterInReaderLoop() throws Exception {
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
             opts.put("stream", "test-stream");
@@ -539,8 +539,8 @@ class RealTimeModeTest {
             SupportsRealTimeRead.RecordStatus status = reader.nextWithTimeout(5000L);
             assertThat(status.hasRecord()).isTrue();
             InternalRow row = reader.get();
-            assertThat(new String(row.getBinary(0), StandardCharsets.UTF_8)).isEqualTo("alpha");
-            assertThat(row.getLong(2)).isEqualTo(4L);
+            assertThat(new String(row.getBinary(0), StandardCharsets.UTF_8)).isEqualTo("gamma");
+            assertThat(row.getLong(2)).isEqualTo(3L);
         }
     }
 
