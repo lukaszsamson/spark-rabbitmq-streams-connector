@@ -289,11 +289,11 @@ Type coercion notes:
 - With deduplication enabled and constraints satisfied, duplicates are suppressed per producer name.
 
 ## Speculative execution
-- Default Spark commit coordinator is enabled.
+- Batch write keeps Spark's default commit coordinator behavior enabled.
 - Streaming deduplication uses epoch-scoped producer names; speculative attempts for the same partition/epoch may contend on the same identity.
 
 ## Commit coordinator
-- `StreamingWrite.useCommitCoordinator() = true`.
+- `StreamingWrite.useCommitCoordinator() = false` (Kafka parity).
 - `BatchWrite.useCommitCoordinator() = true`.
 
 ## Speculative execution with deduplication

@@ -20,8 +20,9 @@ import java.util.concurrent.TimeoutException;
 /**
  * Looks up stored consumer offsets from the RabbitMQ broker.
  *
- * <p>Uses temporary named consumers with {@code noTrackingStrategy()} to query
- * the broker for the last stored offset per stream.
+ * <p>Uses temporary named consumers with {@code manualTrackingStrategy()} to query
+ * the broker for the last stored offset per stream. The RabbitMQ stream client
+ * requires tracking-enabled consumers for {@code storedOffset()}.
  *
  * <p>Stored offsets in RabbitMQ are <em>last-processed</em> offsets.
  * The returned map contains <em>next</em> offsets ({@code stored + 1}).
