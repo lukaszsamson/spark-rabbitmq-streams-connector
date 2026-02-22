@@ -63,7 +63,7 @@ final class RabbitMQBatch implements Batch {
 
         // Phase 2: if minPartitions requires more splits, distribute the extra evenly
         if (minPartitions != null && minPartitions > totalPartitions) {
-            return planWithSplitting(minPartitions);
+            return planWithSplitting(minPartitions, splitsPerStream);
         }
 
         // If maxRecordsPerPartition caused splitting, use it
@@ -110,9 +110,11 @@ final class RabbitMQBatch implements Batch {
 
     /**
      * Split streams into more partitions when minPartitions > stream count.
-     * Split counts are distributed evenly across streams.
+     * Split counts are distributed deterministically while preserving any
+     * existing per-stream minimum split counts (e.g. from maxRecordsPerPartition).
      */
-    private InputPartition[] planWithSplitting(int minPartitions) {
+    private InputPartition[] planWithSplitting(int minPartitions,
+                                               Map<String, Integer> minimumSplitsPerStream) {
         long totalOffsetSpan = 0;
         for (long[] range : offsetRanges.values()) {
             totalOffsetSpan += Math.max(0L, range[1] - range[0]);
@@ -125,7 +127,7 @@ final class RabbitMQBatch implements Batch {
         List<InputPartition> partitions = new ArrayList<>();
 
         // Calculate deterministic split counts per stream.
-        Map<String, Integer> splitsPerStream = allocateSplits(minPartitions, totalOffsetSpan);
+        Map<String, Integer> splitsPerStream = allocateSplits(minPartitions, minimumSplitsPerStream);
 
         for (Map.Entry<String, long[]> entry : offsetRanges.entrySet()) {
             String stream = entry.getKey();
@@ -142,24 +144,37 @@ final class RabbitMQBatch implements Batch {
     }
 
     /**
-     * Allocate splits per stream evenly, with deterministic remainder assignment by stream order.
+     * Allocate splits per stream with deterministic remainder assignment by stream order.
+     * Existing per-stream split floors are preserved.
      */
-    private Map<String, Integer> allocateSplits(int minPartitions, long totalOffsetSpan) {
+    private Map<String, Integer> allocateSplits(int minPartitions,
+                                                Map<String, Integer> minimumSplitsPerStream) {
         Map<String, Integer> splits = new LinkedHashMap<>();
-        if (totalOffsetSpan <= 0) {
-            return splits;
-        }
-
         int streamCount = offsetRanges.size();
         if (streamCount == 0) {
             return splits;
         }
-        int baseSplits = minPartitions / streamCount;
-        int remainder = minPartitions % streamCount;
+
+        int allocatedPartitions = 0;
         int streamIndex = 0;
         for (String stream : offsetRanges.keySet()) {
-            int splitCount = Math.max(1, baseSplits + (streamIndex < remainder ? 1 : 0));
+            int splitCount = Math.max(1, minimumSplitsPerStream.getOrDefault(stream, 1));
             splits.put(stream, splitCount);
+            allocatedPartitions += splitCount;
+        }
+
+        if (allocatedPartitions >= minPartitions) {
+            return splits;
+        }
+
+        int extraPartitions = minPartitions - allocatedPartitions;
+        int baseExtra = extraPartitions / streamCount;
+        int remainder = extraPartitions % streamCount;
+        for (String stream : offsetRanges.keySet()) {
+            int additional = baseExtra + (streamIndex < remainder ? 1 : 0);
+            if (additional > 0) {
+                splits.put(stream, splits.get(stream) + additional);
+            }
             streamIndex++;
         }
 

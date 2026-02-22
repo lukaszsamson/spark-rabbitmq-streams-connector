@@ -199,9 +199,14 @@ class RabbitMQBatchTest {
             ranges.put("s3", new long[]{0, 100});
 
             RabbitMQBatch batch = new RabbitMQBatch(optionsWithMinPartitions(4), SCHEMA, ranges);
+            Map<String, Integer> minimumSplits = new LinkedHashMap<>();
+            minimumSplits.put("s1", 1);
+            minimumSplits.put("s2", 1);
+            minimumSplits.put("s3", 1);
             @SuppressWarnings("unchecked")
             Map<String, Integer> splits = (Map<String, Integer>) invokePrivate(
-                    batch, "allocateSplits", new Class<?>[]{int.class, long.class}, 4, 300L);
+                    batch, "allocateSplits", new Class<?>[]{int.class, Map.class},
+                    4, minimumSplits);
 
             assertThat(splits).containsEntry("s1", 2);
             assertThat(splits).containsEntry("s2", 1);
@@ -355,6 +360,36 @@ class RabbitMQBatchTest {
             RabbitMQBatch batch = new RabbitMQBatch(options, SCHEMA, ranges);
             InputPartition[] partitions = batch.planInputPartitions();
             assertThat(partitions).hasSize(4);
+        }
+
+        @Test
+        void minPartitionsWithMaxRecordsPreservesMaxRecordsBoundOnSkew() {
+            Map<String, long[]> ranges = new LinkedHashMap<>();
+            ranges.put("s1", new long[]{0, 1000});
+            ranges.put("s2", new long[]{0, 10});
+
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("maxRecordsPerPartition", "100");
+            opts.put("minPartitions", "12");
+            RabbitMQBatch batch = new RabbitMQBatch(new ConnectorOptions(opts), SCHEMA, ranges);
+
+            InputPartition[] partitions = batch.planInputPartitions();
+            assertThat(partitions).hasSize(12);
+
+            long s1Splits = 0;
+            long maxS1Span = 0;
+            for (InputPartition partition : partitions) {
+                RabbitMQInputPartition p = (RabbitMQInputPartition) partition;
+                long span = p.getEndOffset() - p.getStartOffset();
+                if ("s1".equals(p.getStream())) {
+                    s1Splits++;
+                    maxS1Span = Math.max(maxS1Span, span);
+                }
+            }
+            assertThat(s1Splits).isGreaterThanOrEqualTo(10);
+            assertThat(maxS1Span).isLessThanOrEqualTo(100L);
         }
     }
 

@@ -1104,6 +1104,41 @@ class RabbitMQMicroBatchStreamTest {
         }
 
         @Test
+        void minPartitionsWithMaxRecordsPreservesMaxRecordsBound() {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("minPartitions", "12");
+            opts.put("maxRecordsPerPartition", "100");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+
+            Map<String, Long> start = new LinkedHashMap<>();
+            start.put("s1", 0L);
+            start.put("s2", 0L);
+            Map<String, Long> end = new LinkedHashMap<>();
+            end.put("s1", 1000L);
+            end.put("s2", 10L);
+
+            InputPartition[] partitions = stream.planInputPartitions(
+                    new RabbitMQStreamOffset(start), new RabbitMQStreamOffset(end));
+
+            assertThat(partitions).hasSize(12);
+            long s1Splits = 0;
+            long maxS1Span = 0;
+            for (InputPartition partition : partitions) {
+                RabbitMQInputPartition p = (RabbitMQInputPartition) partition;
+                long span = p.getEndOffset() - p.getStartOffset();
+                if ("s1".equals(p.getStream())) {
+                    s1Splits++;
+                    maxS1Span = Math.max(maxS1Span, span);
+                }
+            }
+            assertThat(s1Splits).isGreaterThanOrEqualTo(10);
+            assertThat(maxS1Span).isLessThanOrEqualTo(100L);
+        }
+
+        @Test
         void planWithSplittingHandlesExactDivision() {
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");

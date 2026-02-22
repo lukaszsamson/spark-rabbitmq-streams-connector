@@ -285,7 +285,7 @@ class BaseRabbitMQMicroBatchStream
 
             // If minPartitions requires more, use the existing even-distribution logic
             if (minPartitions != null && minPartitions > totalPartitions) {
-                planWithSplitting(partitions, validRanges, minPartitions);
+                planWithSplitting(partitions, validRanges, splitsPerStream, minPartitions);
             } else if (totalPartitions > validRanges.size()) {
                 // maxRecordsPerPartition caused splitting
                 for (Map.Entry<String, long[]> entry : validRanges.entrySet()) {
@@ -310,10 +310,13 @@ class BaseRabbitMQMicroBatchStream
 
     /**
      * Split streams into more partitions when minPartitions > stream count.
-     * Split counts are distributed evenly across streams.
+     * Split counts are distributed deterministically while preserving any
+     * existing per-stream minimum split counts (e.g. from maxRecordsPerPartition).
      */
     private void planWithSplitting(List<InputPartition> partitions,
-                                    Map<String, long[]> ranges, int minPartitions) {
+                                    Map<String, long[]> ranges,
+                                    Map<String, Integer> minimumSplitsPerStream,
+                                    int minPartitions) {
         long totalOffsetSpan = 0;
         for (long[] range : ranges.values()) {
             totalOffsetSpan += Math.max(0L, range[1] - range[0]);
@@ -324,14 +327,29 @@ class BaseRabbitMQMicroBatchStream
 
         // Allocate deterministic split counts per stream.
         Map<String, Integer> splitsPerStream = new LinkedHashMap<>();
-        int streamCount = ranges.size();
-        int baseSplits = minPartitions / streamCount;
-        int remainder = minPartitions % streamCount;
-        int streamIndex = 0;
         for (String stream : ranges.keySet()) {
-            int splitCount = Math.max(1, baseSplits + (streamIndex < remainder ? 1 : 0));
-            splitsPerStream.put(stream, splitCount);
-            streamIndex++;
+            splitsPerStream.put(stream,
+                    Math.max(1, minimumSplitsPerStream.getOrDefault(stream, 1)));
+        }
+
+        int allocatedPartitions = 0;
+        for (int splitCount : splitsPerStream.values()) {
+            allocatedPartitions += splitCount;
+        }
+
+        if (allocatedPartitions < minPartitions) {
+            int extraPartitions = minPartitions - allocatedPartitions;
+            int streamCount = ranges.size();
+            int baseExtra = extraPartitions / streamCount;
+            int remainder = extraPartitions % streamCount;
+            int streamIndex = 0;
+            for (String stream : ranges.keySet()) {
+                int additional = baseExtra + (streamIndex < remainder ? 1 : 0);
+                if (additional > 0) {
+                    splitsPerStream.put(stream, splitsPerStream.get(stream) + additional);
+                }
+                streamIndex++;
+            }
         }
 
         // Create split partitions
