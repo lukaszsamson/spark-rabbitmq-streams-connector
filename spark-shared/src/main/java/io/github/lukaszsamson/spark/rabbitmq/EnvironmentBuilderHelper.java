@@ -18,6 +18,8 @@ import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.TrustManagerFactory;
 import java.io.FileInputStream;
 import java.io.IOException;
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.security.GeneralSecurityException;
 import java.security.KeyStore;
 import java.time.Duration;
@@ -69,18 +71,31 @@ final class EnvironmentBuilderHelper {
             builder.uris(uris);
         } else if (options.getEndpoints() != null && !options.getEndpoints().isEmpty()) {
             String scheme = options.isTls() ? "rabbitmq-stream+tls" : "rabbitmq-stream";
+            int defaultPort = options.isTls() ? DEFAULT_STREAM_TLS_PORT : DEFAULT_STREAM_PORT;
             List<String> uris = new ArrayList<>();
             for (String endpoint : options.getEndpoints().split(",")) {
                 String trimmed = endpoint.trim();
                 if (trimmed.isEmpty()) continue;
-                String[] parts = trimmed.split(":");
-                String host = parts[0];
-                int port = parts.length > 1
-                        ? Integer.parseInt(parts[1].trim())
-                        : (options.isTls() ? DEFAULT_STREAM_TLS_PORT : DEFAULT_STREAM_PORT);
-                uris.add(scheme + "://" + host + ":" + port);
+                uris.add(endpointToUri(scheme, trimmed, defaultPort));
             }
             builder.uris(uris);
+        }
+    }
+
+    private static String endpointToUri(String scheme, String endpoint, int defaultPort) {
+        try {
+            URI parsed = new URI(scheme + "://" + endpoint);
+            String host = parsed.getHost();
+            if (host == null || host.isEmpty()) {
+                throw new IllegalArgumentException(
+                        "Invalid endpoint '" + endpoint + "'. Expected host, host:port, [ipv6], or [ipv6]:port");
+            }
+            int port = parsed.getPort() >= 0 ? parsed.getPort() : defaultPort;
+            return new URI(scheme, null, host, port, null, null, null).toString();
+        } catch (URISyntaxException | IllegalArgumentException e) {
+            throw new IllegalArgumentException(
+                    "Invalid endpoint '" + endpoint + "'. Expected host, host:port, [ipv6], or [ipv6]:port",
+                    e);
         }
     }
 

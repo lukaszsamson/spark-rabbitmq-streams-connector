@@ -59,6 +59,23 @@ class EnvironmentBuilderHelperTest {
     }
 
     @Test
+    void endpointParsingSupportsIpv6LiteralWithPort() throws Exception {
+        ConnectorOptions options = new ConnectorOptions(Map.of(
+                "endpoints", "[fe80::1]:6000,hostB",
+                "stream", "test-stream"
+        ));
+
+        StreamEnvironmentBuilder builder = new StreamEnvironmentBuilder();
+        invokeConfigureConnection(builder, options);
+        List<String> uris = getUris(builder);
+
+        assertThat(uris).containsExactly(
+                "rabbitmq-stream://[fe80::1]:6000",
+                "rabbitmq-stream://hostB:5552"
+        );
+    }
+
+    @Test
     void urisParsingUsesFirstTrimmedEntries() throws Exception {
         ConnectorOptions options = new ConnectorOptions(Map.of(
                 "uris", " rabbitmq-stream://h1:5552 ,, rabbitmq-stream://h2:5553 ",
