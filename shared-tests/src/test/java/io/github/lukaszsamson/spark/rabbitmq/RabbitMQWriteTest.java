@@ -853,6 +853,53 @@ class RabbitMQWriteTest {
         }
 
         @Test
+        void commitUnblocksPromptlyWhenProducerClosesWithOutstandingConfirms() throws Exception {
+            Map<String, String> opts = minimalSinkMap();
+            opts.put("publisherConfirmTimeoutMs", "30000");
+            ConnectorOptions options = new ConnectorOptions(opts);
+
+            RabbitMQDataWriter writer = new RabbitMQDataWriter(
+                    options, minimalSinkSchema(), 0, 1, -1);
+            CapturingProducerBuilder builder = new CapturingProducerBuilder();
+            seedEnvironmentPool(options, new BuilderEnvironment(builder));
+            writer.write(new GenericInternalRow(new Object[]{"x".getBytes()}));
+
+            setPrivateField(writer, "outstandingConfirms", new java.util.concurrent.atomic.AtomicLong(1));
+
+            java.util.concurrent.atomic.AtomicReference<Throwable> commitError =
+                    new java.util.concurrent.atomic.AtomicReference<>();
+            Thread commitThread = new Thread(() -> {
+                try {
+                    writer.commit();
+                } catch (Throwable t) {
+                    commitError.set(t);
+                }
+            }, "rabbitmq-writer-commit-test");
+            commitThread.start();
+
+            long deadlineNanos = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(2);
+            while (commitThread.getState() != Thread.State.WAITING
+                    && commitThread.getState() != Thread.State.TIMED_WAITING
+                    && System.nanoTime() < deadlineNanos) {
+                Thread.sleep(5);
+            }
+
+            builder.listener.handle(new FakeStateListenerContext(
+                    com.rabbitmq.stream.Resource.State.OPEN,
+                    com.rabbitmq.stream.Resource.State.CLOSED));
+
+            commitThread.join(2_000L);
+            if (commitThread.isAlive()) {
+                commitThread.interrupt();
+            }
+
+            assertThat(commitThread.isAlive()).isFalse();
+            assertThat(commitError.get())
+                    .isInstanceOf(IOException.class)
+                    .hasMessageContaining("failed confirmation");
+        }
+
+        @Test
         void superstreamCustomRoutingStrategyInvokesStrategy() throws Exception {
             TestRoutingStrategy.invoked = false;
             TestRoutingStrategy.routeLookupInvoked = false;

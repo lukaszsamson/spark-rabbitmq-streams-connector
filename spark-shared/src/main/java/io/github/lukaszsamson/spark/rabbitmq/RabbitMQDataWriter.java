@@ -146,7 +146,8 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
                     publishConfirms.incrementAndGet();
                 }
                 synchronized (confirmMonitor) {
-                    if (outstandingConfirms.decrementAndGet() == 0) {
+                    long remaining = outstandingConfirms.decrementAndGet();
+                    if (remaining == 0 || sendError.get() != null) {
                         confirmMonitor.notifyAll();
                     }
                 }
@@ -173,6 +174,12 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
             long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
             synchronized (confirmMonitor) {
                 while (outstandingConfirms.get() > 0) {
+                    Throwable error = sendError.get();
+                    if (error != null) {
+                        throw new IOException(
+                                "One or more messages failed confirmation on partition "
+                                        + partitionId, error);
+                    }
                     long remainingNanos = deadlineNanos - System.nanoTime();
                     if (remainingNanos <= 0) {
                         throw new IOException(
@@ -323,6 +330,9 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
                         partitionId, from, to);
                 sendError.compareAndSet(null,
                         new IOException("Producer closed unexpectedly on partition " + partitionId));
+                synchronized (confirmMonitor) {
+                    confirmMonitor.notifyAll();
+                }
             } else {
                 LOG.debug("Producer for partition {} state change: {}->{}",
                         partitionId, from, to);
