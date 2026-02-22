@@ -1,5 +1,6 @@
 package io.github.lukaszsamson.spark.rabbitmq;
 
+import com.rabbitmq.stream.ConsumerFlowStrategy;
 import com.rabbitmq.stream.Environment;
 import com.rabbitmq.stream.NoOffsetException;
 import com.rabbitmq.stream.StreamDoesNotExistException;
@@ -948,6 +949,10 @@ class BaseRabbitMQMicroBatchStream
                     .offset(com.rabbitmq.stream.OffsetSpecification.last())
                     .noTrackingStrategy()
                     .messageHandler((context, message) -> observedOffsets.offer(context.offset()))
+                    .flow()
+                    .initialCredits(1)
+                    .strategy(ConsumerFlowStrategy.creditWhenHalfMessagesProcessed(1))
+                    .builder()
                     .build();
 
             Long first = observedOffsets.poll(250, TimeUnit.MILLISECONDS);
@@ -1023,6 +1028,10 @@ class BaseRabbitMQMicroBatchStream
                     .offset(com.rabbitmq.stream.OffsetSpecification.timestamp(timestamp))
                     .noTrackingStrategy()
                     .messageHandler((context, message) -> observedOffsets.offer(context.offset()))
+                    .flow()
+                    .initialCredits(1)
+                    .strategy(ConsumerFlowStrategy.creditWhenHalfMessagesProcessed(1))
+                    .builder()
                     .build();
 
             Long observed = observedOffsets.poll(timestampStartProbeTimeoutMs(), TimeUnit.MILLISECONDS);

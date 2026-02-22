@@ -1876,7 +1876,7 @@ class RabbitMQMicroBatchStreamTest {
 
         @Override
         public ConsumerBuilder.FlowConfiguration flow() {
-            throw new UnsupportedOperationException();
+            return new NoopFlowConfiguration(this);
         }
 
         @Override
@@ -2156,7 +2156,7 @@ class RabbitMQMicroBatchStreamTest {
 
         @Override
         public ConsumerBuilder.FlowConfiguration flow() {
-            throw new UnsupportedOperationException();
+            return new NoopFlowConfiguration(this);
         }
 
         @Override
@@ -2255,7 +2255,7 @@ class RabbitMQMicroBatchStreamTest {
 
         @Override
         public ConsumerBuilder.FlowConfiguration flow() {
-            throw new UnsupportedOperationException();
+            return new NoopFlowConfiguration(this);
         }
 
         @Override
@@ -2356,6 +2356,32 @@ class RabbitMQMicroBatchStreamTest {
         @Override
         public com.rabbitmq.stream.ConsumerBuilder.AutoTrackingStrategy flushInterval(
                 java.time.Duration flushInterval) {
+            return this;
+        }
+
+        @Override
+        public com.rabbitmq.stream.ConsumerBuilder builder() {
+            return builder;
+        }
+    }
+
+    private static final class NoopFlowConfiguration
+            implements com.rabbitmq.stream.ConsumerBuilder.FlowConfiguration {
+        private final com.rabbitmq.stream.ConsumerBuilder builder;
+
+        private NoopFlowConfiguration(com.rabbitmq.stream.ConsumerBuilder builder) {
+            this.builder = builder;
+        }
+
+        @Override
+        public com.rabbitmq.stream.ConsumerBuilder.FlowConfiguration strategy(
+                com.rabbitmq.stream.ConsumerFlowStrategy strategy) {
+            return this;
+        }
+
+        @Override
+        public com.rabbitmq.stream.ConsumerBuilder.FlowConfiguration initialCredits(
+                int initialCredits) {
             return this;
         }
 
@@ -2572,7 +2598,7 @@ class RabbitMQMicroBatchStreamTest {
 
         @Override
         public ConsumerBuilder.FlowConfiguration flow() {
-            throw new UnsupportedOperationException();
+            return new NoopFlowConfiguration(this);
         }
 
         @Override

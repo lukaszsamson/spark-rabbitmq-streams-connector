@@ -633,7 +633,7 @@ class RabbitMQScanTest {
 
         @Override
         public ConsumerBuilder.FlowConfiguration flow() {
-            throw new UnsupportedOperationException();
+            return new NoopFlowConfiguration(this);
         }
 
         @Override
@@ -715,7 +715,7 @@ class RabbitMQScanTest {
 
         @Override
         public ConsumerBuilder.FlowConfiguration flow() {
-            throw new UnsupportedOperationException();
+            return new NoopFlowConfiguration(this);
         }
 
         @Override
@@ -808,7 +808,7 @@ class RabbitMQScanTest {
 
         @Override
         public ConsumerBuilder.FlowConfiguration flow() {
-            throw new UnsupportedOperationException();
+            return new NoopFlowConfiguration(this);
         }
 
         @Override
@@ -901,6 +901,30 @@ class RabbitMQScanTest {
 
         @Override
         public ConsumerBuilder.ManualTrackingStrategy checkInterval(java.time.Duration checkInterval) {
+            return this;
+        }
+
+        @Override
+        public ConsumerBuilder builder() {
+            return builder;
+        }
+    }
+
+    private static final class NoopFlowConfiguration implements ConsumerBuilder.FlowConfiguration {
+        private final ConsumerBuilder builder;
+
+        private NoopFlowConfiguration(ConsumerBuilder builder) {
+            this.builder = builder;
+        }
+
+        @Override
+        public ConsumerBuilder.FlowConfiguration strategy(
+                com.rabbitmq.stream.ConsumerFlowStrategy strategy) {
+            return this;
+        }
+
+        @Override
+        public ConsumerBuilder.FlowConfiguration initialCredits(int initialCredits) {
             return this;
         }
 
