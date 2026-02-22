@@ -327,6 +327,16 @@ class ConnectorOptionsTest {
         }
 
         @Test
+        void parsesStartingOffsetsByTimestampWithEscapedBackslashBeforeQuote() {
+            var map = minimalStreamOptions();
+            map.put("startingOffsetsByTimestamp", "{\"a\\\\\":1,\"x\":2}");
+            var opts = new ConnectorOptions(map);
+            assertThat(opts.getStartingOffsetsByTimestamp())
+                    .containsEntry("a\\\\", 1L)
+                    .containsEntry("x", 2L);
+        }
+
+        @Test
         void startingOffsetsCaseInsensitive() {
             var map = minimalStreamOptions();
             map.put("startingOffsets", "LATEST");

@@ -991,7 +991,7 @@ public final class ConnectorOptions implements Serializable {
         int start = 0;
         for (int i = 0; i < inner.length(); i++) {
             char c = inner.charAt(i);
-            if (c == '"' && (i == 0 || inner.charAt(i - 1) != '\\')) {
+            if (c == '"' && !isEscapedByOddBackslashes(inner, i)) {
                 inQuote = !inQuote;
             } else if (!inQuote) {
                 if (c == '{') depth++;
@@ -1006,6 +1006,14 @@ public final class ConnectorOptions implements Serializable {
             pairs.add(inner.substring(start));
         }
         return pairs;
+    }
+
+    private static boolean isEscapedByOddBackslashes(String s, int index) {
+        int backslashCount = 0;
+        for (int i = index - 1; i >= 0 && s.charAt(i) == '\\'; i--) {
+            backslashCount++;
+        }
+        return (backslashCount & 1) == 1;
     }
 
     private static List<String> parseCommaSeparated(String value) {
