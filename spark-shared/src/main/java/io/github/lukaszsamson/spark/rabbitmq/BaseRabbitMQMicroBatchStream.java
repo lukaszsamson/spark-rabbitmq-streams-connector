@@ -74,6 +74,8 @@ class BaseRabbitMQMicroBatchStream
     volatile Map<String, Long> initialOffsets;
     /** Last end offsets successfully persisted to broker (next offsets). */
     volatile Map<String, Long> lastStoredEndOffsets;
+    /** Last end offsets committed by Spark (next offsets). */
+    volatile Map<String, Long> lastCommittedEndOffsets;
     /** Timestamp (epoch millis) of the last trigger that produced a non-empty batch. */
     volatile long lastTriggerMillis = System.currentTimeMillis();
     /** Recent per-stream tail probe results used by latestOffset planning. */
@@ -200,18 +202,19 @@ class BaseRabbitMQMicroBatchStream
         }
 
         RabbitMQStreamOffset endOffset = (RabbitMQStreamOffset) end;
-        persistBrokerOffsets(endOffset.getStreamOffsets());
+        Map<String, Long> committed = new LinkedHashMap<>(endOffset.getStreamOffsets());
+        lastCommittedEndOffsets = committed;
+        persistBrokerOffsets(committed);
     }
 
     @Override
     public void stop() {
-        // Spark can stop AvailableNow queries after the final processed batch without invoking
-        // source commit for that terminal offset. Persist the latest known end offsets as
-        // best-effort broker metadata before shutting down commit resources.
-        RabbitMQStreamOffset latest = cachedLatestOffset;
-        if (latest != null) {
+        // Persist only Spark-committed offsets (never planned offsets) as best-effort metadata
+        // before shutdown, to avoid writing broker offsets ahead of processed data.
+        Map<String, Long> committed = lastCommittedEndOffsets;
+        if (committed != null && !committed.isEmpty()) {
             try {
-                persistBrokerOffsets(latest.getStreamOffsets());
+                persistBrokerOffsets(committed);
             } catch (Exception e) {
                 LOG.warn("Failed to persist broker offsets during stop()", e);
             }

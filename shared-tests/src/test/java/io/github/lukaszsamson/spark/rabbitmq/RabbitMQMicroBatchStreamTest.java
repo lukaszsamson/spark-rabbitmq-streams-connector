@@ -854,7 +854,7 @@ class RabbitMQMicroBatchStreamTest {
     class CommitAndStopBehavior {
 
         @Test
-        void stopPersistsCachedOffsetsWhenCommitNotCalled() throws Exception {
+        void stopDoesNotPersistCachedOffsetsWhenCommitNotCalled() throws Exception {
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
             opts.put("stream", "test-stream");
@@ -864,6 +864,25 @@ class RabbitMQMicroBatchStreamTest {
             setPrivateField(stream, "environment", env);
             setPrivateField(stream, "cachedLatestOffset",
                     new RabbitMQStreamOffset(Map.of("test-stream", 10L)));
+
+            stream.stop();
+
+            assertThat(env.recordedOffsets).isEmpty();
+        }
+
+        @Test
+        void stopPersistsLastCommittedOffsetsNotCachedLatest() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            OffsetTrackingEnvironment env = new OffsetTrackingEnvironment();
+            setPrivateField(stream, "environment", env);
+            setPrivateField(stream, "cachedLatestOffset",
+                    new RabbitMQStreamOffset(Map.of("test-stream", 20L)));
+            setPrivateField(stream, "lastCommittedEndOffsets",
+                    new LinkedHashMap<>(Map.of("test-stream", 10L)));
 
             stream.stop();
 
