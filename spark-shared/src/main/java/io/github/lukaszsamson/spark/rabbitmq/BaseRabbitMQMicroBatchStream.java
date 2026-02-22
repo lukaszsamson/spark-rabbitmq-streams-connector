@@ -40,6 +40,8 @@ class BaseRabbitMQMicroBatchStream
 
     /** Timeout for broker offset commit (best-effort, Spark checkpoint is source of truth). */
     static final int COMMIT_TIMEOUT_SECONDS = 30;
+    /** Reuse latest-offset tail probe results briefly to avoid per-trigger consumer churn. */
+    static final long LATEST_TAIL_PROBE_CACHE_WINDOW_MS = 1_000L;
 
     final ConnectorOptions options;
     final StructType schema;
@@ -72,6 +74,10 @@ class BaseRabbitMQMicroBatchStream
     volatile Map<String, Long> lastStoredEndOffsets;
     /** Timestamp (epoch millis) of the last trigger that produced a non-empty batch. */
     volatile long lastTriggerMillis = System.currentTimeMillis();
+    /** Recent per-stream tail probe results used by latestOffset planning. */
+    final ConcurrentHashMap<String, CachedTailProbe> latestTailProbeCache = new ConcurrentHashMap<>();
+
+    record CachedTailProbe(long tailExclusive, long expiresAtNanos) {}
 
     BaseRabbitMQMicroBatchStream(ConnectorOptions options, StructType schema,
                               String checkpointLocation) {
@@ -207,6 +213,7 @@ class BaseRabbitMQMicroBatchStream
         }
 
         brokerCommitExecutor.shutdownNow();
+        latestTailProbeCache.clear();
         if (environment != null) {
             try {
                 environment.close();
@@ -848,6 +855,10 @@ class BaseRabbitMQMicroBatchStream
         List<String> streams = discoverStreams();
         Environment env = getEnvironment();
         Map<String, Long> tailOffsets = new LinkedHashMap<>();
+        if (!latestTailProbeCache.isEmpty()) {
+            Set<String> activeStreams = new HashSet<>(streams);
+            latestTailProbeCache.keySet().removeIf(stream -> !activeStreams.contains(stream));
+        }
 
         for (String stream : streams) {
             long tail = queryStreamTailOffsetForLatest(env, stream);
@@ -1012,8 +1023,23 @@ class BaseRabbitMQMicroBatchStream
 
     private long queryStreamTailOffsetForLatest(Environment env, String stream) {
         long statsTail = queryStreamTailOffset(env, stream);
-        long probedTail = probeTailOffsetFromLastMessage(env, stream);
+        long probedTail = probeTailOffsetForLatestWithCache(env, stream);
         return Math.max(statsTail, probedTail);
+    }
+
+    private long probeTailOffsetForLatestWithCache(Environment env, String stream) {
+        long nowNanos = System.nanoTime();
+        CachedTailProbe cached = latestTailProbeCache.get(stream);
+        if (cached != null && nowNanos < cached.expiresAtNanos()) {
+            return cached.tailExclusive();
+        }
+        long probedTail = probeTailOffsetFromLastMessage(env, stream);
+        latestTailProbeCache.put(
+                stream,
+                new CachedTailProbe(
+                        probedTail,
+                        nowNanos + TimeUnit.MILLISECONDS.toNanos(LATEST_TAIL_PROBE_CACHE_WINDOW_MS)));
+        return probedTail;
     }
 
     private long queryStreamTailOffsetForAvailableNow(Environment env, String stream) {

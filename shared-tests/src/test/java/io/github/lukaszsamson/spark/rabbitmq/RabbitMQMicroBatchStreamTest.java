@@ -681,6 +681,24 @@ class RabbitMQMicroBatchStreamTest {
             RabbitMQStreamOffset offset = (RabbitMQStreamOffset) stream.initialOffset();
             assertThat(offset.getStreamOffsets()).containsEntry("test-stream", 42L);
         }
+
+        @Test
+        void latestOffsetReusesRecentTailProbeAcrossCalls() throws Exception {
+            RabbitMQMicroBatchStream stream = createStream(minimalOptions());
+            ProbeCountingEnvironment env = new ProbeCountingEnvironment(10L, java.util.List.of(14L));
+            setPrivateField(stream, "environment", env);
+
+            RabbitMQStreamOffset start = new RabbitMQStreamOffset(Map.of("test-stream", 0L));
+            RabbitMQStreamOffset first =
+                    (RabbitMQStreamOffset) stream.latestOffset(start, ReadLimit.allAvailable());
+            RabbitMQStreamOffset second =
+                    (RabbitMQStreamOffset) stream.latestOffset(start, ReadLimit.allAvailable());
+
+            assertThat(first.getStreamOffsets()).containsEntry("test-stream", 15L);
+            assertThat(second.getStreamOffsets()).containsEntry("test-stream", 15L);
+            assertThat(env.queryStatsCalls).isEqualTo(2);
+            assertThat(env.probeBuilderCalls).isEqualTo(1);
+        }
     }
 
     @Nested
@@ -1409,6 +1427,64 @@ class RabbitMQMicroBatchStreamTest {
         @Override
         public com.rabbitmq.stream.ConsumerBuilder consumerBuilder() {
             return new ProbingConsumerBuilder();
+        }
+
+        @Override
+        public void close() {
+        }
+    }
+
+    private static final class ProbeCountingEnvironment implements com.rabbitmq.stream.Environment {
+        private final long committedOffset;
+        private final java.util.List<Long> probeOffsets;
+        private int queryStatsCalls = 0;
+        private int probeBuilderCalls = 0;
+
+        private ProbeCountingEnvironment(long committedOffset, java.util.List<Long> probeOffsets) {
+            this.committedOffset = committedOffset;
+            this.probeOffsets = probeOffsets;
+        }
+
+        @Override
+        public com.rabbitmq.stream.StreamCreator streamCreator() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void deleteStream(String stream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void deleteSuperStream(String superStream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public com.rabbitmq.stream.StreamStats queryStreamStats(String stream) {
+            queryStatsCalls++;
+            return new FixedStreamStats(committedOffset);
+        }
+
+        @Override
+        public void storeOffset(String reference, String stream, long offset) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public boolean streamExists(String stream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public com.rabbitmq.stream.ProducerBuilder producerBuilder() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public com.rabbitmq.stream.ConsumerBuilder consumerBuilder() {
+            probeBuilderCalls++;
+            return new FixedOffsetProbeConsumerBuilder(probeOffsets);
         }
 
         @Override
