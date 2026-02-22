@@ -14,6 +14,8 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 /**
  * Looks up stored consumer offsets from the RabbitMQ broker.
@@ -34,6 +36,7 @@ final class StoredOffsetLookup {
 
     /** Maximum concurrent tracking consumers per lookup batch. */
     static final int MAX_CONCURRENT_LOOKUPS = 20;
+    static final long LOOKUP_FUTURE_TIMEOUT_MS = 30_000L;
 
     private StoredOffsetLookup() {}
 
@@ -81,7 +84,12 @@ final class StoredOffsetLookup {
      * @throws IllegalStateException if a fatal error occurs (auth, connection)
      */
     static LookupResult lookupWithDetails(Environment env, String consumerName,
-                                           List<String> streams) {
+                                            List<String> streams) {
+        return lookupWithDetails(env, consumerName, streams, LOOKUP_FUTURE_TIMEOUT_MS);
+    }
+
+    static LookupResult lookupWithDetails(Environment env, String consumerName,
+                                            List<String> streams, long futureTimeoutMs) {
         Map<String, Long> offsets = new LinkedHashMap<>();
         List<String> failed = new java.util.ArrayList<>();
 
@@ -92,6 +100,7 @@ final class StoredOffsetLookup {
         // Bounded thread pool for concurrent lookups — avoids exceeding
         // the broker's tracking consumer limit (~50 per connection)
         int poolSize = Math.min(streams.size(), MAX_CONCURRENT_LOOKUPS);
+        long effectiveTimeoutMs = Math.max(1L, futureTimeoutMs);
         ExecutorService executor = Executors.newFixedThreadPool(poolSize);
         try {
             // Submit all lookups concurrently
@@ -110,7 +119,7 @@ final class StoredOffsetLookup {
                 }
                 String stream = entry.getKey();
                 try {
-                    Long nextOffset = entry.getValue().get();
+                    Long nextOffset = entry.getValue().get(effectiveTimeoutMs, TimeUnit.MILLISECONDS);
                     if (nextOffset != null) {
                         offsets.put(stream, nextOffset);
                     }
@@ -130,6 +139,12 @@ final class StoredOffsetLookup {
                                 cause != null ? cause.getMessage() : e.getMessage());
                         failed.add(stream);
                     }
+                } catch (TimeoutException e) {
+                    entry.getValue().cancel(true);
+                    throw new IllegalStateException(
+                            "Timed out waiting for stored offset lookup for consumer '" +
+                                    consumerName + "' on stream '" + stream + "' after " +
+                                    effectiveTimeoutMs + "ms", e);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     throw new IllegalStateException(

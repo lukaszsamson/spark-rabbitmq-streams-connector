@@ -119,6 +119,22 @@ class StoredOffsetLookupTest {
         }
 
         @Test
+        void stalledLookupTimesOutAndFailsFast() {
+            Environment env = new FixedBehaviorEnvironment(Map.of(
+                    "s1", LookupBehavior.delayedStoredOffset(1L, 500L)
+            ));
+
+            long startNanos = System.nanoTime();
+            assertThatThrownBy(() -> StoredOffsetLookup.lookupWithDetails(env, "c",
+                    List.of("s1"), 20L))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("Timed out waiting for stored offset lookup");
+            long elapsedMs = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(
+                    System.nanoTime() - startNanos);
+            assertThat(elapsedMs).isLessThan(1000L);
+        }
+
+        @Test
         void fatalExceptionClassifiedByMessage() {
             Exception fatal = new RuntimeException("authentication failed");
             assertThatThrownBy(() -> invokeIsFatal(fatal)).isInstanceOf(IllegalStateException.class);
@@ -178,21 +194,26 @@ class StoredOffsetLookupTest {
         }
     }
 
-    private record LookupBehavior(Long storedOffset, boolean noOffset, boolean fatal, boolean nonFatal) {
+    private record LookupBehavior(
+            Long storedOffset, boolean noOffset, boolean fatal, boolean nonFatal, long buildDelayMs) {
         static LookupBehavior withStoredOffset(long value) {
-            return new LookupBehavior(value, false, false, false);
+            return new LookupBehavior(value, false, false, false, 0L);
         }
 
         static LookupBehavior withoutOffset() {
-            return new LookupBehavior(null, true, false, false);
+            return new LookupBehavior(null, true, false, false, 0L);
         }
 
         static LookupBehavior fatalFailure() {
-            return new LookupBehavior(null, false, true, false);
+            return new LookupBehavior(null, false, true, false, 0L);
         }
 
         static LookupBehavior nonFatalFailure() {
-            return new LookupBehavior(null, false, false, true);
+            return new LookupBehavior(null, false, false, true, 0L);
+        }
+
+        static LookupBehavior delayedStoredOffset(long value, long delayMs) {
+            return new LookupBehavior(value, false, false, false, delayMs);
         }
     }
 
@@ -332,6 +353,14 @@ class StoredOffsetLookupTest {
         @Override
         public com.rabbitmq.stream.Consumer build() {
             LookupBehavior behavior = behaviors.getOrDefault(stream, LookupBehavior.withoutOffset());
+            if (behavior.buildDelayMs() > 0) {
+                try {
+                    Thread.sleep(behavior.buildDelayMs());
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new RuntimeException("interrupted", e);
+                }
+            }
             if (behavior.fatal()) {
                 throw new RuntimeException("authentication failed");
             }
