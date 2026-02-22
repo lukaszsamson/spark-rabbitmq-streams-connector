@@ -204,6 +204,50 @@ class RabbitMQPartitionReaderTest {
         }
 
         @Test
+        void nextDetectsConsumerClosurePromptlyDuringLongPoll() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("pollTimeoutMs", "30000");
+            opts.put("maxWaitMs", "30000");
+
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 0, 10, new ConnectorOptions(opts));
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
+
+            java.util.concurrent.atomic.AtomicBoolean closed = new java.util.concurrent.atomic.AtomicBoolean(false);
+            setPrivateField(reader, "consumer", new NoopConsumer());
+            setPrivateField(reader, "queue", new LinkedBlockingQueue<>());
+            setPrivateField(reader, "consumerClosed", closed);
+
+            java.util.concurrent.atomic.AtomicReference<Throwable> failure =
+                    new java.util.concurrent.atomic.AtomicReference<>();
+            long startNanos = System.nanoTime();
+            Thread worker = new Thread(() -> {
+                try {
+                    reader.next();
+                } catch (Throwable t) {
+                    failure.set(t);
+                }
+            }, "partition-reader-closure-test");
+            worker.start();
+
+            Thread.sleep(50L);
+            closed.set(true);
+            worker.join(2_000L);
+            if (worker.isAlive()) {
+                worker.interrupt();
+            }
+
+            long elapsedMs = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
+            assertThat(worker.isAlive()).isFalse();
+            assertThat(failure.get())
+                    .isInstanceOf(IOException.class)
+                    .hasMessageContaining("closed before reaching target end offset");
+            assertThat(elapsedMs).isLessThan(1_000L);
+        }
+
+        @Test
         void nextTimestampInitialSplitWithoutInRangeDataTerminatesInsteadOfTimingOut() throws Exception {
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");

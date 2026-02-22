@@ -36,6 +36,7 @@ import java.util.concurrent.atomic.AtomicReference;
 class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
 
     static final Logger LOG = LoggerFactory.getLogger(BaseRabbitMQPartitionReader.class);
+    private static final long CLOSED_CHECK_INTERVAL_MS = 100L;
     final String stream;
     final long startOffset;
     final long endOffset;
@@ -119,6 +120,7 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
         long totalWaitMs = 0;
         long pollTimeoutMs = options.getPollTimeoutMs();
         long maxWaitMs = options.getMaxWaitMs();
+        long pollSliceMs = Math.max(1L, Math.min(pollTimeoutMs, CLOSED_CHECK_INTERVAL_MS));
 
         while (true) {
             if ((lastEmittedOffset >= 0 && lastEmittedOffset >= endOffset - 1)
@@ -136,7 +138,7 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
             QueuedMessage qm;
             try {
                 long pollStart = System.nanoTime();
-                qm = queue.poll(pollTimeoutMs, TimeUnit.MILLISECONDS);
+                qm = queue.poll(pollSliceMs, TimeUnit.MILLISECONDS);
                 pollWaitMs += TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - pollStart);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
@@ -168,7 +170,7 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
                     finished = true;
                     return false;
                 }
-                totalWaitMs += pollTimeoutMs;
+                totalWaitMs += pollSliceMs;
                 if (totalWaitMs >= maxWaitMs) {
                     if (timestampStart) {
                         LOG.warn("Reached maxWaitMs={} while reading filtered stream '{}'; " +
