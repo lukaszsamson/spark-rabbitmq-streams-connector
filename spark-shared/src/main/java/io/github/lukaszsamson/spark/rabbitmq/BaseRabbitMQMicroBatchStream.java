@@ -1140,6 +1140,7 @@ class BaseRabbitMQMicroBatchStream
 
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(COMMIT_TIMEOUT_SECONDS);
         boolean cancelOutstanding = false;
+        boolean commitObservationComplete = true;
         for (Future<?> f : futures) {
             long remaining = deadline - System.nanoTime();
             if (remaining <= 0) {
@@ -1147,6 +1148,7 @@ class BaseRabbitMQMicroBatchStream
                                 "(best-effort, Spark checkpoint is source of truth)",
                         COMMIT_TIMEOUT_SECONDS);
                 cancelOutstanding = true;
+                commitObservationComplete = false;
                 break;
             }
             try {
@@ -1156,13 +1158,16 @@ class BaseRabbitMQMicroBatchStream
                                 "(best-effort, Spark checkpoint is source of truth)",
                         COMMIT_TIMEOUT_SECONDS);
                 cancelOutstanding = true;
+                commitObservationComplete = false;
                 break;
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 cancelOutstanding = true;
+                commitObservationComplete = false;
                 break;
             } catch (ExecutionException e) {
                 // Already logged in task
+                commitObservationComplete = false;
             }
         }
         if (cancelOutstanding) {
@@ -1173,7 +1178,9 @@ class BaseRabbitMQMicroBatchStream
             }
         }
 
-        lastStoredEndOffsets = new LinkedHashMap<>(endOffsets);
+        if (commitObservationComplete) {
+            lastStoredEndOffsets = new LinkedHashMap<>(endOffsets);
+        }
     }
 
     private boolean isMissingStreamException(Throwable throwable) {

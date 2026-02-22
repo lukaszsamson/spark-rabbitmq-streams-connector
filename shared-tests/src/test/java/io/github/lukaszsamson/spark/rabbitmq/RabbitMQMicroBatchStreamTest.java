@@ -863,6 +863,27 @@ class RabbitMQMicroBatchStreamTest {
             assertThat(env.recordedOffsets).containsExactly(Map.entry("test-stream", 9L));
             assertThat(env.queryStatsCalls).isZero();
         }
+
+        @Test
+        void persistBrokerOffsetsDoesNotCacheWhenCommitFutureHasExecutionFailure() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            ExecutionFailureOffsetTrackingEnvironment env =
+                    new ExecutionFailureOffsetTrackingEnvironment("s2");
+            setPrivateField(stream, "environment", env);
+
+            RabbitMQStreamOffset end = new RabbitMQStreamOffset(Map.of("s1", 10L, "s2", 20L));
+            stream.commit(end);
+            stream.commit(end);
+
+            long s1Stores = env.recordedOffsets.stream()
+                    .filter(entry -> "s1".equals(entry.getKey()))
+                    .count();
+            assertThat(s1Stores).isEqualTo(2L);
+        }
     }
 
     @Nested
@@ -2171,6 +2192,23 @@ class RabbitMQMicroBatchStreamTest {
         public com.rabbitmq.stream.StreamStats queryStreamStats(String stream) {
             queryStatsCalls++;
             throw new UnsupportedOperationException();
+        }
+    }
+
+    private static final class ExecutionFailureOffsetTrackingEnvironment
+            extends OffsetTrackingEnvironment {
+        private final String failingStream;
+
+        private ExecutionFailureOffsetTrackingEnvironment(String failingStream) {
+            this.failingStream = failingStream;
+        }
+
+        @Override
+        public void storeOffset(String reference, String stream, long offset) {
+            if (failingStream.equals(stream)) {
+                throw new AssertionError("synthetic future execution failure");
+            }
+            super.storeOffset(reference, stream, offset);
         }
     }
 
