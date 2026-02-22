@@ -297,6 +297,34 @@ class RabbitMQPartitionReaderTest {
         }
 
         @Test
+        void startOffsetOutOfRangeFailsWhenFailOnDataLossTrue() {
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 5, 6, minimalOptions());
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
+
+            assertThatThrownBy(() -> reader.handleStartOffsetOutOfRange(7L))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("before first available")
+                    .hasMessageContaining("failOnDataLoss=false");
+            assertThat(reader.currentMetricsValues()[4].value()).isEqualTo(1L);
+        }
+
+        @Test
+        void startOffsetOutOfRangeContinuesWhenFailOnDataLossFalse() {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("failOnDataLoss", "false");
+
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 5, 6, new ConnectorOptions(opts));
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
+
+            reader.handleStartOffsetOutOfRange(7L);
+            assertThat(reader.currentMetricsValues()[4].value()).isEqualTo(1L);
+        }
+
+        @Test
         void nextEnforcesEndOffsetExclusive() throws Exception {
             RabbitMQInputPartition partition = new RabbitMQInputPartition(
                     "test-stream", 0, 10, minimalOptions());

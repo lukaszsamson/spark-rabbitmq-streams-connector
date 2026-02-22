@@ -348,10 +348,10 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
             StreamStats stats = environment.queryStreamStats(stream);
             long firstAvailable = stats.firstOffset();
             if (startOffset < firstAvailable) {
-                offsetOutOfRange++;
-                LOG.warn("Start offset {} is before first available {} in stream '{}' " +
-                        "(retention truncation detected)", startOffset, firstAvailable, stream);
+                handleStartOffsetOutOfRange(firstAvailable);
             }
+        } catch (IllegalStateException e) {
+            throw e;
         } catch (Exception e) {
             // Non-fatal: cannot check, proceed without metric
             LOG.debug("Cannot check offset range for stream '{}': {}", stream, e.getMessage());
@@ -443,6 +443,18 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
 
         LOG.info("Opened consumer for stream '{}' with offsets [{}, {})",
                 stream, startOffset, endOffset);
+    }
+
+    void handleStartOffsetOutOfRange(long firstAvailable) {
+        offsetOutOfRange++;
+        String message = "Start offset " + startOffset + " is before first available "
+                + firstAvailable + " in stream '" + stream
+                + "' (retention truncation detected)";
+        if (options.isFailOnDataLoss()) {
+            throw new IllegalStateException(
+                    message + ". Set failOnDataLoss=false to skip lost data.");
+        }
+        LOG.warn("{}; continuing because failOnDataLoss=false", message);
     }
 
     OffsetSpecification resolveOffsetSpec() {
