@@ -1153,15 +1153,15 @@ class ConnectorOptionsTest {
         }
 
         @Test
-        void rejectsNonPositiveStartingTimestamp() {
+        void rejectsNegativeStartingTimestamp() {
             var map = minimalStreamOptions();
             map.put("startingOffsets", "timestamp");
-            map.put("startingTimestamp", "0");
+            map.put("startingTimestamp", "-1");
             var opts = new ConnectorOptions(map);
             assertThatThrownBy(opts::validateForSource)
                     .isInstanceOf(IllegalArgumentException.class)
                     .hasMessageContaining("startingTimestamp")
-                    .hasMessageContaining("> 0");
+                    .hasMessageContaining(">= 0");
         }
 
         @Test
