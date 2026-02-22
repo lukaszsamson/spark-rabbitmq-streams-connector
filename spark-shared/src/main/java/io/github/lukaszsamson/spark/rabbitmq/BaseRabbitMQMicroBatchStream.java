@@ -68,7 +68,7 @@ class BaseRabbitMQMicroBatchStream
     volatile Map<String, Long> availableNowSnapshot;
 
     /** Running average message size in bytes, for byte-based admission control. */
-    int estimatedMessageSize;
+    volatile int estimatedMessageSize;
     /** Initial offsets resolved for this stream instance (used for timestamp first batch seek). */
     volatile Map<String, Long> initialOffsets;
     /** Last end offsets successfully persisted to broker (next offsets). */
