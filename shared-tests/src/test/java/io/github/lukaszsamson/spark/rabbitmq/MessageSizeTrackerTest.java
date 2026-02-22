@@ -14,6 +14,8 @@ class MessageSizeTrackerTest {
     @BeforeEach
     void resetTracker() {
         MessageSizeTracker.drainAverage(1);
+        MessageSizeTracker.clear("q1");
+        MessageSizeTracker.clear("q2");
     }
 
     @Test
@@ -51,5 +53,17 @@ class MessageSizeTrackerTest {
 
         assertThat(first).isEqualTo(10);
         assertThat(second).isEqualTo(10);
+    }
+
+    @Test
+    void scopedTrackingDoesNotMixAcrossQueries() {
+        MessageSizeTracker.record("q1", 100, 1);
+        MessageSizeTracker.record("q2", 10, 1);
+
+        int firstQuery = MessageSizeTracker.drainAverage("q1", 1);
+        int secondQuery = MessageSizeTracker.drainAverage("q2", 1);
+
+        assertThat(firstQuery).isEqualTo(100);
+        assertThat(secondQuery).isEqualTo(10);
     }
 }

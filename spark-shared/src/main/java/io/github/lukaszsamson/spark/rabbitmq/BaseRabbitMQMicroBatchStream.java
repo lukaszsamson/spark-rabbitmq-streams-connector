@@ -48,6 +48,7 @@ class BaseRabbitMQMicroBatchStream
     final StructType schema;
     final String checkpointLocation;
     final String effectiveConsumerName;
+    final String messageSizeTrackerScope;
     final ExecutorService brokerCommitExecutor;
 
     /** Discovered streams (lazily initialized). */
@@ -86,6 +87,8 @@ class BaseRabbitMQMicroBatchStream
         this.schema = schema;
         this.checkpointLocation = checkpointLocation;
         this.effectiveConsumerName = deriveConsumerName(options, checkpointLocation);
+        this.messageSizeTrackerScope = deriveMessageSizeTrackerScope(
+                checkpointLocation, this.effectiveConsumerName);
         this.brokerCommitExecutor = Executors.newFixedThreadPool(
                 Math.max(1, Math.min(
                         Runtime.getRuntime().availableProcessors(),
@@ -188,7 +191,8 @@ class BaseRabbitMQMicroBatchStream
     @Override
     public void commit(Offset end) {
         // Update running average message size from completed batch readers
-        int updatedSize = MessageSizeTracker.drainAverage(estimatedMessageSize);
+        int updatedSize = MessageSizeTracker.drainAverage(
+                messageSizeTrackerScope, estimatedMessageSize);
         if (updatedSize != estimatedMessageSize) {
             LOG.debug("Updated estimated message size: {} -> {} bytes",
                     estimatedMessageSize, updatedSize);
@@ -215,6 +219,7 @@ class BaseRabbitMQMicroBatchStream
 
         brokerCommitExecutor.shutdownNow();
         latestTailProbeCache.clear();
+        MessageSizeTracker.clear(messageSizeTrackerScope);
         if (environment != null) {
             try {
                 environment.close();
@@ -365,7 +370,8 @@ class BaseRabbitMQMicroBatchStream
             if (numSplits <= 1 || offsetSpan <= 1) {
                 partitions.add(new RabbitMQInputPartition(
                         stream, start, end, options,
-                        useConfiguredStartingOffset(stream, start), location));
+                        useConfiguredStartingOffset(stream, start), location,
+                        messageSizeTrackerScope));
                 continue;
             }
 
@@ -378,7 +384,8 @@ class BaseRabbitMQMicroBatchStream
                 long splitEnd = currentStart + splitSize;
                 partitions.add(new RabbitMQInputPartition(
                         stream, currentStart, splitEnd, options,
-                        useConfiguredStartingOffset(stream, currentStart), location));
+                        useConfiguredStartingOffset(stream, currentStart), location,
+                        messageSizeTrackerScope));
                 currentStart = splitEnd;
             }
         }
@@ -395,7 +402,8 @@ class BaseRabbitMQMicroBatchStream
             partitions.add(new RabbitMQInputPartition(
                     stream, rangeStart, entry.getValue()[1], options,
                     useConfiguredStartingOffset(stream, rangeStart),
-                    RabbitMQInputPartition.locationForStream(stream)));
+                    RabbitMQInputPartition.locationForStream(stream),
+                    messageSizeTrackerScope));
         }
     }
 
@@ -406,7 +414,8 @@ class BaseRabbitMQMicroBatchStream
         if (numSplits <= 1 || offsetSpan <= 1) {
             partitions.add(new RabbitMQInputPartition(
                     stream, start, end, options,
-                    useConfiguredStartingOffset(stream, start), location));
+                    useConfiguredStartingOffset(stream, start), location,
+                    messageSizeTrackerScope));
             return;
         }
         long chunkSize = offsetSpan / numSplits;
@@ -418,7 +427,8 @@ class BaseRabbitMQMicroBatchStream
             long splitEnd = currentStart + splitSize;
             partitions.add(new RabbitMQInputPartition(
                     stream, currentStart, splitEnd, options,
-                    useConfiguredStartingOffset(stream, currentStart), location));
+                    useConfiguredStartingOffset(stream, currentStart), location,
+                    messageSizeTrackerScope));
             currentStart = splitEnd;
         }
     }
@@ -1124,6 +1134,17 @@ class BaseRabbitMQMicroBatchStream
             return null;
         }
         return "spark-rmq-" + Integer.toUnsignedString(checkpointLocation.hashCode(), 16);
+    }
+
+    private static String deriveMessageSizeTrackerScope(
+            String checkpointLocation, String effectiveConsumerName) {
+        if (checkpointLocation != null && !checkpointLocation.isBlank()) {
+            return "cp-" + Integer.toUnsignedString(checkpointLocation.hashCode(), 16);
+        }
+        if (effectiveConsumerName != null && !effectiveConsumerName.isBlank()) {
+            return "consumer-" + effectiveConsumerName;
+        }
+        return null;
     }
 
     static long resolveTailOffset(StreamStats stats) {

@@ -42,6 +42,7 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
     final long endOffset;
     final ConnectorOptions options;
     final boolean useConfiguredStartingOffset;
+    final String messageSizeTrackerScope;
     final MessageToRowConverter converter;
     final MessagePostFilter postFilter;
 
@@ -81,6 +82,7 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
         this.endOffset = partition.getEndOffset();
         this.options = options;
         this.useConfiguredStartingOffset = partition.isUseConfiguredStartingOffset();
+        this.messageSizeTrackerScope = partition.getMessageSizeTrackerScope();
         this.converter = new MessageToRowConverter(options.getMetadataFields());
         this.postFilter = createPostFilter(options);
         this.queue = new LinkedBlockingQueue<>(options.getQueueCapacity());
@@ -304,7 +306,7 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
         }
         finished = true;
         // Report actual message sizes for running average estimation
-        MessageSizeTracker.record(payloadBytesRead, recordsRead);
+        MessageSizeTracker.record(messageSizeTrackerScope, payloadBytesRead, recordsRead);
         try {
             if (consumer != null) {
                 consumer.close();

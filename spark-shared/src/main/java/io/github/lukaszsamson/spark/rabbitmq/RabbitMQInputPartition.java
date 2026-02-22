@@ -20,6 +20,7 @@ public final class RabbitMQInputPartition implements InputPartition {
     private final ConnectorOptions options;
     private final boolean useConfiguredStartingOffset;
     private final String[] preferredLocations;
+    private final String messageSizeTrackerScope;
 
     /**
      * @param stream the RabbitMQ stream name (or partition stream name for superstreams)
@@ -57,12 +58,20 @@ public final class RabbitMQInputPartition implements InputPartition {
     public RabbitMQInputPartition(String stream, long startOffset, long endOffset,
                                   ConnectorOptions options, boolean useConfiguredStartingOffset,
                                   String[] preferredLocations) {
+        this(stream, startOffset, endOffset, options, useConfiguredStartingOffset,
+                preferredLocations, null);
+    }
+
+    public RabbitMQInputPartition(String stream, long startOffset, long endOffset,
+                                  ConnectorOptions options, boolean useConfiguredStartingOffset,
+                                  String[] preferredLocations, String messageSizeTrackerScope) {
         this.stream = stream;
         this.startOffset = startOffset;
         this.endOffset = endOffset;
         this.options = options;
         this.useConfiguredStartingOffset = useConfiguredStartingOffset;
         this.preferredLocations = preferredLocations;
+        this.messageSizeTrackerScope = messageSizeTrackerScope;
     }
 
     public String getStream() {
@@ -83,6 +92,10 @@ public final class RabbitMQInputPartition implements InputPartition {
 
     public boolean isUseConfiguredStartingOffset() {
         return useConfiguredStartingOffset;
+    }
+
+    public String getMessageSizeTrackerScope() {
+        return messageSizeTrackerScope;
     }
 
     @Override
