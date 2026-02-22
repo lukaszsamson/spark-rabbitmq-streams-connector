@@ -577,7 +577,8 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
                     .noTrackingStrategy()
                     .messageHandler((context, message) -> observedOffsets.offer(context.offset()))
                     .build();
-            Long observed = observedOffsets.poll(5, TimeUnit.SECONDS);
+            long probeTimeoutMs = Math.max(1L, Math.min(250L, options.getMaxWaitMs()));
+            Long observed = observedOffsets.poll(probeTimeoutMs, TimeUnit.MILLISECONDS);
             return observed == null ? -1 : observed;
         } catch (Exception e) {
             LOG.debug("Unable to probe last-message tail offset for stream '{}': {}",

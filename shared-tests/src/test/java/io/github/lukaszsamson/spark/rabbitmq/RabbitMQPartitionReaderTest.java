@@ -18,6 +18,11 @@ import java.util.concurrent.LinkedBlockingQueue;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 /**
  * Unit tests for the push-to-pull bridging logic in RabbitMQPartitionReader.
@@ -614,6 +619,41 @@ class RabbitMQPartitionReaderTest {
             long elapsedMs = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
             // Regression guard: this path used to block ~300s on default maxWaitMs.
             assertThat(elapsedMs).isLessThan(500L);
+        }
+
+        @Test
+        void probeLastMessageOffsetReturnsQuicklyWhenNoMessageArrives() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("maxWaitMs", "20");
+
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 0, 100, new ConnectorOptions(opts));
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
+
+            com.rabbitmq.stream.Environment env = mock(com.rabbitmq.stream.Environment.class);
+            com.rabbitmq.stream.ConsumerBuilder builder = mock(com.rabbitmq.stream.ConsumerBuilder.class);
+            com.rabbitmq.stream.Consumer probe = mock(com.rabbitmq.stream.Consumer.class);
+
+            when(env.consumerBuilder()).thenReturn(builder);
+            when(builder.stream(anyString())).thenReturn(builder);
+            when(builder.offset(any(OffsetSpecification.class))).thenReturn(builder);
+            when(builder.noTrackingStrategy()).thenReturn(builder);
+            when(builder.messageHandler(any(com.rabbitmq.stream.MessageHandler.class))).thenReturn(builder);
+            when(builder.build()).thenReturn(probe);
+
+            setPrivateField(reader, "environment", env);
+
+            Method probeMethod = findMethod(RabbitMQPartitionReader.class, "probeLastMessageOffset");
+            probeMethod.setAccessible(true);
+            long startNanos = System.nanoTime();
+            long observed = (long) probeMethod.invoke(reader);
+            long elapsedMs = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
+
+            assertThat(observed).isEqualTo(-1L);
+            assertThat(elapsedMs).isLessThan(500L);
+            verify(probe).close();
         }
 
         @Test
