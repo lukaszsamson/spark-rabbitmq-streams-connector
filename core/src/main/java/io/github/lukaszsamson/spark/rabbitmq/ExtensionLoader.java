@@ -26,12 +26,24 @@ public final class ExtensionLoader {
      */
     @SuppressWarnings("unchecked")
     public static <T> T load(String className, Class<T> expectedType, String optionName) {
+        ClassLoader contextLoader = Thread.currentThread().getContextClassLoader();
+        ClassLoader fallbackLoader = ExtensionLoader.class.getClassLoader();
         Class<?> clazz;
         try {
-            clazz = Class.forName(className, true, Thread.currentThread().getContextClassLoader());
+            clazz = Class.forName(className, true,
+                    contextLoader != null ? contextLoader : fallbackLoader);
         } catch (ClassNotFoundException e) {
-            throw new IllegalArgumentException(
-                    "Class specified by '" + optionName + "' not found: " + className, e);
+            if (contextLoader != null && fallbackLoader != null && fallbackLoader != contextLoader) {
+                try {
+                    clazz = Class.forName(className, true, fallbackLoader);
+                } catch (ClassNotFoundException ignored) {
+                    throw new IllegalArgumentException(
+                            "Class specified by '" + optionName + "' not found: " + className, e);
+                }
+            } else {
+                throw new IllegalArgumentException(
+                        "Class specified by '" + optionName + "' not found: " + className, e);
+            }
         }
 
         if (!expectedType.isAssignableFrom(clazz)) {

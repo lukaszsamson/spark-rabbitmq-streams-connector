@@ -1654,6 +1654,31 @@ class ConnectorOptionsTest {
                     .isInstanceOf(IllegalArgumentException.class)
                     .hasMessageContaining("does not implement");
         }
+
+        @Test
+        void fallsBackWhenContextClassLoaderCannotLoadExtensionClass() {
+            ClassLoader original = Thread.currentThread().getContextClassLoader();
+            ClassLoader blocking = new ClassLoader(original) {
+                @Override
+                protected Class<?> loadClass(String name, boolean resolve)
+                        throws ClassNotFoundException {
+                    if (name.equals(TestFilterValueExtractor.class.getName())) {
+                        throw new ClassNotFoundException(name);
+                    }
+                    return super.loadClass(name, resolve);
+                }
+            };
+            Thread.currentThread().setContextClassLoader(blocking);
+            try {
+                ConnectorFilterValueExtractor extractor = ExtensionLoader.load(
+                        TestFilterValueExtractor.class.getName(),
+                        ConnectorFilterValueExtractor.class,
+                        "filterValueExtractorClass");
+                assertThat(extractor).isInstanceOf(TestFilterValueExtractor.class);
+            } finally {
+                Thread.currentThread().setContextClassLoader(original);
+            }
+        }
     }
 
     public static final class TestObservationCollectorFactory
