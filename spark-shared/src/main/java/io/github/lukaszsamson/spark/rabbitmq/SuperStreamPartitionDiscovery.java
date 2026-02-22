@@ -1,9 +1,8 @@
 package io.github.lukaszsamson.spark.rabbitmq;
 
 import com.rabbitmq.stream.Environment;
-import com.rabbitmq.stream.Producer;
 import java.util.List;
-import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Function;
 
 /**
  * Discovers partition streams for a RabbitMQ superstream.
@@ -40,23 +39,51 @@ final class SuperStreamPartitionDiscovery {
 
     private static List<String> discoverPartitionsViaEnvironment(Environment environment,
                                                                  String superStream) {
-        AtomicReference<List<String>> partitions = new AtomicReference<>(List.of());
-        Producer producer = environment.producerBuilder()
-                .superStream(superStream)
-                .routing(message -> "")
-                .strategy((message, metadata) -> {
-                    partitions.set(List.copyOf(metadata.partitions()));
-                    return List.of();
-                })
-                .producerBuilder()
-                .build();
         try {
-            producer.send(producer.messageBuilder().addData(new byte[0]).build(),
-                    status -> {});
-            return partitions.get();
-        } finally {
-            producer.close();
+            // Prefer explicit partition query API when available in the client version.
+            try {
+                var queryMethod = environment.getClass()
+                        .getMethod("querySuperStreamPartitions", String.class);
+                Object result = queryMethod.invoke(environment, superStream);
+                return copyPartitions(result);
+            } catch (NoSuchMethodException ignored) {
+                // Fall back to StreamEnvironment locator operation below.
+            }
+
+            var locatorOperation = environment.getClass()
+                    .getDeclaredMethod("locatorOperation", Function.class);
+            locatorOperation.setAccessible(true);
+            Function<Object, List<String>> partitionQuery = client -> {
+                try {
+                    var partitionsMethod = client.getClass().getMethod("partitions", String.class);
+                    return copyPartitions(partitionsMethod.invoke(client, superStream));
+                } catch (ReflectiveOperationException e) {
+                    throw new RuntimeException(e);
+                }
+            };
+            return copyPartitions(locatorOperation.invoke(environment, partitionQuery));
+        } catch (RuntimeException e) {
+            throw e;
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException(
+                    "Failed to query partitions for super stream '" + superStream + "'", e);
         }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<String> copyPartitions(Object value) {
+        if (value == null) {
+            return List.of();
+        }
+        List<?> partitions = (List<?>) value;
+        for (Object partition : partitions) {
+            if (!(partition instanceof String)) {
+                throw new IllegalStateException(
+                        "Unexpected partition metadata type: " +
+                                (partition == null ? "null" : partition.getClass().getName()));
+            }
+        }
+        return (List<String>) List.copyOf(partitions);
     }
 
     @FunctionalInterface
