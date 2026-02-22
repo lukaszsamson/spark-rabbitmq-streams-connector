@@ -8,9 +8,8 @@ import org.apache.spark.sql.connector.read.InputPartition;
  * <p>Carries the stream name, offset range, and connector options needed
  * to create a consumer on the executor.
  *
- * <p>Supports {@link #preferredLocations()} for deterministic executor
- * affinity: the same stream is scheduled to the same executor across
- * micro-batches, improving connection ({@link EnvironmentPool}) reuse.
+ * <p>Supports {@link #preferredLocations()} locality hints when valid
+ * Spark scheduler locations are available.
  */
 public final class RabbitMQInputPartition implements InputPartition {
     private static final long serialVersionUID = 1L;
@@ -92,24 +91,17 @@ public final class RabbitMQInputPartition implements InputPartition {
     }
 
     /**
-     * Compute a deterministic preferred-location hint for a stream name.
-     * This ensures the same stream is consistently scheduled to the same
-     * executor across micro-batches, maximising {@link EnvironmentPool} reuse.
+     * Return preferred locations for the partition stream.
      *
-     * <p>The location is a synthetic host string ({@code "rabbitmq-executor-N"})
-     * that Spark uses as a scheduling preference. The consistency of the hash
-     * is what matters, not the actual host name.
+     * <p>Synthetic location strings are intentionally disabled. Spark expects
+     * preferred locations to map to real scheduler locations (e.g. hosts or
+     * executor cache locations); fabricated values degrade to ANY locality.
      *
      * @param stream the stream name
-     * @return a single-element array with the preferred location
+     * @return an empty array (no preferred location hint)
      */
     static String[] locationForStream(String stream) {
-        // Use unsigned 31-bit hash to get a stable positive bucket.
-        // The bucket count is high enough that collisions are rare across
-        // typical partition counts, but low enough that executor affinity
-        // clusters related partitions rather than fragmenting across all nodes.
-        int bucket = (stream.hashCode() & 0x7FFFFFFF) % 1000;
-        return new String[]{"rabbitmq-executor-" + bucket};
+        return new String[0];
     }
 
     @Override

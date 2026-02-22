@@ -94,6 +94,11 @@ class RabbitMQPartitionReaderTest {
                     .contains("42")
                     .contains("100");
         }
+
+        @Test
+        void locationForStreamDoesNotReturnSyntheticPreferredLocations() {
+            assertThat(RabbitMQInputPartition.locationForStream("orders-1")).isEmpty();
+        }
     }
 
     // ======================================================================
