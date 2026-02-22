@@ -204,7 +204,7 @@ final class RabbitMQScan implements Scan {
     private long resolveStartOffset(Environment env, String stream, long firstAvailable, StreamStats stats) {
         return switch (options.getStartingOffsets()) {
             case EARLIEST -> firstAvailable;
-            case LATEST -> resolveEndOffset(env, stream, stats);
+            case LATEST -> resolveLatestOffset(env, stream, stats);
             case OFFSET -> options.getStartingOffset();
             case TIMESTAMP -> resolveTimestampStartingOffset(env, stream, firstAvailable, stats);
         };
@@ -267,6 +267,10 @@ final class RabbitMQScan implements Scan {
             return options.getEndingOffset();
         }
 
+        return resolveLatestOffset(env, stream, stats);
+    }
+
+    private long resolveLatestOffset(Environment env, String stream, StreamStats stats) {
         // endingOffsets=latest: combine stats-derived tail with a direct last-message probe
         // to avoid underestimating on older broker/client combinations.
         long statsTail = resolveTailOffset(stats);
