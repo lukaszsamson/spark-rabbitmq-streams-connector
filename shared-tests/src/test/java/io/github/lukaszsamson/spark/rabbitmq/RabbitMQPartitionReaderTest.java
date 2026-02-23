@@ -256,6 +256,49 @@ class RabbitMQPartitionReaderTest {
         }
 
         @Test
+        void nextReturnsFalsePromptlyWhenReaderClosedDuringLongPoll() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("pollTimeoutMs", "30000");
+            opts.put("maxWaitMs", "30000");
+
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 0, 10, new ConnectorOptions(opts));
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
+
+            setPrivateField(reader, "consumer", new NoopConsumer());
+            setPrivateField(reader, "queue", new LinkedBlockingQueue<>());
+
+            java.util.concurrent.atomic.AtomicReference<Boolean> result =
+                    new java.util.concurrent.atomic.AtomicReference<>();
+            java.util.concurrent.atomic.AtomicReference<Throwable> failure =
+                    new java.util.concurrent.atomic.AtomicReference<>();
+            long startNanos = System.nanoTime();
+            Thread worker = new Thread(() -> {
+                try {
+                    result.set(reader.next());
+                } catch (Throwable t) {
+                    failure.set(t);
+                }
+            }, "partition-reader-close-test");
+            worker.start();
+
+            Thread.sleep(50L);
+            reader.close();
+            worker.join(2_000L);
+            if (worker.isAlive()) {
+                worker.interrupt();
+            }
+
+            long elapsedMs = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
+            assertThat(worker.isAlive()).isFalse();
+            assertThat(failure.get()).isNull();
+            assertThat(result.get()).isFalse();
+            assertThat(elapsedMs).isLessThan(1_000L);
+        }
+
+        @Test
         void nextTimestampInitialSplitWithoutInRangeDataTerminatesInsteadOfTimingOut() throws Exception {
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");

@@ -97,7 +97,8 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
 
     @Override
     public boolean next() throws IOException {
-        if (finished) {
+        if (finished || closeCalled.get()) {
+            finished = true;
             return false;
         }
 
@@ -133,6 +134,11 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
         long waitStartNanos = System.nanoTime();
 
         while (true) {
+            if (finished || closeCalled.get()) {
+                finished = true;
+                return false;
+            }
+
             if ((lastEmittedOffset >= 0 && lastEmittedOffset >= endOffset - 1)
                     || (lastObservedOffset >= 0 && lastObservedOffset >= endOffset - 1)) {
                 finished = true;
