@@ -578,8 +578,11 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
             StreamStats stats = environment.queryStreamStats(stream);
             long first = stats.firstOffset();
             long tail = resolveTailOffsetInclusive(stats);
+            boolean startWasTruncatedBeforeAnyInRangeProgress =
+                    first > startOffset && lastObservedOffset < startOffset;
             boolean streamWasResetOrTruncated =
-                    tail < startOffset || first > startOffset || (lastObservedOffset >= 0 && tail < lastObservedOffset);
+                    tail < startOffset || startWasTruncatedBeforeAnyInRangeProgress
+                            || (lastObservedOffset >= 0 && tail < lastObservedOffset);
             return tail < endOffset - 1 && streamWasResetOrTruncated;
         } catch (Exception e) {
             if (isMissingStreamException(e)) {

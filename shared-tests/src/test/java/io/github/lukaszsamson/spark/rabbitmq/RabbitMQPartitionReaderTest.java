@@ -964,6 +964,40 @@ class RabbitMQPartitionReaderTest {
         }
 
         @Test
+        void retentionAdvanceAfterInRangeProgressIsNotTreatedAsDataLoss() throws Exception {
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 50, 120, minimalOptions());
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
+
+            com.rabbitmq.stream.Environment env = mock(com.rabbitmq.stream.Environment.class);
+            com.rabbitmq.stream.StreamStats stats = mock(com.rabbitmq.stream.StreamStats.class);
+            when(env.queryStreamStats("test-stream")).thenReturn(stats);
+            when(stats.firstOffset()).thenReturn(60L);
+            when(stats.committedOffset()).thenReturn(80L);
+            setPrivateField(reader, "environment", env);
+            setPrivateField(reader, "lastObservedOffset", 75L);
+
+            assertThat(isPlannedRangeNoLongerReachableDueToDataLoss(reader)).isFalse();
+        }
+
+        @Test
+        void retentionAdvanceBeforeAnyInRangeProgressIsTreatedAsDataLoss() throws Exception {
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 50, 120, minimalOptions());
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
+
+            com.rabbitmq.stream.Environment env = mock(com.rabbitmq.stream.Environment.class);
+            com.rabbitmq.stream.StreamStats stats = mock(com.rabbitmq.stream.StreamStats.class);
+            when(env.queryStreamStats("test-stream")).thenReturn(stats);
+            when(stats.firstOffset()).thenReturn(60L);
+            when(stats.committedOffset()).thenReturn(80L);
+            setPrivateField(reader, "environment", env);
+            setPrivateField(reader, "lastObservedOffset", -1L);
+
+            assertThat(isPlannedRangeNoLongerReachableDueToDataLoss(reader)).isTrue();
+        }
+
+        @Test
         void resolveSubscriptionOffsetSpecUsesLastEmittedOffsetWhenAvailable() throws Exception {
             RabbitMQInputPartition partition = new RabbitMQInputPartition(
                     "test-stream", 0, 100, minimalOptions());
@@ -1231,6 +1265,14 @@ class RabbitMQPartitionReaderTest {
                 "resolveSubscriptionOffsetSpec", OffsetSpecification.class, OffsetSpecification.class);
         method.setAccessible(true);
         return (OffsetSpecification) method.invoke(reader, subscriptionOffsetSpec, configuredOffsetSpec);
+    }
+
+    private static boolean isPlannedRangeNoLongerReachableDueToDataLoss(
+            RabbitMQPartitionReader reader) throws Exception {
+        Method method = findMethod(RabbitMQPartitionReader.class,
+                "isPlannedRangeNoLongerReachableDueToDataLoss");
+        method.setAccessible(true);
+        return (boolean) method.invoke(reader);
     }
 
     private static Object createPostFilter(ConnectorOptions options)
