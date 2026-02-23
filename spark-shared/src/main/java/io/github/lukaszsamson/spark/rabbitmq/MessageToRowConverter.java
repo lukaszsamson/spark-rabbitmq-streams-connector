@@ -85,8 +85,10 @@ public final class MessageToRowConverter implements Serializable {
         if (includeRoutingKey) {
             Map<String, Object> appProps = message.getApplicationProperties();
             if (appProps != null && appProps.containsKey("routing_key")) {
-                values[idx++] = UTF8String.fromString(
-                        String.valueOf(appProps.get("routing_key")));
+                Object routingValue = appProps.get("routing_key");
+                values[idx++] = routingValue != null
+                        ? UTF8String.fromString(String.valueOf(routingValue))
+                        : null;
             } else {
                 values[idx++] = null;
             }
@@ -137,7 +139,8 @@ public final class MessageToRowConverter implements Serializable {
         int i = 0;
         for (Map.Entry<String, Object> entry : map.entrySet()) {
             keys[i] = UTF8String.fromString(entry.getKey());
-            vals[i] = UTF8String.fromString(String.valueOf(entry.getValue()));
+            Object value = entry.getValue();
+            vals[i] = value != null ? UTF8String.fromString(String.valueOf(value)) : null;
             i++;
         }
         return new ArrayBasedMapData(new GenericArrayData(keys), new GenericArrayData(vals));

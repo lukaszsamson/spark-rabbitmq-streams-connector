@@ -58,19 +58,52 @@ public final class RabbitMQStreamOffset extends Offset {
      *
      * @param json the JSON string, e.g. {@code {"orders":200}}
      * @return the deserialized offset
-     * @throws IllegalArgumentException if the JSON is null or empty
+     * @throws IllegalArgumentException if the JSON is null, empty, or malformed
      */
     public static RabbitMQStreamOffset fromJson(String json) {
         if (json == null || json.isBlank()) {
             throw new IllegalArgumentException("Offset JSON must not be null or blank");
         }
 
+        String trimmed = json.trim();
+        if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) {
+            throw new IllegalArgumentException("Malformed offset JSON: " + json);
+        }
+
+        String body = trimmed.substring(1, trimmed.length() - 1).trim();
+        if (body.isEmpty()) {
+            return new RabbitMQStreamOffset(Collections.emptyMap());
+        }
+
         Map<String, Long> offsets = new LinkedHashMap<>();
-        Matcher matcher = ENTRY_PATTERN.matcher(json);
-        while (matcher.find()) {
+        Matcher matcher = ENTRY_PATTERN.matcher(body);
+        int position = 0;
+        while (position < body.length()) {
+            matcher.region(position, body.length());
+            if (!matcher.lookingAt()) {
+                throw new IllegalArgumentException("Malformed offset JSON: " + json);
+            }
             String stream = unescapeJson(matcher.group(1));
             long offset = Long.parseLong(matcher.group(2));
             offsets.put(stream, offset);
+            position = matcher.end();
+
+            while (position < body.length() && Character.isWhitespace(body.charAt(position))) {
+                position++;
+            }
+            if (position >= body.length()) {
+                break;
+            }
+            if (body.charAt(position) != ',') {
+                throw new IllegalArgumentException("Malformed offset JSON: " + json);
+            }
+            position++;
+            while (position < body.length() && Character.isWhitespace(body.charAt(position))) {
+                position++;
+            }
+            if (position >= body.length()) {
+                throw new IllegalArgumentException("Malformed offset JSON: " + json);
+            }
         }
         return new RabbitMQStreamOffset(offsets);
     }

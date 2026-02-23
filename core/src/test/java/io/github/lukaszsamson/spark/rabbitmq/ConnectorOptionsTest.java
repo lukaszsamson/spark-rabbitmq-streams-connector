@@ -1367,6 +1367,41 @@ class ConnectorOptionsTest {
                     .hasMessageContaining("endingOffset")
                     .hasMessageContaining(">= 0");
         }
+
+        @Test
+        void rejectsNegativeMaxTriggerDelay() {
+            var map = minimalStreamOptions();
+            map.put("maxTriggerDelay", "-1s");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateForSource)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("maxTriggerDelay")
+                    .hasMessageContaining(">= 0");
+        }
+
+        @Test
+        void rejectsNegativeStartingOffsetsByTimestampEntry() {
+            var map = minimalStreamOptions();
+            map.put("startingOffsetsByTimestamp", "{\"orders\":-1}");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateForSource)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("startingOffsetsByTimestamp")
+                    .hasMessageContaining("orders")
+                    .hasMessageContaining(">= 0");
+        }
+
+        @Test
+        void rejectsNonPositiveEndingOffsetsByTimestampEntry() {
+            var map = minimalStreamOptions();
+            map.put("endingOffsetsByTimestamp", "{\"orders\":0}");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateForSource)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("endingOffsetsByTimestamp")
+                    .hasMessageContaining("orders")
+                    .hasMessageContaining("> 0");
+        }
     }
 
     // ========================================================================

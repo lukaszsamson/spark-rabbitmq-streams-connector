@@ -256,9 +256,7 @@ public final class RowToMessageConverter implements Serializable {
             String key = keyArray.getUTF8String(i).toString();
             String value = valueArray.isNullAt(i) ? null
                     : valueArray.getUTF8String(i).toString();
-            if (value != null) {
-                apb.entry(key, value);
-            }
+            apb.entry(key, value);
         }
         apb.messageBuilder();
     }
@@ -272,9 +270,7 @@ public final class RowToMessageConverter implements Serializable {
             String key = keyArray.getUTF8String(i).toString();
             String value = valueArray.isNullAt(i) ? null
                     : valueArray.getUTF8String(i).toString();
-            if (value != null) {
-                mab.entry(key, value);
-            }
+            mab.entry(key, value);
         }
         mab.messageBuilder();
     }

@@ -126,6 +126,24 @@ class RabbitMQStreamOffsetTest {
             assertThatThrownBy(() -> RabbitMQStreamOffset.fromJson("   "))
                     .isInstanceOf(IllegalArgumentException.class);
         }
+
+        @Test
+        void malformedJsonWithTrailingGarbageThrows() {
+            assertThatThrownBy(() -> RabbitMQStreamOffset.fromJson("{\"orders\":42} trailing"))
+                    .isInstanceOf(IllegalArgumentException.class);
+        }
+
+        @Test
+        void malformedJsonWithInvalidEntryThrows() {
+            assertThatThrownBy(() -> RabbitMQStreamOffset.fromJson("{\"orders\":42,\"events\":oops}"))
+                    .isInstanceOf(IllegalArgumentException.class);
+        }
+
+        @Test
+        void malformedJsonWithTrailingCommaThrows() {
+            assertThatThrownBy(() -> RabbitMQStreamOffset.fromJson("{\"orders\":42,}"))
+                    .isInstanceOf(IllegalArgumentException.class);
+        }
     }
 
     @Nested

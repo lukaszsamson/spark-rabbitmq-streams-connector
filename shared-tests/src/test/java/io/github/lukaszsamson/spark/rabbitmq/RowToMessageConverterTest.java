@@ -583,6 +583,21 @@ class RowToMessageConverterTest {
         }
 
         @Test
+        void preservesNullApplicationPropertyValues() {
+            var converter = new RowToMessageConverter(schemaWithAppProperties());
+            var mapData = createStringMap("k1", null, "k2", "v2");
+            InternalRow row = new GenericInternalRow(new Object[]{
+                    "body".getBytes(), mapData
+            });
+
+            Message msg = converter.convert(row, CODEC.messageBuilder());
+            Map<String, Object> appProps = msg.getApplicationProperties();
+            assertThat(appProps).containsKey("k1");
+            assertThat(appProps.get("k1")).isNull();
+            assertThat(appProps.get("k2")).isEqualTo("v2");
+        }
+
+        @Test
         void convertsApplicationPropertiesAtIndexZero() {
             var converter = new RowToMessageConverter(schemaWithAppPropertiesFirst());
             var mapData = createStringMap("k1", "v1");
@@ -604,6 +619,21 @@ class RowToMessageConverterTest {
             Map<String, Object> annotations = msg.getMessageAnnotations();
             assertThat(annotations).hasSize(1);
             assertThat(annotations.get("ann1")).hasToString("val1");
+        }
+
+        @Test
+        void preservesNullMessageAnnotationValues() {
+            var converter = new RowToMessageConverter(schemaWithMsgAnnotations());
+            var mapData = createStringMap("ann1", null, "ann2", "val2");
+            InternalRow row = new GenericInternalRow(new Object[]{
+                    "body".getBytes(), mapData
+            });
+
+            Message msg = converter.convert(row, CODEC.messageBuilder());
+            Map<String, Object> annotations = msg.getMessageAnnotations();
+            assertThat(annotations).containsKey("ann1");
+            assertThat(annotations.get("ann1")).isNull();
+            assertThat(annotations.get("ann2")).isEqualTo("val2");
         }
 
         @Test
@@ -665,7 +695,8 @@ class RowToMessageConverterTest {
         UTF8String[] values = new UTF8String[size];
         for (int i = 0; i < size; i++) {
             keys[i] = UTF8String.fromString(kvPairs[i * 2]);
-            values[i] = UTF8String.fromString(kvPairs[i * 2 + 1]);
+            String value = kvPairs[i * 2 + 1];
+            values[i] = value != null ? UTF8String.fromString(value) : null;
         }
         return new ArrayBasedMapData(
                 new GenericArrayData(keys),

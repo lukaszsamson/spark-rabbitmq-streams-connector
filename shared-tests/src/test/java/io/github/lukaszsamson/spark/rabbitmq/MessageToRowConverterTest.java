@@ -235,6 +235,31 @@ class MessageToRowConverterTest {
         }
 
         @Test
+        void preservesNullApplicationPropertyValue() {
+            var converter = new MessageToRowConverter(
+                    EnumSet.of(MetadataField.APPLICATION_PROPERTIES));
+            Message msg = mockMessage(new byte[0]);
+            Map<String, Object> appProps = new LinkedHashMap<>();
+            appProps.put("key1", null);
+            appProps.put("key2", "value2");
+            when(msg.getApplicationProperties()).thenReturn(appProps);
+
+            InternalRow row = converter.convert(msg, "s", 0, CHUNK_TS_MILLIS);
+            ArrayBasedMapData mapData = (ArrayBasedMapData) row.getMap(4);
+
+            assertThat(mapData.numElements()).isEqualTo(2);
+            var keyArray = mapData.keyArray();
+            var valArray = mapData.valueArray();
+            Map<String, String> valuesByKey = new LinkedHashMap<>();
+            for (int i = 0; i < mapData.numElements(); i++) {
+                valuesByKey.put(keyArray.getUTF8String(i).toString(),
+                        valArray.isNullAt(i) ? null : valArray.getUTF8String(i).toString());
+            }
+            assertThat(valuesByKey).containsEntry("key1", null);
+            assertThat(valuesByKey).containsEntry("key2", "value2");
+        }
+
+        @Test
         void nullMapProducesNull() {
             ArrayBasedMapData result = MessageToRowConverter.convertStringMap(null);
             assertThat(result).isNull();
@@ -292,6 +317,18 @@ class MessageToRowConverterTest {
             var converter = new MessageToRowConverter(EnumSet.of(MetadataField.ROUTING_KEY));
             Message msg = mockMessage(new byte[0]);
             when(msg.getApplicationProperties()).thenReturn(null);
+
+            InternalRow row = converter.convert(msg, "s", 0, CHUNK_TS_MILLIS);
+            assertThat(row.isNullAt(4)).isTrue();
+        }
+
+        @Test
+        void routingKeyNullWhenApplicationPropertyValueIsNull() {
+            var converter = new MessageToRowConverter(EnumSet.of(MetadataField.ROUTING_KEY));
+            Message msg = mockMessage(new byte[0]);
+            Map<String, Object> appProps = new LinkedHashMap<>();
+            appProps.put("routing_key", null);
+            when(msg.getApplicationProperties()).thenReturn(appProps);
 
             InternalRow row = converter.convert(msg, "s", 0, CHUNK_TS_MILLIS);
             assertThat(row.isNullAt(4)).isTrue();
