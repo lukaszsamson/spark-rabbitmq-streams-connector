@@ -1261,7 +1261,7 @@ class BaseRabbitMQMicroBatchStream
 
     private long queryStreamTailOffsetForAvailableNow(Environment env, String stream) {
         long statsTail = queryStreamTailOffset(env, stream);
-        long probedTail = probeTailOffsetFromLastMessage(env, stream);
+        long probedTail = probeTailOffsetForLatestWithCache(env, stream);
         return mergeTailOffsetsForAvailableNow(statsTail, probedTail);
     }
 

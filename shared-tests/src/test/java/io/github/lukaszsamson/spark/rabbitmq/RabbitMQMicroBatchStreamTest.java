@@ -854,6 +854,22 @@ class RabbitMQMicroBatchStreamTest {
         }
 
         @Test
+        void prepareForTriggerAvailableNowReusesRecentTailProbeCache() throws Exception {
+            RabbitMQMicroBatchStream stream = createStream(minimalOptions());
+            ProbeCountingEnvironment env = new ProbeCountingEnvironment(10L, java.util.List.of(14L));
+            setPrivateField(stream, "environment", env);
+
+            RabbitMQStreamOffset start = new RabbitMQStreamOffset(Map.of("test-stream", 0L));
+            RabbitMQStreamOffset first = (RabbitMQStreamOffset) stream.latestOffset(start, ReadLimit.allAvailable());
+            assertThat(first.getStreamOffsets()).containsEntry("test-stream", 15L);
+
+            stream.prepareForTriggerAvailableNow();
+
+            assertThat(env.probeBuilderCalls).isEqualTo(1);
+            assertThat(env.queryStatsCalls).isEqualTo(2);
+        }
+
+        @Test
         void probeTailOffsetFromLastMessageHandlesInterruptEmptyPollAndCloseFailure() throws Exception {
             RabbitMQMicroBatchStream stream = createStream(minimalOptions());
 
