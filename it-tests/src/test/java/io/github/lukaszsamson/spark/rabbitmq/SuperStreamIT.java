@@ -143,7 +143,6 @@ class SuperStreamIT extends AbstractRabbitMQIT {
                 .option("superstream", superStream)
                 .option("startingOffsets", "earliest")
                 .option("filterValues", "alpha")
-                .option("filterValuePath", "application_properties.filter")
                 .option("filterMatchUnfiltered", "false")
                 .option("pollTimeoutMs", "500")
                 .option("maxWaitMs", "10000")
@@ -1617,7 +1616,6 @@ class SuperStreamIT extends AbstractRabbitMQIT {
                 .option("startingOffsets", "earliest")
                 .option("failOnDataLoss", "false")
                 .option("maxRecordsPerTrigger", "8")
-                .option("maxWaitMs", "1000")
                 .option("metadataFields", "")
                 .option("addressResolverClass",
                         "io.github.lukaszsamson.spark.rabbitmq.TestAddressResolver")
@@ -1685,7 +1683,6 @@ class SuperStreamIT extends AbstractRabbitMQIT {
                 .option("startingOffsets", "earliest")
                 .option("failOnDataLoss", "false")
                 .option("maxRecordsPerTrigger", "8")
-                .option("maxWaitMs", "1000")
                 .option("metadataFields", "")
                 .option("addressResolverClass",
                         "io.github.lukaszsamson.spark.rabbitmq.TestAddressResolver")

@@ -578,7 +578,7 @@ class BatchReadIT extends AbstractRabbitMQIT {
 
         assertThatThrownBy(df::collectAsList)
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("greater than endingOffset");
+                .hasMessageContaining("'startingOffset' must be <= 'endingOffset'");
     }
 
     // ---- IT-SPLIT-003: minPartitions uneven distribution ----
@@ -816,7 +816,6 @@ class BatchReadIT extends AbstractRabbitMQIT {
                 .option("stream", stream)
                 .option("startingOffsets", "earliest")
                 .option("filterValues", "alpha,beta")
-                .option("filterValuePath", "application_properties.filter")
                 .option("filterMatchUnfiltered", "false")
                 .option("pollTimeoutMs", "500")
                 .option("maxWaitMs", "10000")
@@ -848,7 +847,6 @@ class BatchReadIT extends AbstractRabbitMQIT {
                 .option("startingOffsets", "timestamp")
                 .option("startingTimestamp", String.valueOf(boundaryTimestamp))
                 .option("filterValues", "alpha")
-                .option("filterValuePath", "application_properties.filter")
                 .option("filterMatchUnfiltered", "false")
                 .option("minPartitions", "4")
                 .option("metadataFields", "")
@@ -882,7 +880,6 @@ class BatchReadIT extends AbstractRabbitMQIT {
                 .option("stream", stream)
                 .option("startingOffsets", "earliest")
                 .option("filterValues", "alpha")
-                .option("filterValuePath", "application_properties.filter")
                 .option("filterMatchUnfiltered", "true")
                 .option("pollTimeoutMs", "200")
                 .option("maxWaitMs", "10000")
@@ -910,7 +907,6 @@ class BatchReadIT extends AbstractRabbitMQIT {
                 .option("stream", stream)
                 .option("startingOffsets", "earliest")
                 .option("filterValues", "alpha")
-                .option("filterValuePath", "application_properties.filter")
                 .option("filterMatchUnfiltered", "false")
                 .option("pollTimeoutMs", "200")
                 .option("maxWaitMs", "10000")
@@ -945,7 +941,6 @@ class BatchReadIT extends AbstractRabbitMQIT {
                 .option("stream", stream)
                 .option("startingOffsets", "earliest")
                 .option("filterValues", "alpha")
-                .option("filterValuePath", "application_properties.filter")
                 .option("filterPostFilterClass",
                         "io.github.lukaszsamson.spark.rabbitmq.TestPostFilter")
                 .option("pollTimeoutMs", "500")
@@ -1536,7 +1531,6 @@ class BatchReadIT extends AbstractRabbitMQIT {
                     .option("stream", stream)
                     .option("startingOffsets", "earliest")
                     .option("filterValues", "alpha")
-                    .option("filterValuePath", "application_properties.filter")
                     .option("filterPostFilterClass",
                             "io.github.lukaszsamson.spark.rabbitmq.TestPostFilter")
                     .option("filterWarningOnMismatch", "true")
@@ -1565,7 +1559,6 @@ class BatchReadIT extends AbstractRabbitMQIT {
                     .option("stream", stream)
                     .option("startingOffsets", "earliest")
                     .option("filterValues", "alpha")
-                    .option("filterValuePath", "application_properties.filter")
                     .option("filterPostFilterClass",
                             "io.github.lukaszsamson.spark.rabbitmq.TestPostFilter")
                     .option("filterWarningOnMismatch", "false")
