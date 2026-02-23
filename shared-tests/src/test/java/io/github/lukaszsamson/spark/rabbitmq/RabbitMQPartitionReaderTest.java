@@ -12,6 +12,7 @@ import org.junit.jupiter.api.Test;
 import java.io.IOException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -296,6 +297,12 @@ class RabbitMQPartitionReaderTest {
             assertThat(failure.get()).isNull();
             assertThat(result.get()).isFalse();
             assertThat(elapsedMs).isLessThan(1_000L);
+        }
+
+        @Test
+        void finishedFieldIsVolatileForCrossThreadVisibility() throws Exception {
+            Field finishedField = findField(RabbitMQPartitionReader.class, "finished");
+            assertThat(Modifier.isVolatile(finishedField.getModifiers())).isTrue();
         }
 
         @Test
@@ -961,6 +968,21 @@ class RabbitMQPartitionReaderTest {
             verify(env, times(1)).consumerBuilder();
             verify(builder, times(1)).build();
             verify(probe, times(1)).close();
+        }
+
+        @Test
+        void probeLastMessageOffsetReturnsMinusOneWhenEnvironmentIsCleared() throws Exception {
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 0, 100, minimalOptions());
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
+
+            setPrivateField(reader, "environment", null);
+
+            Method probeMethod = findMethod(RabbitMQPartitionReader.class, "probeLastMessageOffset");
+            probeMethod.setAccessible(true);
+            long observed = (long) probeMethod.invoke(reader);
+
+            assertThat(observed).isEqualTo(-1L);
         }
 
         @Test

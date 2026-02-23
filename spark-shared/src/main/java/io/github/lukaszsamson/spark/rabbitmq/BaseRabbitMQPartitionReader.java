@@ -55,13 +55,13 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
     final AtomicBoolean closeCalled = new AtomicBoolean(false);
 
     boolean pooledEnvironment = false;
-    Environment environment;
+    volatile Environment environment;
     Consumer consumer;
     InternalRow currentRow;
     long lastEmittedOffset = -1;
     long lastObservedOffset = -1;
     boolean filteredTailReached = false;
-    boolean finished = false;
+    volatile boolean finished = false;
     long lastTailProbeNanos = -1L;
     long lastTailProbeOffset = -1L;
 
@@ -554,7 +554,11 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
             return true;
         }
         try {
-            StreamStats stats = environment.queryStreamStats(stream);
+            Environment env = environment;
+            if (env == null) {
+                return false;
+            }
+            StreamStats stats = env.queryStreamStats(stream);
             long statsTail = resolveTailOffsetInclusive(stats);
             long probedTail = probeLastMessageOffset();
             long tail = Math.max(statsTail, probedTail);
@@ -575,7 +579,11 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
 
     boolean isPlannedRangeNoLongerReachableDueToDataLoss() {
         try {
-            StreamStats stats = environment.queryStreamStats(stream);
+            Environment env = environment;
+            if (env == null) {
+                return false;
+            }
+            StreamStats stats = env.queryStreamStats(stream);
             long first = stats.firstOffset();
             long tail = resolveTailOffsetInclusive(stats);
             boolean startWasTruncatedBeforeAnyInRangeProgress =
@@ -596,7 +604,11 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
 
     boolean isStreamTailBelowPlannedEnd() {
         try {
-            StreamStats stats = environment.queryStreamStats(stream);
+            Environment env = environment;
+            if (env == null) {
+                return false;
+            }
+            StreamStats stats = env.queryStreamStats(stream);
             long statsTail = resolveTailOffsetInclusive(stats);
             long probedTail = probeLastMessageOffset();
             long tail = Math.max(statsTail, probedTail);
@@ -638,10 +650,17 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
             }
         }
 
+        Environment env = environment;
+        if (env == null) {
+            lastTailProbeOffset = -1L;
+            lastTailProbeNanos = nowNanos;
+            return -1L;
+        }
+
         ArrayBlockingQueue<Long> observedOffsets = new ArrayBlockingQueue<>(1);
         Consumer probe = null;
         try {
-            probe = environment.consumerBuilder()
+            probe = env.consumerBuilder()
                     .stream(stream)
                     .offset(OffsetSpecification.last())
                     .noTrackingStrategy()
