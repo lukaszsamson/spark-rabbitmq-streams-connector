@@ -196,6 +196,23 @@ class EnvironmentBuilderHelperTest {
     }
 
     @Test
+    void observationCollectorClassReturningWrongTypeFailsFast() {
+        ConnectorOptions options = new ConnectorOptions(Map.of(
+                "endpoints", "hostA:5552",
+                "stream", "test-stream",
+                "observationCollectorClass",
+                "io.github.lukaszsamson.spark.rabbitmq.EnvironmentBuilderHelperTest$WrongTypeObservationCollectorFactory"
+        ));
+
+        StreamEnvironmentBuilder builder = new StreamEnvironmentBuilder();
+        assertThatThrownBy(() -> invokeConfigureObservationCollector(builder, options))
+                .hasCauseInstanceOf(IllegalArgumentException.class)
+                .cause()
+                .hasMessageContaining("observationCollectorClass")
+                .hasMessageContaining("unsupported type");
+    }
+
+    @Test
     void observationRegistryProviderClassConfiguresMicrometerCollector() throws Exception {
         ConnectorOptions options = new ConnectorOptions(Map.of(
                 "endpoints", "hostA:5552",
@@ -279,6 +296,23 @@ class EnvironmentBuilderHelperTest {
                 .cause()
                 .hasMessageContaining("compressionCodecFactoryClass")
                 .hasMessageContaining("returned null");
+    }
+
+    @Test
+    void compressionCodecFactoryClassReturningWrongTypeFailsFast() {
+        ConnectorOptions options = new ConnectorOptions(Map.of(
+                "endpoints", "hostA:5552",
+                "stream", "test-stream",
+                "compressionCodecFactoryClass",
+                "io.github.lukaszsamson.spark.rabbitmq.EnvironmentBuilderHelperTest$WrongTypeCompressionCodecFactory"
+        ));
+
+        StreamEnvironmentBuilder builder = new StreamEnvironmentBuilder();
+        assertThatThrownBy(() -> invokeConfigureCompressionCodecFactory(builder, options))
+                .hasCauseInstanceOf(IllegalArgumentException.class)
+                .cause()
+                .hasMessageContaining("compressionCodecFactoryClass")
+                .hasMessageContaining("unsupported type");
     }
 
     @Test
@@ -399,6 +433,40 @@ class EnvironmentBuilderHelperTest {
 
         TestScheduledExecutorServiceFactory.lastCreated.shutdownNow();
         TestNettyEventLoopGroupFactory.lastCreated.shutdownGracefully().syncUninterruptibly();
+    }
+
+    @Test
+    void nettyEventLoopGroupFactoryReturningWrongTypeFailsFast() {
+        ConnectorOptions options = new ConnectorOptions(Map.of(
+                "endpoints", "hostA:5552",
+                "stream", "test-stream",
+                "netty.eventLoopGroup",
+                WrongTypeNettyEventLoopGroupFactory.class.getName()
+        ));
+
+        StreamEnvironmentBuilder builder = new StreamEnvironmentBuilder();
+        assertThatThrownBy(() -> invokeConfigureExecutorAndNetty(builder, options))
+                .hasCauseInstanceOf(IllegalArgumentException.class)
+                .cause()
+                .hasMessageContaining("netty.eventLoopGroup")
+                .hasMessageContaining("unsupported type");
+    }
+
+    @Test
+    void nettyByteBufAllocatorFactoryReturningWrongTypeFailsFast() {
+        ConnectorOptions options = new ConnectorOptions(Map.of(
+                "endpoints", "hostA:5552",
+                "stream", "test-stream",
+                "netty.byteBufAllocator",
+                WrongTypeNettyByteBufAllocatorFactory.class.getName()
+        ));
+
+        StreamEnvironmentBuilder builder = new StreamEnvironmentBuilder();
+        assertThatThrownBy(() -> invokeConfigureExecutorAndNetty(builder, options))
+                .hasCauseInstanceOf(IllegalArgumentException.class)
+                .cause()
+                .hasMessageContaining("netty.byteBufAllocator")
+                .hasMessageContaining("unsupported type");
     }
 
     private static List<String> getUris(StreamEnvironmentBuilder builder) throws Exception {
@@ -576,6 +644,14 @@ class EnvironmentBuilderHelperTest {
         }
     }
 
+    public static final class WrongTypeObservationCollectorFactory
+            implements ConnectorObservationCollectorFactory {
+        @Override
+        public Object create(ConnectorOptions options) {
+            return "not-a-collector";
+        }
+    }
+
     public static final class TestObservationRegistryProvider
             implements ConnectorObservationRegistryProvider {
         @Override
@@ -613,6 +689,14 @@ class EnvironmentBuilderHelperTest {
         }
     }
 
+    public static final class WrongTypeCompressionCodecFactory
+            implements ConnectorCompressionCodecFactory {
+        @Override
+        public Object create(ConnectorOptions options) {
+            return "not-a-codec-factory";
+        }
+    }
+
     public static final class TestScheduledExecutorServiceFactory
             implements ConnectorScheduledExecutorServiceFactory {
         static ScheduledExecutorService lastCreated;
@@ -643,11 +727,27 @@ class EnvironmentBuilderHelperTest {
         }
     }
 
+    public static final class WrongTypeNettyEventLoopGroupFactory
+            implements ConnectorNettyEventLoopGroupFactory {
+        @Override
+        public Object create(ConnectorOptions options) {
+            return "not-an-event-loop-group";
+        }
+    }
+
+    public static final class WrongTypeNettyByteBufAllocatorFactory
+            implements ConnectorNettyByteBufAllocatorFactory {
+        @Override
+        public Object create(ConnectorOptions options) {
+            return "not-a-byte-buf-allocator";
+        }
+    }
+
     public static final class TestNettyChannelCustomizer implements ConnectorNettyChannelCustomizer {
         static volatile boolean invoked;
 
         @Override
-        public void customize(io.netty.channel.Channel channel) {
+        public void customize(Object channel) {
             invoked = true;
         }
     }
@@ -656,7 +756,7 @@ class EnvironmentBuilderHelperTest {
         static volatile boolean invoked;
 
         @Override
-        public void customize(Bootstrap bootstrap) {
+        public void customize(Object bootstrap) {
             invoked = true;
         }
     }

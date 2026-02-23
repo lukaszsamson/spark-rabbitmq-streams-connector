@@ -160,11 +160,17 @@ final class EnvironmentBuilderHelper {
             ConnectorObservationCollectorFactory factory = ExtensionLoader.load(
                     collectorClass, ConnectorObservationCollectorFactory.class,
                     ConnectorOptions.OBSERVATION_COLLECTOR_CLASS);
-            var collector = factory.create(options);
-            if (collector == null) {
+            Object collectorObject = factory.create(options);
+            if (collectorObject == null) {
                 throw new IllegalArgumentException(
                         "Class specified by '" + ConnectorOptions.OBSERVATION_COLLECTOR_CLASS +
                                 "' returned null ObservationCollector");
+            }
+            if (!(collectorObject instanceof com.rabbitmq.stream.ObservationCollector<?> collector)) {
+                throw new IllegalArgumentException(
+                        "Class specified by '" + ConnectorOptions.OBSERVATION_COLLECTOR_CLASS +
+                                "' returned unsupported type '" + collectorObject.getClass().getName() +
+                                "', expected com.rabbitmq.stream.ObservationCollector");
             }
             builder.observationCollector(collector);
             return;
@@ -198,11 +204,17 @@ final class EnvironmentBuilderHelper {
         ConnectorCompressionCodecFactory factory = ExtensionLoader.load(
                 factoryClass, ConnectorCompressionCodecFactory.class,
                 ConnectorOptions.COMPRESSION_CODEC_FACTORY_CLASS);
-        var codecFactory = factory.create(options);
-        if (codecFactory == null) {
+        Object codecFactoryObject = factory.create(options);
+        if (codecFactoryObject == null) {
             throw new IllegalArgumentException(
                     "Class specified by '" + ConnectorOptions.COMPRESSION_CODEC_FACTORY_CLASS +
                             "' returned null CompressionCodecFactory");
+        }
+        if (!(codecFactoryObject instanceof com.rabbitmq.stream.compression.CompressionCodecFactory codecFactory)) {
+            throw new IllegalArgumentException(
+                    "Class specified by '" + ConnectorOptions.COMPRESSION_CODEC_FACTORY_CLASS +
+                            "' returned unsupported type '" + codecFactoryObject.getClass().getName() +
+                            "', expected com.rabbitmq.stream.compression.CompressionCodecFactory");
         }
         builder.compressionCodecFactory(codecFactory);
     }
@@ -276,11 +288,17 @@ final class EnvironmentBuilderHelper {
                     eventLoopFactoryClass,
                     ConnectorNettyEventLoopGroupFactory.class,
                     ConnectorOptions.NETTY_EVENT_LOOP_GROUP);
-            EventLoopGroup eventLoopGroup = factory.create(options);
-            if (eventLoopGroup == null) {
+            Object eventLoopGroupObject = factory.create(options);
+            if (eventLoopGroupObject == null) {
                 throw new IllegalArgumentException(
                         "Class specified by '" + ConnectorOptions.NETTY_EVENT_LOOP_GROUP +
                                 "' returned null EventLoopGroup");
+            }
+            if (!(eventLoopGroupObject instanceof EventLoopGroup eventLoopGroup)) {
+                throw new IllegalArgumentException(
+                        "Class specified by '" + ConnectorOptions.NETTY_EVENT_LOOP_GROUP +
+                                "' returned unsupported type '" + eventLoopGroupObject.getClass().getName() +
+                                "', expected io.netty.channel.EventLoopGroup");
             }
             netty = builder.netty();
             configured = true;
@@ -293,11 +311,17 @@ final class EnvironmentBuilderHelper {
                     allocatorFactoryClass,
                     ConnectorNettyByteBufAllocatorFactory.class,
                     ConnectorOptions.NETTY_BYTE_BUF_ALLOCATOR);
-            ByteBufAllocator allocator = factory.create(options);
-            if (allocator == null) {
+            Object allocatorObject = factory.create(options);
+            if (allocatorObject == null) {
                 throw new IllegalArgumentException(
                         "Class specified by '" + ConnectorOptions.NETTY_BYTE_BUF_ALLOCATOR +
                                 "' returned null ByteBufAllocator");
+            }
+            if (!(allocatorObject instanceof ByteBufAllocator allocator)) {
+                throw new IllegalArgumentException(
+                        "Class specified by '" + ConnectorOptions.NETTY_BYTE_BUF_ALLOCATOR +
+                                "' returned unsupported type '" + allocatorObject.getClass().getName() +
+                                "', expected io.netty.buffer.ByteBufAllocator");
             }
             if (!configured) {
                 netty = builder.netty();

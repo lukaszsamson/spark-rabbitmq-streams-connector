@@ -1,9 +1,7 @@
 package io.github.lukaszsamson.spark.rabbitmq;
 
 import io.micrometer.observation.ObservationRegistry;
-import io.netty.bootstrap.Bootstrap;
 import io.netty.buffer.ByteBufAllocator;
-import io.netty.channel.Channel;
 import io.netty.channel.EventLoopGroup;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -1788,13 +1786,13 @@ class ConnectorOptionsTest {
 
     public static final class TestNettyChannelCustomizer implements ConnectorNettyChannelCustomizer {
         @Override
-        public void customize(Channel channel) {
+        public void customize(Object channel) {
         }
     }
 
     public static final class TestNettyBootstrapCustomizer implements ConnectorNettyBootstrapCustomizer {
         @Override
-        public void customize(Bootstrap bootstrap) {
+        public void customize(Object bootstrap) {
         }
     }
 }

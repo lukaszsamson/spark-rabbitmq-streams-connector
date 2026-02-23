@@ -1,9 +1,7 @@
 package io.github.lukaszsamson.spark.rabbitmq;
 
-import io.netty.buffer.ByteBufAllocator;
-
 /**
- * Creates a custom Netty {@link ByteBufAllocator} for RabbitMQ stream connections.
+ * Creates a custom Netty byte buffer allocator for RabbitMQ stream connections.
  */
 public interface ConnectorNettyByteBufAllocatorFactory {
 
@@ -11,8 +9,7 @@ public interface ConnectorNettyByteBufAllocatorFactory {
      * Create a byte buffer allocator instance.
      *
      * @param options connector options
-     * @return allocator to use
+     * @return allocator object compatible with {@code io.netty.buffer.ByteBufAllocator}
      */
-    ByteBufAllocator create(ConnectorOptions options);
+    Object create(ConnectorOptions options);
 }
-

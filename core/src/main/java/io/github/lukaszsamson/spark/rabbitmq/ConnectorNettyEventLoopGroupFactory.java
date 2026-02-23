@@ -1,9 +1,7 @@
 package io.github.lukaszsamson.spark.rabbitmq;
 
-import io.netty.channel.EventLoopGroup;
-
 /**
- * Creates a custom Netty {@link EventLoopGroup} for RabbitMQ stream connections.
+ * Creates a custom Netty event loop group for RabbitMQ stream connections.
  */
 public interface ConnectorNettyEventLoopGroupFactory {
 
@@ -11,8 +9,7 @@ public interface ConnectorNettyEventLoopGroupFactory {
      * Create an event loop group instance.
      *
      * @param options connector options
-     * @return event loop group to use
+     * @return event loop group object compatible with {@code io.netty.channel.EventLoopGroup}
      */
-    EventLoopGroup create(ConnectorOptions options);
+    Object create(ConnectorOptions options);
 }
-

@@ -1,17 +1,14 @@
 package io.github.lukaszsamson.spark.rabbitmq;
 
-import io.netty.channel.Channel;
-
 /**
- * Customizes Netty {@link Channel} instances used by RabbitMQ stream connections.
+ * Customizes Netty channel instances used by RabbitMQ stream connections.
  */
 public interface ConnectorNettyChannelCustomizer {
 
     /**
      * Apply customization to a channel.
      *
-     * @param channel channel to customize
+     * @param channel channel object compatible with {@code io.netty.channel.Channel}
      */
-    void customize(Channel channel);
+    void customize(Object channel);
 }
-

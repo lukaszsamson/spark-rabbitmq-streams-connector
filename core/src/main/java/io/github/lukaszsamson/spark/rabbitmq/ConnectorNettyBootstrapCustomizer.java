@@ -1,17 +1,14 @@
 package io.github.lukaszsamson.spark.rabbitmq;
 
-import io.netty.bootstrap.Bootstrap;
-
 /**
- * Customizes Netty {@link Bootstrap} instances used by RabbitMQ stream connections.
+ * Customizes Netty bootstrap instances used by RabbitMQ stream connections.
  */
 public interface ConnectorNettyBootstrapCustomizer {
 
     /**
      * Apply customization to a bootstrap instance.
      *
-     * @param bootstrap bootstrap to customize
+     * @param bootstrap bootstrap object compatible with {@code io.netty.bootstrap.Bootstrap}
      */
-    void customize(Bootstrap bootstrap);
+    void customize(Object bootstrap);
 }
-

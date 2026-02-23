@@ -375,6 +375,11 @@ The connector provides extension points via connector-defined interfaces (not Ra
 | `netty.bootstrapCustomizer` | `ConnectorNettyBootstrapCustomizer` | Both | Customize Netty bootstrap setup |
 | `compressionCodecFactoryClass` | `ConnectorCompressionCodecFactory` | Executors | Custom compression codec |
 
+To keep connector interfaces free of shaded dependency types, low-level RabbitMQ/Netty
+hooks use `Object` in their method signatures. The connector validates runtime types:
+`ObservationCollector`, `CompressionCodecFactory`, `EventLoopGroup`,
+`ByteBufAllocator`, `Channel`, and `Bootstrap`.
+
 All extension classes must have a public no-arg constructor.
 
 ## Limitations
