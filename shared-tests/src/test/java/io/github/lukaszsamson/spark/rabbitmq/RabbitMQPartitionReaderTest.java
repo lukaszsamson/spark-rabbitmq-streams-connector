@@ -479,20 +479,26 @@ class RabbitMQPartitionReaderTest {
             RabbitMQInputPartition partition = new RabbitMQInputPartition(
                     "test-stream", 0, 10, minimalOptions());
             RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
+            com.rabbitmq.stream.MessageHandler.Context inRangeContext =
+                    mock(com.rabbitmq.stream.MessageHandler.Context.class);
+            com.rabbitmq.stream.MessageHandler.Context boundaryContext =
+                    mock(com.rabbitmq.stream.MessageHandler.Context.class);
 
             BlockingQueue<RabbitMQPartitionReader.QueuedMessage> queue = new LinkedBlockingQueue<>();
             queue.add(new RabbitMQPartitionReader.QueuedMessage(
                     CODEC.messageBuilder().addData("a".getBytes()).build(),
-                    9L, 0L, new NoopContext()));
+                    9L, 0L, inRangeContext));
             queue.add(new RabbitMQPartitionReader.QueuedMessage(
                     CODEC.messageBuilder().addData("b".getBytes()).build(),
-                    10L, 0L, new NoopContext()));
+                    10L, 0L, boundaryContext));
 
             setPrivateField(reader, "queue", queue);
             setPrivateField(reader, "consumer", new NoopConsumer());
 
             assertThat(reader.next()).isTrue();
             assertThat(reader.next()).isFalse();
+            verify(inRangeContext, times(1)).processed();
+            verify(boundaryContext, times(0)).processed();
         }
 
         @Test

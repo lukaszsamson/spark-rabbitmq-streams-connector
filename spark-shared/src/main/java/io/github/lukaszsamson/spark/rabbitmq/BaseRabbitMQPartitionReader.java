@@ -260,6 +260,12 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
             totalWaitMs = 0;
             waitStartNanos = System.nanoTime();
 
+            // Stop at end offset (exclusive) without granting additional credit.
+            if (qm.offset() >= endOffset) {
+                finished = true;
+                return false;
+            }
+
             // Notify flow strategy that this message has been consumed (pull-side).
             // This ties credit grants to consumption rate rather than enqueue rate,
             // providing natural backpressure when the pull side is slow.
@@ -268,12 +274,6 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
             // Skip messages before start offset (can happen with timestamp-based starting)
             if (qm.offset() < startOffset) {
                 continue;
-            }
-
-            // Stop at end offset (exclusive)
-            if (qm.offset() >= endOffset) {
-                finished = true;
-                return false;
             }
 
             // De-dup on reconnection: skip already-emitted offsets
