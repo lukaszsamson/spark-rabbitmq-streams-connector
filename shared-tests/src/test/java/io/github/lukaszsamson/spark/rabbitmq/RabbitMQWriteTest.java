@@ -772,6 +772,23 @@ class RabbitMQWriteTest {
         }
 
         @Test
+        void commitIncludesAggregatedConfirmationFailureCount() throws Exception {
+            RabbitMQDataWriter writer = new RabbitMQDataWriter(
+                    minimalSinkOptions(), minimalSinkSchema(), 0, 1, -1);
+            DeferredConfirmationProducer producer = new DeferredConfirmationProducer();
+            setPrivateField(writer, "producer", producer);
+
+            writer.write(new GenericInternalRow(new Object[]{"a".getBytes()}));
+            writer.write(new GenericInternalRow(new Object[]{"b".getBytes()}));
+            producer.failPending((short) 17, (short) 42);
+
+            assertThatThrownBy(writer::commit)
+                    .isInstanceOf(IOException.class)
+                    .hasMessageContaining("confirmation failures=2")
+                    .hasMessageContaining("lastCode=42");
+        }
+
+        @Test
         void commitSucceedsWhenAllConfirmsComplete() throws Exception {
             RabbitMQDataWriter writer = new RabbitMQDataWriter(
                     minimalSinkOptions(), minimalSinkSchema(), 0, 1, -1);
@@ -1087,6 +1104,39 @@ class RabbitMQWriteTest {
             assertThat(builder.customHashSampleValue).isEqualTo(7);
             assertThat(TestHashFunction.invoked).isTrue();
         }
+
+        @Test
+        void hashRoutingExtractorFailsFastWhenRoutingKeyMissing() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("superstream", "super");
+            opts.put("routingStrategy", "hash");
+            ConnectorOptions options = new ConnectorOptions(opts);
+
+            StructType schema = new StructType(new StructField[]{
+                    new StructField("value", DataTypes.BinaryType, false, Metadata.empty()),
+                    new StructField("routing_key", DataTypes.StringType, true, Metadata.empty()),
+            });
+            RabbitMQDataWriter writer = new RabbitMQDataWriter(
+                    options, schema, 0, 1, -1);
+            CapturingProducerBuilder builder = new CapturingProducerBuilder();
+            seedEnvironmentPool(options, new BuilderEnvironment(builder));
+
+            writer.write(new GenericInternalRow(new Object[]{
+                    "x".getBytes(), UTF8String.fromString("rk-1")
+            }));
+
+            com.rabbitmq.stream.Message missingRoutingKeyMessage =
+                    new com.rabbitmq.stream.codec.QpidProtonCodec()
+                            .messageBuilder()
+                            .addData(new byte[0])
+                            .build();
+
+            assertThat(builder.routingExtractor).isNotNull();
+            assertThatThrownBy(() -> builder.routingExtractor.apply(missingRoutingKeyMessage))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("Routing key is required");
+        }
     }
 
     // ======================================================================
@@ -1325,6 +1375,47 @@ class RabbitMQWriteTest {
         @Override
         public void close() {
             closeCalls++;
+        }
+    }
+
+    private static final class DeferredConfirmationProducer implements com.rabbitmq.stream.Producer {
+        private static final com.rabbitmq.stream.codec.QpidProtonCodec CODEC =
+                new com.rabbitmq.stream.codec.QpidProtonCodec();
+        private final java.util.List<com.rabbitmq.stream.Message> messages =
+                new java.util.ArrayList<>();
+        private final java.util.List<com.rabbitmq.stream.ConfirmationHandler> handlers =
+                new java.util.ArrayList<>();
+
+        @Override
+        public com.rabbitmq.stream.MessageBuilder messageBuilder() {
+            return CODEC.messageBuilder();
+        }
+
+        @Override
+        public long getLastPublishingId() {
+            return 0L;
+        }
+
+        @Override
+        public void send(com.rabbitmq.stream.Message message,
+                         com.rabbitmq.stream.ConfirmationHandler confirmationHandler) {
+            messages.add(message);
+            handlers.add(confirmationHandler);
+        }
+
+        void failPending(short... errorCodes) {
+            for (int i = 0; i < handlers.size(); i++) {
+                short code = errorCodes.length == 0 ? 1
+                        : errorCodes[Math.min(i, errorCodes.length - 1)];
+                handlers.get(i).handle(new com.rabbitmq.stream.ConfirmationStatus(
+                        messages.get(i), false, code));
+            }
+            handlers.clear();
+            messages.clear();
+        }
+
+        @Override
+        public void close() {
         }
     }
 
@@ -1589,6 +1680,7 @@ class RabbitMQWriteTest {
         private final boolean failOnDuplicateName;
         private final Set<String> activeProducerNames;
         private com.rabbitmq.stream.Producer customProducer;
+        private java.util.function.Function<com.rabbitmq.stream.Message, String> routingExtractor;
         private int maxInFlight;
         private long confirmTimeoutMs;
         private long enqueueTimeoutMs;
@@ -1698,6 +1790,7 @@ class RabbitMQWriteTest {
         @Override
         public com.rabbitmq.stream.ProducerBuilder.RoutingConfiguration routing(
                 java.util.function.Function<com.rabbitmq.stream.Message, String> extractor) {
+            this.routingExtractor = extractor;
             return new CapturingRoutingConfiguration(this);
         }
 

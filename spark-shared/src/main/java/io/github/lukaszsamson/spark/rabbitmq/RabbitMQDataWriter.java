@@ -49,6 +49,8 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
     // Confirm tracking
     private final AtomicReference<Throwable> sendError = new AtomicReference<>();
     private final AtomicLong outstandingConfirms = new AtomicLong(0);
+    private final AtomicLong confirmationFailureCount = new AtomicLong(0);
+    private final AtomicLong lastConfirmationFailureCode = new AtomicLong(-1L);
     private final Object confirmMonitor = new Object();
     private final AtomicBoolean closeCalled = new AtomicBoolean(false);
 
@@ -78,7 +80,9 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
             // Check for prior send errors
             Throwable error = sendError.get();
             if (error != null) {
-                throw new IOException("Previous send failed on partition " + partitionId, error);
+                throw new IOException(
+                        "Previous send failed on partition " + partitionId + confirmationFailureSummary(),
+                        error);
             }
 
             // Lazy initialization
@@ -119,11 +123,7 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
                     && options.getRoutingStrategy() != RoutingStrategyType.CUSTOM) {
                 String rk = extractRoutingKey(message);
                 if (rk == null || rk.isEmpty()) {
-                    throw new IOException(
-                            "Routing key is required for superstream with " +
-                                    options.getRoutingStrategy() + " routing strategy. " +
-                                    "Provide a 'routing_key' column, set 'routing_key' in " +
-                                    "'application_properties', or set 'subject' in 'properties'.");
+                    throw new IOException(missingRoutingKeyErrorMessage());
                 }
             }
 
@@ -138,6 +138,8 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
                             System.nanoTime() - sendStartNanos);
                     writeLatencyMs.addAndGet(Math.max(0L, elapsedMs));
                     if (!confirmationStatus.isConfirmed()) {
+                        confirmationFailureCount.incrementAndGet();
+                        lastConfirmationFailureCode.set(confirmationStatus.getCode());
                         publishErrors.incrementAndGet();
                         sendError.compareAndSet(null,
                                 new IOException("Message confirmation failed with code " +
@@ -184,7 +186,7 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
                         if (error != null) {
                             throw new IOException(
                                     "One or more messages failed confirmation on partition "
-                                            + partitionId, error);
+                                            + partitionId + confirmationFailureSummary(), error);
                         }
                         try {
                             confirmMonitor.wait();
@@ -200,7 +202,7 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
                         if (error != null) {
                             throw new IOException(
                                     "One or more messages failed confirmation on partition "
-                                            + partitionId, error);
+                                            + partitionId + confirmationFailureSummary(), error);
                         }
                         long remainingNanos = deadlineNanos - System.nanoTime();
                         if (remainingNanos <= 0) {
@@ -224,7 +226,8 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
         Throwable error = sendError.get();
         if (error != null) {
             throw new IOException(
-                    "One or more messages failed confirmation on partition " + partitionId, error);
+                    "One or more messages failed confirmation on partition " + partitionId +
+                            confirmationFailureSummary(), error);
         }
 
         LOG.info("Committed partition {} (task {}): {} records, {} bytes",
@@ -440,20 +443,14 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
 
         // Set up routing
         ProducerBuilder.RoutingConfiguration routing = builder.routing(message -> {
-            // Extract routing key from application properties
-            var appProps = message.getApplicationProperties();
-            if (appProps != null) {
-                // Check for routing_key in application properties
-                Object rk = appProps.get("routing_key");
-                if (rk != null) {
-                    return rk.toString();
-                }
+            String routingKey = extractRoutingKey(message);
+            if (routingKey != null && !routingKey.isEmpty()) {
+                return routingKey;
             }
-            // Fall back to message subject as routing key
-            if (message.getProperties() != null && message.getProperties().getSubject() != null) {
-                return message.getProperties().getSubject();
+            if (options.getRoutingStrategy() == RoutingStrategyType.CUSTOM) {
+                return "";
             }
-            return "";
+            throw new IllegalStateException(missingRoutingKeyErrorMessage());
         });
 
         switch (options.getRoutingStrategy()) {
@@ -525,6 +522,25 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
             return message.getProperties().getSubject();
         }
         return null;
+    }
+
+    private String confirmationFailureSummary() {
+        long failureCount = confirmationFailureCount.get();
+        if (failureCount <= 0) {
+            return "";
+        }
+        long lastCode = lastConfirmationFailureCode.get();
+        if (lastCode >= 0) {
+            return " (confirmation failures=" + failureCount + ", lastCode=" + lastCode + ")";
+        }
+        return " (confirmation failures=" + failureCount + ")";
+    }
+
+    private String missingRoutingKeyErrorMessage() {
+        return "Routing key is required for superstream with " +
+                options.getRoutingStrategy() + " routing strategy. " +
+                "Provide a 'routing_key' column, set 'routing_key' in " +
+                "'application_properties', or set 'subject' in 'properties'.";
     }
 
     private record ConnectorRoutingMetadataView(
