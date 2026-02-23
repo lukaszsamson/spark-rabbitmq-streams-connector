@@ -57,6 +57,8 @@ class BaseRabbitMQMicroBatchStream
     static final long LATEST_TAIL_PROBE_CACHE_WINDOW_MS = 1_000L;
     /** Reuse full latestOffset() results briefly to keep per-trigger planning stable. */
     static final long LATEST_OFFSET_RESULT_CACHE_WINDOW_MS = 250L;
+    static final long TAIL_PROBE_WAIT_MS = 250L;
+    static final long TAIL_PROBE_DRAIN_WAIT_MS = 40L;
     static final long MIN_TIMESTAMP_START_PROBE_TIMEOUT_MS = 250L;
 
     final ConnectorOptions options;
@@ -1082,6 +1084,27 @@ class BaseRabbitMQMicroBatchStream
     }
 
     long probeTailOffsetFromLastMessage(Environment env, String stream) {
+        try {
+            long maxSeen = probeLastMessageOffsetInclusive(env, stream, TAIL_PROBE_WAIT_MS);
+            if (maxSeen < 0) {
+                return 0;
+            }
+            return maxSeen + 1;
+        } catch (NoOffsetException e) {
+            return 0;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return 0;
+        } catch (Exception e) {
+            LOG.debug("Unable to probe last message tail offset for stream '{}': {}",
+                    stream, e.getMessage());
+            return 0;
+        }
+    }
+
+    static long probeLastMessageOffsetInclusive(
+            Environment env, String stream, long firstMessageWaitMs)
+            throws InterruptedException {
         ArrayBlockingQueue<Long> observedOffsets = new ArrayBlockingQueue<>(1);
         AtomicLong maxObservedOffset = new AtomicLong(-1L);
         com.rabbitmq.stream.Consumer probe = null;
@@ -1101,14 +1124,15 @@ class BaseRabbitMQMicroBatchStream
                     .builder()
                     .build();
 
-            Long first = observedOffsets.poll(250, TimeUnit.MILLISECONDS);
+            Long first = observedOffsets.poll(
+                    Math.max(1L, firstMessageWaitMs), TimeUnit.MILLISECONDS);
             if (first == null) {
-                return 0;
+                return -1L;
             }
 
             long maxSeen = Math.max(first, maxObservedOffset.get());
             while (true) {
-                Long next = observedOffsets.poll(40, TimeUnit.MILLISECONDS);
+                Long next = observedOffsets.poll(TAIL_PROBE_DRAIN_WAIT_MS, TimeUnit.MILLISECONDS);
                 long observed = maxObservedOffset.get();
                 if (next == null) {
                     if (observed > maxSeen) {
@@ -1123,16 +1147,7 @@ class BaseRabbitMQMicroBatchStream
                     maxSeen = observed;
                 }
             }
-            return maxSeen + 1;
-        } catch (NoOffsetException e) {
-            return 0;
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return 0;
-        } catch (Exception e) {
-            LOG.debug("Unable to probe last message tail offset for stream '{}': {}",
-                    stream, e.getMessage());
-            return 0;
+            return maxSeen;
         } finally {
             if (probe != null) {
                 try {

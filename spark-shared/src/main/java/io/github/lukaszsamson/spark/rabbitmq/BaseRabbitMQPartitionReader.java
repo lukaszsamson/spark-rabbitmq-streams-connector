@@ -12,7 +12,6 @@ import java.io.IOException;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
@@ -657,22 +656,11 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
             return -1L;
         }
 
-        ArrayBlockingQueue<Long> observedOffsets = new ArrayBlockingQueue<>(1);
-        Consumer probe = null;
         try {
-            probe = env.consumerBuilder()
-                    .stream(stream)
-                    .offset(OffsetSpecification.last())
-                    .noTrackingStrategy()
-                    .messageHandler((context, message) -> observedOffsets.offer(context.offset()))
-                    .flow()
-                    .initialCredits(1)
-                    .strategy(ConsumerFlowStrategy.creditWhenHalfMessagesProcessed(1))
-                    .builder()
-                    .build();
-            long probeTimeoutMs = Math.max(1L, Math.min(250L, options.getMaxWaitMs()));
-            Long observed = observedOffsets.poll(probeTimeoutMs, TimeUnit.MILLISECONDS);
-            long resolved = observed == null ? -1 : observed;
+            long probeTimeoutMs = Math.max(1L, Math.min(
+                    BaseRabbitMQMicroBatchStream.TAIL_PROBE_WAIT_MS, options.getMaxWaitMs()));
+            long resolved = BaseRabbitMQMicroBatchStream.probeLastMessageOffsetInclusive(
+                    env, stream, probeTimeoutMs);
             lastTailProbeOffset = resolved;
             lastTailProbeNanos = System.nanoTime();
             return resolved;
@@ -682,15 +670,6 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
             lastTailProbeOffset = -1L;
             lastTailProbeNanos = System.nanoTime();
             return -1;
-        } finally {
-            if (probe != null) {
-                try {
-                    probe.close();
-                } catch (Exception e) {
-                    LOG.debug("Error closing probe consumer for stream '{}': {}",
-                            stream, e.getMessage());
-                }
-            }
         }
     }
 

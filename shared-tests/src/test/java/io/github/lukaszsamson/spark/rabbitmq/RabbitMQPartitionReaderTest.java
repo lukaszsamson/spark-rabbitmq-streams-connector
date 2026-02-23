@@ -939,6 +939,58 @@ class RabbitMQPartitionReaderTest {
         }
 
         @Test
+        void probeLastMessageOffsetTakesMaxWhenMultipleOffsetsReceived() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("maxWaitMs", "20");
+
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 0, 100, new ConnectorOptions(opts));
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
+
+            com.rabbitmq.stream.Environment env = mock(com.rabbitmq.stream.Environment.class);
+            com.rabbitmq.stream.ConsumerBuilder builder = mock(com.rabbitmq.stream.ConsumerBuilder.class);
+            com.rabbitmq.stream.ConsumerBuilder.FlowConfiguration flow = mock(
+                    com.rabbitmq.stream.ConsumerBuilder.FlowConfiguration.class);
+            com.rabbitmq.stream.Consumer probe = mock(com.rabbitmq.stream.Consumer.class);
+            final com.rabbitmq.stream.MessageHandler[] handlerRef = new com.rabbitmq.stream.MessageHandler[1];
+
+            when(env.consumerBuilder()).thenReturn(builder);
+            when(builder.stream(anyString())).thenReturn(builder);
+            when(builder.offset(any(OffsetSpecification.class))).thenReturn(builder);
+            when(builder.noTrackingStrategy()).thenReturn(builder);
+            when(builder.messageHandler(any(com.rabbitmq.stream.MessageHandler.class))).thenAnswer(invocation -> {
+                handlerRef[0] = invocation.getArgument(0);
+                return builder;
+            });
+            when(builder.flow()).thenReturn(flow);
+            when(flow.initialCredits(anyInt())).thenReturn(flow);
+            when(flow.strategy(any(com.rabbitmq.stream.ConsumerFlowStrategy.class))).thenReturn(flow);
+            when(flow.builder()).thenReturn(builder);
+            when(builder.build()).thenAnswer(invocation -> {
+                if (handlerRef[0] != null) {
+                    for (long offset : List.of(5L, 3L, 7L, 7L)) {
+                        com.rabbitmq.stream.MessageHandler.Context context =
+                                mock(com.rabbitmq.stream.MessageHandler.Context.class);
+                        when(context.offset()).thenReturn(offset);
+                        handlerRef[0].handle(context, CODEC.messageBuilder().addData(new byte[0]).build());
+                    }
+                }
+                return probe;
+            });
+
+            setPrivateField(reader, "environment", env);
+
+            Method probeMethod = findMethod(RabbitMQPartitionReader.class, "probeLastMessageOffset");
+            probeMethod.setAccessible(true);
+            long observed = (long) probeMethod.invoke(reader);
+
+            assertThat(observed).isEqualTo(7L);
+            verify(probe).close();
+        }
+
+        @Test
         void probeLastMessageOffsetReusesRecentProbeResult() throws Exception {
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
