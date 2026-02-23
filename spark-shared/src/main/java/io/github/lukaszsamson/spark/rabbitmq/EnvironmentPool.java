@@ -150,41 +150,25 @@ final class EnvironmentPool {
                 return entry.environment;
             }
 
-            int current = entry.refCount.get();
-            if (current < 0) {
-                pool.remove(key, entry);
-                continue;
-            }
-
-            if (current == 0) {
-                synchronized (entry) {
-                    if (entry.refCount.get() != 0 || pool.get(key) != entry) {
-                        continue;
-                    }
-                    entry.refCount.set(1);
-                    ScheduledFuture<?> eviction = entry.evictionTask;
-                    if (eviction != null) {
-                        eviction.cancel(false);
-                        entry.evictionTask = null;
-                    }
+            synchronized (entry) {
+                if (pool.get(key) != entry) {
+                    continue;
+                }
+                int current = entry.refCount.get();
+                if (current < 0) {
+                    pool.remove(key, entry);
+                    continue;
+                }
+                entry.refCount.set(current + 1);
+                ScheduledFuture<?> eviction = entry.evictionTask;
+                if (eviction != null) {
+                    eviction.cancel(false);
+                    entry.evictionTask = null;
                 }
                 LOG.debug("Reusing pooled environment for key {}, refCount={}",
-                        key.endpoints(), 1);
+                        key.endpoints(), current + 1);
                 return entry.environment;
             }
-
-            if (!entry.refCount.compareAndSet(current, current + 1)) {
-                continue;
-            }
-
-            ScheduledFuture<?> eviction = entry.evictionTask;
-            if (eviction != null) {
-                eviction.cancel(false);
-                entry.evictionTask = null;
-            }
-            LOG.debug("Reusing pooled environment for key {}, refCount={}",
-                    key.endpoints(), current + 1);
-            return entry.environment;
         }
     }
 
@@ -203,30 +187,43 @@ final class EnvironmentPool {
             return;
         }
 
-        int remaining = entry.refCount.decrementAndGet();
-        if (remaining < 0) {
-            LOG.warn("Environment refCount went negative for key {}", key.endpoints());
-            entry.refCount.set(0);
-            return;
-        }
+        synchronized (entry) {
+            int remaining = entry.refCount.decrementAndGet();
+            if (remaining < 0) {
+                LOG.warn("Environment refCount went negative for key {}", key.endpoints());
+                entry.refCount.set(0);
+                return;
+            }
 
-        if (remaining == 0) {
-            long idleTimeoutMs = options.getEnvironmentIdleTimeoutMs();
-            LOG.debug("Scheduling eviction for environment key {} in {}ms",
-                    key.endpoints(), idleTimeoutMs);
-            entry.evictionTask = getOrCreateEvictionScheduler().schedule(
-                    () -> evict(key, entry), idleTimeoutMs, TimeUnit.MILLISECONDS);
+            if (remaining == 0) {
+                long idleTimeoutMs = options.getEnvironmentIdleTimeoutMs();
+                LOG.debug("Scheduling eviction for environment key {} in {}ms",
+                        key.endpoints(), idleTimeoutMs);
+                ScheduledFuture<?> previousEviction = entry.evictionTask;
+                if (previousEviction != null) {
+                    previousEviction.cancel(false);
+                }
+                entry.evictionTask = getOrCreateEvictionScheduler().schedule(
+                        () -> evict(key, entry), idleTimeoutMs, TimeUnit.MILLISECONDS);
+            }
         }
     }
 
     private void evict(EnvironmentKey key, PooledEntry entry) {
         boolean removed;
         synchronized (entry) {
+            if (pool.get(key) != entry) {
+                return;
+            }
             // Final check + removal must be atomic with 0->1 reacquire.
             if (entry.refCount.get() != 0) {
+                entry.evictionTask = null;
                 return;
             }
             removed = pool.remove(key, entry);
+            if (removed) {
+                entry.evictionTask = null;
+            }
         }
         if (!removed) {
             return;

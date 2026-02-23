@@ -74,94 +74,102 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
 
     @Override
     public void write(InternalRow record) throws IOException {
-        // Check for prior send errors
-        Throwable error = sendError.get();
-        if (error != null) {
-            throw new IOException("Previous send failed on partition " + partitionId, error);
-        }
-
-        // Lazy initialization
-        if (producer == null) {
-            initProducer();
-        }
-
-        // Validate stream column in single-stream mode
-        if (options.isStreamMode()) {
-            String rowStream = converter.getStream(record);
-            if (rowStream != null && !rowStream.equals(options.getStream())) {
-                throw new IOException(
-                        "Row targets stream '" + rowStream + "' but connector is configured for " +
-                                "stream '" + options.getStream() + "'. In stream mode, all rows " +
-                                "must target the configured stream.");
-            }
-        }
-
-        // Build message, with explicit per-row publishing_id override when present.
-        MessageBuilder builder = producer.messageBuilder();
-        Long explicitPublishingId = converter.getPublishingId(record);
-        if (explicitPublishingId != null) {
-            if (explicitPublishingId < 0) {
-                throw new IOException(
-                        "Column 'publishing_id' must be >= 0, got: " + explicitPublishingId);
-            }
-            builder.publishingId(explicitPublishingId);
-            if (nextPublishingId >= 0 && explicitPublishingId >= nextPublishingId) {
-                nextPublishingId = explicitPublishingId + 1;
-            }
-        } else if (nextPublishingId >= 0) {
-            builder.publishingId(nextPublishingId++);
-        }
-        Message message = converter.convert(record, builder);
-
-        // Validate routing key for superstream hash/key strategies
-        if (options.isSuperStreamMode()
-                && options.getRoutingStrategy() != RoutingStrategyType.CUSTOM) {
-            String rk = extractRoutingKey(message);
-            if (rk == null || rk.isEmpty()) {
-                throw new IOException(
-                        "Routing key is required for superstream with " +
-                                options.getRoutingStrategy() + " routing strategy. " +
-                                "Provide a 'routing_key' column, set 'routing_key' in " +
-                                "'application_properties', or set 'subject' in 'properties'.");
-            }
-        }
-
-        // Track outstanding confirms
-        outstandingConfirms.incrementAndGet();
-        long sendStartNanos = System.nanoTime();
-
-        // Send with confirmation handler
         try {
-            producer.send(message, confirmationStatus -> {
-                long elapsedMs = TimeUnit.NANOSECONDS.toMillis(
-                        System.nanoTime() - sendStartNanos);
-                writeLatencyMs.addAndGet(Math.max(0L, elapsedMs));
-                if (!confirmationStatus.isConfirmed()) {
-                    publishErrors.incrementAndGet();
-                    sendError.compareAndSet(null,
-                            new IOException("Message confirmation failed with code " +
-                                    confirmationStatus.getCode() +
-                                    " on partition " + partitionId));
-                } else {
-                    publishConfirms.incrementAndGet();
-                }
-                synchronized (confirmMonitor) {
-                    long remaining = outstandingConfirms.decrementAndGet();
-                    if (remaining == 0 || sendError.get() != null) {
-                        confirmMonitor.notifyAll();
-                    }
-                }
-            });
-        } catch (Exception e) {
-            outstandingConfirms.decrementAndGet();
-            publishErrors.incrementAndGet();
-            throw new IOException("Failed to send message on partition " + partitionId, e);
-        }
+            // Check for prior send errors
+            Throwable error = sendError.get();
+            if (error != null) {
+                throw new IOException("Previous send failed on partition " + partitionId, error);
+            }
 
-        // Track metrics
-        recordsWritten++;
-        payloadBytesWritten += MessageSizeEstimator.payloadBytes(message);
-        estimatedWireBytesWritten += MessageSizeEstimator.estimatedWireBytes(message);
+            // Lazy initialization
+            if (producer == null) {
+                initProducer();
+            }
+
+            // Validate stream column in single-stream mode
+            if (options.isStreamMode()) {
+                String rowStream = converter.getStream(record);
+                if (rowStream != null && !rowStream.equals(options.getStream())) {
+                    throw new IOException(
+                            "Row targets stream '" + rowStream + "' but connector is configured for " +
+                                    "stream '" + options.getStream() + "'. In stream mode, all rows " +
+                                    "must target the configured stream.");
+                }
+            }
+
+            // Build message, with explicit per-row publishing_id override when present.
+            MessageBuilder builder = producer.messageBuilder();
+            Long explicitPublishingId = converter.getPublishingId(record);
+            if (explicitPublishingId != null) {
+                if (explicitPublishingId < 0) {
+                    throw new IOException(
+                            "Column 'publishing_id' must be >= 0, got: " + explicitPublishingId);
+                }
+                builder.publishingId(explicitPublishingId);
+                if (nextPublishingId >= 0 && explicitPublishingId >= nextPublishingId) {
+                    nextPublishingId = explicitPublishingId + 1;
+                }
+            } else if (nextPublishingId >= 0) {
+                builder.publishingId(nextPublishingId++);
+            }
+            Message message = converter.convert(record, builder);
+
+            // Validate routing key for superstream hash/key strategies
+            if (options.isSuperStreamMode()
+                    && options.getRoutingStrategy() != RoutingStrategyType.CUSTOM) {
+                String rk = extractRoutingKey(message);
+                if (rk == null || rk.isEmpty()) {
+                    throw new IOException(
+                            "Routing key is required for superstream with " +
+                                    options.getRoutingStrategy() + " routing strategy. " +
+                                    "Provide a 'routing_key' column, set 'routing_key' in " +
+                                    "'application_properties', or set 'subject' in 'properties'.");
+                }
+            }
+
+            // Track outstanding confirms
+            outstandingConfirms.incrementAndGet();
+            long sendStartNanos = System.nanoTime();
+
+            // Send with confirmation handler
+            try {
+                producer.send(message, confirmationStatus -> {
+                    long elapsedMs = TimeUnit.NANOSECONDS.toMillis(
+                            System.nanoTime() - sendStartNanos);
+                    writeLatencyMs.addAndGet(Math.max(0L, elapsedMs));
+                    if (!confirmationStatus.isConfirmed()) {
+                        publishErrors.incrementAndGet();
+                        sendError.compareAndSet(null,
+                                new IOException("Message confirmation failed with code " +
+                                        confirmationStatus.getCode() +
+                                        " on partition " + partitionId));
+                    } else {
+                        publishConfirms.incrementAndGet();
+                    }
+                    synchronized (confirmMonitor) {
+                        long remaining = outstandingConfirms.decrementAndGet();
+                        if (remaining == 0 || sendError.get() != null) {
+                            confirmMonitor.notifyAll();
+                        }
+                    }
+                });
+            } catch (Exception e) {
+                outstandingConfirms.decrementAndGet();
+                publishErrors.incrementAndGet();
+                throw new IOException("Failed to send message on partition " + partitionId, e);
+            }
+
+            // Track metrics
+            recordsWritten++;
+            payloadBytesWritten += MessageSizeEstimator.payloadBytes(message);
+            estimatedWireBytesWritten += MessageSizeEstimator.estimatedWireBytes(message);
+        } catch (IOException e) {
+            cleanupAfterWriteFailure(e);
+            throw e;
+        } catch (RuntimeException e) {
+            cleanupAfterWriteFailure(e);
+            throw e;
+        }
     }
 
     @Override
@@ -282,94 +290,137 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
 
     // ---- Producer initialization ----
 
-    private void initProducer() {
+    private void initProducer() throws IOException {
         environment = EnvironmentPool.getInstance().acquire(options);
         pooledEnvironment = true;
-
-        ProducerBuilder builder;
-        if (options.isSuperStreamMode()) {
-            builder = buildSuperStreamProducer();
-        } else {
-            builder = environment.producerBuilder().stream(options.getStream());
-        }
-
-        // Producer name for deduplication
-        String derivedName = deriveProducerName();
-        if (derivedName != null) {
-            builder.name(derivedName);
-        }
-
-        // Sub-entry batching and compression
-        if (options.getSubEntrySize() != null && options.getSubEntrySize() > 1) {
-            builder.subEntrySize(options.getSubEntrySize());
-            builder.compression(toStreamCompression(options.getCompression()));
-        }
-
-        // Batch settings
-        if (options.getBatchPublishingDelayMs() != null) {
-            builder.batchPublishingDelay(
-                    Duration.ofMillis(options.getBatchPublishingDelayMs()));
-        }
-
-        // Flow control
-        if (options.getMaxInFlight() != null) {
-            builder.maxUnconfirmedMessages(options.getMaxInFlight());
-        }
-        if (options.getPublisherConfirmTimeoutMs() != null) {
-            long configuredMs = options.getPublisherConfirmTimeoutMs();
-            long effectiveMs = effectivePublisherConfirmTimeoutMs();
-            if (configuredMs > 0 && configuredMs < CLIENT_MIN_CONFIRM_TIMEOUT_MS) {
-                LOG.warn("publisherConfirmTimeoutMs={}ms is below client minimum; using {}ms for producer confirm timeout",
-                        configuredMs, effectiveMs);
-            }
-            builder.confirmTimeout(Duration.ofMillis(effectiveMs));
-        }
-        builder.enqueueTimeout(Duration.ofMillis(options.getEnqueueTimeoutMs()));
-        if (options.getRetryOnRecovery() != null) {
-            builder.retryOnRecovery(options.getRetryOnRecovery());
-        }
-        if (options.getDynamicBatch() != null) {
-            builder.dynamicBatch(options.getDynamicBatch());
-        }
-
-        // State listener for RECOVERING/CLOSED transitions
-        builder.listeners(context -> {
-            Resource.State from = context.previousState();
-            Resource.State to = context.currentState();
-            if (to == Resource.State.RECOVERING) {
-                LOG.warn("Producer for partition {} is recovering ({}->{})",
-                        partitionId, from, to);
-            } else if (to == Resource.State.CLOSED) {
-                LOG.warn("Producer for partition {} has closed ({}->{})",
-                        partitionId, from, to);
-                sendError.compareAndSet(null,
-                        new IOException("Producer closed unexpectedly on partition " + partitionId));
-                synchronized (confirmMonitor) {
-                    confirmMonitor.notifyAll();
-                }
+        String derivedName = null;
+        try {
+            ProducerBuilder builder;
+            if (options.isSuperStreamMode()) {
+                builder = buildSuperStreamProducer();
             } else {
-                LOG.debug("Producer for partition {} state change: {}->{}",
-                        partitionId, from, to);
+                builder = environment.producerBuilder().stream(options.getStream());
             }
-        });
 
-        // Filter value extraction
-        ConnectorFilterValueExtractor filterValueExtractor = createFilterValueExtractor(options);
-        if (filterValueExtractor != null) {
-            builder.filterValue(message -> filterValueExtractor.extract(toMessageView(message)));
+            // Producer name for deduplication
+            derivedName = deriveProducerName();
+            if (derivedName != null) {
+                builder.name(derivedName);
+            }
+
+            // Sub-entry batching and compression
+            if (options.getSubEntrySize() != null && options.getSubEntrySize() > 1) {
+                builder.subEntrySize(options.getSubEntrySize());
+                builder.compression(toStreamCompression(options.getCompression()));
+            }
+
+            // Batch settings
+            if (options.getBatchPublishingDelayMs() != null) {
+                builder.batchPublishingDelay(
+                        Duration.ofMillis(options.getBatchPublishingDelayMs()));
+            }
+
+            // Flow control
+            if (options.getMaxInFlight() != null) {
+                builder.maxUnconfirmedMessages(options.getMaxInFlight());
+            }
+            if (options.getPublisherConfirmTimeoutMs() != null) {
+                long configuredMs = options.getPublisherConfirmTimeoutMs();
+                long effectiveMs = effectivePublisherConfirmTimeoutMs();
+                if (configuredMs > 0 && configuredMs < CLIENT_MIN_CONFIRM_TIMEOUT_MS) {
+                    LOG.warn("publisherConfirmTimeoutMs={}ms is below client minimum; using {}ms for producer confirm timeout",
+                            configuredMs, effectiveMs);
+                }
+                builder.confirmTimeout(Duration.ofMillis(effectiveMs));
+            }
+            builder.enqueueTimeout(Duration.ofMillis(options.getEnqueueTimeoutMs()));
+            if (options.getRetryOnRecovery() != null) {
+                builder.retryOnRecovery(options.getRetryOnRecovery());
+            }
+            if (options.getDynamicBatch() != null) {
+                builder.dynamicBatch(options.getDynamicBatch());
+            }
+
+            // State listener for RECOVERING/CLOSED transitions
+            builder.listeners(context -> {
+                Resource.State from = context.previousState();
+                Resource.State to = context.currentState();
+                if (to == Resource.State.RECOVERING) {
+                    LOG.warn("Producer for partition {} is recovering ({}->{})",
+                            partitionId, from, to);
+                } else if (to == Resource.State.CLOSED) {
+                    LOG.warn("Producer for partition {} has closed ({}->{})",
+                            partitionId, from, to);
+                    sendError.compareAndSet(null,
+                            new IOException("Producer closed unexpectedly on partition " + partitionId));
+                    synchronized (confirmMonitor) {
+                        confirmMonitor.notifyAll();
+                    }
+                } else {
+                    LOG.debug("Producer for partition {} state change: {}->{}",
+                            partitionId, from, to);
+                }
+            });
+
+            // Filter value extraction
+            ConnectorFilterValueExtractor filterValueExtractor = createFilterValueExtractor(options);
+            if (filterValueExtractor != null) {
+                builder.filterValue(message -> filterValueExtractor.extract(toMessageView(message)));
+            }
+
+            producer = builder.build();
+
+            // Initialize dedup publishing ID
+            if (derivedName != null) {
+                nextPublishingId = epochId >= 0 ? 0L : producer.getLastPublishingId() + 1;
+                LOG.info("Dedup enabled for partition {} with producer '{}', starting publishingId={}",
+                        partitionId, derivedName, nextPublishingId);
+            }
+
+            LOG.info("Initialized producer for partition {} (task {}, epoch {})",
+                    partitionId, taskId, epochId);
+        } catch (Exception e) {
+            cleanupAfterInitFailure();
+            throw new IOException("Failed to initialize producer for partition " + partitionId +
+                    " (task " + taskId + ", epoch " + epochId + ")", e);
+        }
+    }
+
+    private void cleanupAfterWriteFailure(Throwable originalFailure) {
+        try {
+            close();
+        } catch (IOException closeError) {
+            originalFailure.addSuppressed(closeError);
+        }
+    }
+
+    private void cleanupAfterInitFailure() {
+        try {
+            if (producer != null) {
+                producer.close();
+            }
+        } catch (Exception closeError) {
+            LOG.warn("Error closing producer after init failure for partition {}", partitionId,
+                    closeError);
+        } finally {
+            producer = null;
         }
 
-        producer = builder.build();
-
-        // Initialize dedup publishing ID
-        if (derivedName != null) {
-            nextPublishingId = epochId >= 0 ? 0L : producer.getLastPublishingId() + 1;
-            LOG.info("Dedup enabled for partition {} with producer '{}', starting publishingId={}",
-                    partitionId, derivedName, nextPublishingId);
+        if (pooledEnvironment) {
+            EnvironmentPool.getInstance().release(options);
+            pooledEnvironment = false;
+            environment = null;
+        } else if (environment != null) {
+            try {
+                environment.close();
+            } catch (Exception closeError) {
+                LOG.warn("Error closing environment after init failure for partition {}",
+                        partitionId, closeError);
+            } finally {
+                environment = null;
+            }
         }
-
-        LOG.info("Initialized producer for partition {} (task {}, epoch {})",
-                partitionId, taskId, epochId);
+        nextPublishingId = -1L;
     }
 
     private long effectivePublisherConfirmTimeoutMs() {

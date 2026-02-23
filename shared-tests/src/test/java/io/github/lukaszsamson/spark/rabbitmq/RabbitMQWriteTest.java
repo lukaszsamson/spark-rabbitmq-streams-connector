@@ -513,6 +513,36 @@ class RabbitMQWriteTest {
         }
 
         @Test
+        void writeFailureAfterLazyInitReleasesEnvironmentAndClosesProducer() throws Exception {
+            StructType schema = new StructType(new StructField[]{
+                    new StructField("value", DataTypes.BinaryType, false, Metadata.empty()),
+                    new StructField("stream", DataTypes.StringType, true, Metadata.empty()),
+            });
+            ConnectorOptions options = minimalSinkOptions();
+            RabbitMQDataWriter writer = new RabbitMQDataWriter(
+                    options, schema, 0, 1, -1);
+            CapturingProducerBuilder builder = new CapturingProducerBuilder();
+            CloseTrackingProducer producer = new CloseTrackingProducer(false);
+            builder.customProducer = producer;
+            seedEnvironmentPool(options, new BuilderEnvironment(builder));
+
+            assertThat(getRefCount(options)).isEqualTo(1);
+            InternalRow row = new GenericInternalRow(new Object[]{
+                    "body".getBytes(), UTF8String.fromString("other-stream")
+            });
+
+            assertThatThrownBy(() -> writer.write(row))
+                    .isInstanceOf(IOException.class)
+                    .hasMessageContaining("Row targets stream");
+
+            assertThat(producer.closeCalls).isEqualTo(1);
+            assertThat(getRefCount(options)).isEqualTo(1);
+            assertThat(getPrivateField(writer, "producer")).isNull();
+            assertThat(getPrivateField(writer, "environment")).isNull();
+            assertThat(getPrivateField(writer, "pooledEnvironment")).isEqualTo(false);
+        }
+
+        @Test
         void writeRequiresRoutingKeyForSuperStreamHashKey() throws Exception {
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
@@ -931,6 +961,31 @@ class RabbitMQWriteTest {
         }
 
         @Test
+        void initProducerFailureAfterBuildCleansUpProducerAndEnvironment() throws Exception {
+            Map<String, String> opts = minimalSinkMap();
+            opts.put("producerName", "dedup");
+            ConnectorOptions options = new ConnectorOptions(opts);
+
+            RabbitMQDataWriter writer = new RabbitMQDataWriter(
+                    options, minimalSinkSchema(), 0, 1, -1);
+            CapturingProducerBuilder builder = new CapturingProducerBuilder();
+            CloseTrackingProducer producer = new CloseTrackingProducer(true);
+            builder.customProducer = producer;
+            seedEnvironmentPool(options, new BuilderEnvironment(builder));
+
+            assertThat(getRefCount(options)).isEqualTo(1);
+            assertThatThrownBy(() -> writer.write(new GenericInternalRow(new Object[]{"x".getBytes()})))
+                    .isInstanceOf(IOException.class)
+                    .hasMessageContaining("Failed to initialize producer");
+
+            assertThat(producer.closeCalls).isEqualTo(1);
+            assertThat(getRefCount(options)).isEqualTo(1);
+            assertThat(getPrivateField(writer, "producer")).isNull();
+            assertThat(getPrivateField(writer, "environment")).isNull();
+            assertThat(getPrivateField(writer, "pooledEnvironment")).isEqualTo(false);
+        }
+
+        @Test
         void commitUnblocksPromptlyWhenProducerClosesWithOutstandingConfirms() throws Exception {
             Map<String, String> opts = minimalSinkMap();
             opts.put("publisherConfirmTimeoutMs", "30000");
@@ -1137,6 +1192,16 @@ class RabbitMQWriteTest {
                 EnvironmentPool.getInstance());
     }
 
+    private static int getRefCount(ConnectorOptions options) throws Exception {
+        EnvironmentPool.EnvironmentKey key = EnvironmentPool.EnvironmentKey.from(options);
+        Object entry = getPoolMap().get(key);
+        Field refCountField = entry.getClass().getDeclaredField("refCount");
+        refCountField.setAccessible(true);
+        java.util.concurrent.atomic.AtomicInteger refCount =
+                (java.util.concurrent.atomic.AtomicInteger) refCountField.get(entry);
+        return refCount.get();
+    }
+
     private static Object newEntry(com.rabbitmq.stream.Environment environment) throws Exception {
         Class<?> entryClass = Class.forName("io.github.lukaszsamson.spark.rabbitmq.EnvironmentPool$PooledEntry");
         Constructor<?> ctor = entryClass.getDeclaredConstructor(com.rabbitmq.stream.Environment.class);
@@ -1225,6 +1290,41 @@ class RabbitMQWriteTest {
 
         @Override
         public void close() {
+        }
+    }
+
+    private static final class CloseTrackingProducer implements com.rabbitmq.stream.Producer {
+        private static final com.rabbitmq.stream.codec.QpidProtonCodec CODEC =
+                new com.rabbitmq.stream.codec.QpidProtonCodec();
+        private final boolean failOnLastPublishingId;
+        private int closeCalls;
+
+        private CloseTrackingProducer(boolean failOnLastPublishingId) {
+            this.failOnLastPublishingId = failOnLastPublishingId;
+        }
+
+        @Override
+        public com.rabbitmq.stream.MessageBuilder messageBuilder() {
+            return CODEC.messageBuilder();
+        }
+
+        @Override
+        public long getLastPublishingId() {
+            if (failOnLastPublishingId) {
+                throw new RuntimeException("getLastPublishingId failed");
+            }
+            return 0L;
+        }
+
+        @Override
+        public void send(com.rabbitmq.stream.Message message,
+                         com.rabbitmq.stream.ConfirmationHandler confirmationHandler) {
+            confirmationHandler.handle(new com.rabbitmq.stream.ConfirmationStatus(message, true, (short) 0));
+        }
+
+        @Override
+        public void close() {
+            closeCalls++;
         }
     }
 
@@ -1488,6 +1588,7 @@ class RabbitMQWriteTest {
     private static final class CapturingProducerBuilder implements com.rabbitmq.stream.ProducerBuilder {
         private final boolean failOnDuplicateName;
         private final Set<String> activeProducerNames;
+        private com.rabbitmq.stream.Producer customProducer;
         private int maxInFlight;
         private long confirmTimeoutMs;
         private long enqueueTimeoutMs;
@@ -1602,6 +1703,9 @@ class RabbitMQWriteTest {
 
         @Override
         public com.rabbitmq.stream.Producer build() {
+            if (customProducer != null) {
+                return customProducer;
+            }
             if (failOnDuplicateName && name != null && !activeProducerNames.add(name)) {
                 throw new com.rabbitmq.stream.StreamException(
                         "Error while declaring publisher: 17 (PRECONDITION_FAILED). " +

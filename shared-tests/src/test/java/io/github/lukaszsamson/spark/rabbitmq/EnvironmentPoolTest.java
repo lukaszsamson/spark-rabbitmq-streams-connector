@@ -325,6 +325,30 @@ class EnvironmentPoolTest {
         }
 
         @Test
+        void acquireCancelsPendingEvictionWhenEntryStillInUse() throws Exception {
+            EnvironmentPool pool = EnvironmentPool.getInstance();
+            ConnectorOptions options = opts("localhost:5552", "test-stream");
+            EnvironmentPool.EnvironmentKey key = EnvironmentPool.EnvironmentKey.from(options);
+            CountingEnvironment env = new CountingEnvironment();
+            Object entry = newEntry(env);
+            putEntry(key, entry);
+
+            var scheduler = Executors.newSingleThreadScheduledExecutor();
+            ScheduledFuture<?> scheduled = scheduler.schedule(() -> {}, 60, TimeUnit.SECONDS);
+            setEvictionTask(entry, scheduled);
+
+            try {
+                Environment acquired = pool.acquire(options);
+                assertThat(acquired).isSameAs(env);
+                assertThat(getRefCount(entry)).isEqualTo(2);
+                assertThat((Object) getEvictionTask(entry)).isNull();
+                assertThat(scheduled.isCancelled()).isTrue();
+            } finally {
+                scheduler.shutdownNow();
+            }
+        }
+
+        @Test
         void acquireReusesExistingEnvironmentAtRefCountOne() throws Exception {
             EnvironmentPool pool = EnvironmentPool.getInstance();
             Map<String, String> map = minimalMap("localhost:5552", "test-stream");
