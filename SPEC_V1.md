@@ -118,6 +118,7 @@ Type coercion notes:
 ### Read modes
 - Batch read: bounded by `startingOffsets` and `endingOffsets`.
 - Structured Streaming: micro-batch only; `startingOffsets` can be `earliest`, `latest`, `offset`, or `timestamp`.
+- For batch, `endingOffsets` can be `latest`, `offset`, or `timestamp`.
 
 ### Batch read
 - `Scan.toBatch()` resolves starting and ending offsets (endingOffsets=latest resolved once).
@@ -362,9 +363,11 @@ Type coercion notes:
 ### Source options
 - `startingOffsets` (earliest|latest|offset|timestamp)
 - `startingOffset` (long; used when startingOffsets=offset)
-- `startingTimestamp` (epoch millis only; used when startingOffsets=timestamp)
-- `endingOffsets` (latest|offset)
+- `startingTimestamp` (epoch millis >= 0; used when startingOffsets=timestamp)
+- `endingOffsets` (latest|offset|timestamp)
 - `endingOffset` (long; used when endingOffsets=offset)
+- `endingTimestamp` (epoch millis >= 0; used when endingOffsets=timestamp)
+- `endingOffsetsByTimestamp` (JSON map stream->epoch millis >= 0; per-stream override when endingOffsets=timestamp)
 - `maxRecordsPerTrigger` (long)
 - `maxBytesPerTrigger` (long, best-effort; uses estimated message size)
 - `minPartitions` (int)

@@ -534,17 +534,17 @@ public final class ConnectorOptions implements Serializable {
             throw new IllegalArgumentException(
                     "'" + ENDING_OFFSET + "' must be >= 0, got: " + endingOffset);
         }
-        if (endingTimestamp != null && endingTimestamp <= 0) {
+        if (endingTimestamp != null && endingTimestamp < 0) {
             throw new IllegalArgumentException(
-                    "'" + ENDING_TIMESTAMP + "' must be > 0 (epoch millis), got: " +
+                    "'" + ENDING_TIMESTAMP + "' must be >= 0 (epoch millis), got: " +
                             endingTimestamp);
         }
         if (endingOffsetsByTimestamp != null) {
             for (Map.Entry<String, Long> entry : endingOffsetsByTimestamp.entrySet()) {
-                if (entry.getValue() <= 0) {
+                if (entry.getValue() < 0) {
                     throw new IllegalArgumentException(
                             "'" + ENDING_OFFSETS_BY_TIMESTAMP + "[" + entry.getKey() +
-                                    "]' must be > 0 (epoch millis), got: " + entry.getValue());
+                                    "]' must be >= 0 (epoch millis), got: " + entry.getValue());
                 }
             }
         }

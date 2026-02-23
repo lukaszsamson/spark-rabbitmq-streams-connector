@@ -1390,15 +1390,33 @@ class ConnectorOptionsTest {
         }
 
         @Test
-        void rejectsNonPositiveEndingOffsetsByTimestampEntry() {
+        void rejectsNegativeEndingOffsetsByTimestampEntry() {
             var map = minimalStreamOptions();
-            map.put("endingOffsetsByTimestamp", "{\"orders\":0}");
+            map.put("endingOffsetsByTimestamp", "{\"orders\":-1}");
             var opts = new ConnectorOptions(map);
             assertThatThrownBy(opts::validateForSource)
                     .isInstanceOf(IllegalArgumentException.class)
                     .hasMessageContaining("endingOffsetsByTimestamp")
                     .hasMessageContaining("orders")
-                    .hasMessageContaining("> 0");
+                    .hasMessageContaining(">= 0");
+        }
+
+        @Test
+        void allowsZeroEndingTimestamp() {
+            var map = minimalStreamOptions();
+            map.put("endingOffsets", "timestamp");
+            map.put("endingTimestamp", "0");
+            var opts = new ConnectorOptions(map);
+            assertThatCode(opts::validateForSource).doesNotThrowAnyException();
+        }
+
+        @Test
+        void allowsZeroEndingOffsetsByTimestampEntry() {
+            var map = minimalStreamOptions();
+            map.put("endingOffsets", "timestamp");
+            map.put("endingOffsetsByTimestamp", "{\"orders\":0}");
+            var opts = new ConnectorOptions(map);
+            assertThatCode(opts::validateForSource).doesNotThrowAnyException();
         }
     }
 
