@@ -22,6 +22,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
@@ -384,6 +385,7 @@ class RabbitMQPartitionReaderTest {
             when(builder.noTrackingStrategy()).thenReturn(builder);
             when(builder.messageHandler(any(com.rabbitmq.stream.MessageHandler.class))).thenReturn(builder);
             when(builder.flow()).thenReturn(flow);
+            when(flow.initialCredits(anyInt())).thenReturn(flow);
             when(flow.strategy(any(com.rabbitmq.stream.ConsumerFlowStrategy.class))).thenReturn(flow);
             when(flow.builder()).thenReturn(builder);
             when(builder.build()).thenReturn(probe);
@@ -918,6 +920,7 @@ class RabbitMQPartitionReaderTest {
             when(builder.noTrackingStrategy()).thenReturn(builder);
             when(builder.messageHandler(any(com.rabbitmq.stream.MessageHandler.class))).thenReturn(builder);
             when(builder.flow()).thenReturn(flow);
+            when(flow.initialCredits(anyInt())).thenReturn(flow);
             when(flow.strategy(any(com.rabbitmq.stream.ConsumerFlowStrategy.class))).thenReturn(flow);
             when(flow.builder()).thenReturn(builder);
             when(builder.build()).thenReturn(probe);
@@ -958,6 +961,7 @@ class RabbitMQPartitionReaderTest {
             when(builder.noTrackingStrategy()).thenReturn(builder);
             when(builder.messageHandler(any(com.rabbitmq.stream.MessageHandler.class))).thenReturn(builder);
             when(builder.flow()).thenReturn(flow);
+            when(flow.initialCredits(anyInt())).thenReturn(flow);
             when(flow.strategy(any(com.rabbitmq.stream.ConsumerFlowStrategy.class))).thenReturn(flow);
             when(flow.builder()).thenReturn(builder);
             when(builder.build()).thenReturn(probe);

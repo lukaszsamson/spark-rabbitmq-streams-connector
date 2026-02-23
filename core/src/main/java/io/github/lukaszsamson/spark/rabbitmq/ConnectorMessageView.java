@@ -1,6 +1,7 @@
 package io.github.lukaszsamson.spark.rabbitmq;
 
 import java.io.Serializable;
+import java.util.Arrays;
 import java.util.Map;
 
 /**
@@ -21,7 +22,7 @@ public final class ConnectorMessageView implements Serializable {
                                 Map<String, String> applicationProperties,
                                 Map<String, String> messageAnnotations,
                                 Map<String, String> properties) {
-        this.body = body;
+        this.body = body == null ? null : Arrays.copyOf(body, body.length);
         this.applicationProperties = applicationProperties == null
                 ? Map.of() : Map.copyOf(applicationProperties);
         this.messageAnnotations = messageAnnotations == null
@@ -30,7 +31,7 @@ public final class ConnectorMessageView implements Serializable {
     }
 
     public byte[] getBody() {
-        return body;
+        return body == null ? null : Arrays.copyOf(body, body.length);
     }
 
     public Map<String, String> getApplicationProperties() {

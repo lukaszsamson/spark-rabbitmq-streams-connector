@@ -281,6 +281,13 @@ class ConnectorOptionsTest {
                     .isInstanceOf(IllegalArgumentException.class)
                     .hasMessageContaining("bogus");
         }
+
+        @Test
+        void metadataFieldsViewIsUnmodifiable() {
+            var opts = new ConnectorOptions(minimalStreamOptions());
+            assertThatThrownBy(() -> opts.getMetadataFields().add(MetadataField.PROPERTIES))
+                    .isInstanceOf(UnsupportedOperationException.class);
+        }
     }
 
     // ========================================================================
@@ -1253,6 +1260,18 @@ class ConnectorOptionsTest {
             var opts = new ConnectorOptions(map);
             assertThatThrownBy(opts::validateForSource)
                     .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("maxWaitMs");
+        }
+
+        @Test
+        void rejectsPollTimeoutGreaterThanMaxWaitMs() {
+            var map = minimalStreamOptions();
+            map.put("pollTimeoutMs", "60000");
+            map.put("maxWaitMs", "1000");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateForSource)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("pollTimeoutMs")
                     .hasMessageContaining("maxWaitMs");
         }
 

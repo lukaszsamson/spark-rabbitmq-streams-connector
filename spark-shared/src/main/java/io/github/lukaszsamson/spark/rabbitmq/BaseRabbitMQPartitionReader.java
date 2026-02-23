@@ -666,6 +666,7 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
                     .noTrackingStrategy()
                     .messageHandler((context, message) -> observedOffsets.offer(context.offset()))
                     .flow()
+                    .initialCredits(1)
                     .strategy(ConsumerFlowStrategy.creditWhenHalfMessagesProcessed(1))
                     .builder()
                     .build();

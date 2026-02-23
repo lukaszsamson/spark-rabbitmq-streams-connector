@@ -249,8 +249,8 @@ public final class ConnectorOptions implements Serializable {
         this.stream = getString(options, STREAM);
         this.superstream = getString(options, SUPERSTREAM);
         this.consumerName = getString(options, CONSUMER_NAME);
-        this.metadataFields = parseMetadataFields(
-                getString(options, METADATA_FIELDS, DEFAULT_METADATA_FIELDS));
+        this.metadataFields = Collections.unmodifiableSet(parseMetadataFields(
+                getString(options, METADATA_FIELDS, DEFAULT_METADATA_FIELDS)));
         this.failOnDataLoss = getBoolean(options, FAIL_ON_DATA_LOSS, DEFAULT_FAIL_ON_DATA_LOSS);
         this.addressResolverClass = getString(options, ADDRESS_RESOLVER_CLASS);
         this.observationCollectorClass = getString(options, OBSERVATION_COLLECTOR_CLASS);
@@ -604,6 +604,11 @@ public final class ConnectorOptions implements Serializable {
         if (maxWaitMs <= 0) {
             throw new IllegalArgumentException(
                     "'" + MAX_WAIT_MS + "' must be > 0, got: " + maxWaitMs);
+        }
+        if (pollTimeoutMs > maxWaitMs) {
+            throw new IllegalArgumentException(
+                    "'" + POLL_TIMEOUT_MS + "' must be <= '" + MAX_WAIT_MS + "', got: " +
+                            pollTimeoutMs + " > " + maxWaitMs);
         }
         if (callbackEnqueueTimeoutMs < 0) {
             throw new IllegalArgumentException(

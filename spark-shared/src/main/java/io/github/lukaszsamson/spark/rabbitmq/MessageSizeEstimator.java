@@ -54,7 +54,7 @@ final class MessageSizeEstimator {
             total += propertyBytes("creation_time", properties.getCreationTime());
         }
         total += propertyBytes("group_id", properties.getGroupId());
-        if (properties.getGroupSequence() > 0) {
+        if (properties.getGroupSequence() >= 0) {
             total += propertyBytes("group_sequence", properties.getGroupSequence());
         }
         total += propertyBytes("reply_to_group_id", properties.getReplyToGroupId());

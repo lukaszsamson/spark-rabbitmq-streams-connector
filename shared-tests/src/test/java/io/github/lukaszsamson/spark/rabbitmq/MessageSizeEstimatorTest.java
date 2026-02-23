@@ -41,12 +41,28 @@ class MessageSizeEstimatorTest {
         when(message.getMessageAnnotations()).thenReturn(annotations);
         when(message.getProperties()).thenReturn(properties);
         when(properties.getGroupId()).thenReturn("g🙂");
+        when(properties.getGroupSequence()).thenReturn(-1L);
 
         long expected = body.length
                 + utf8Bytes("k🙂") + utf8Bytes("v€")
                 + utf8Bytes("ż") + utf8Bytes("ą")
                 + utf8Bytes("group_id") + utf8Bytes("g🙂");
 
+        assertThat(MessageSizeEstimator.estimatedWireBytes(message)).isEqualTo(expected);
+    }
+
+    @Test
+    void estimatedWireBytesIncludesGroupSequenceWhenZero() {
+        Message message = mock(Message.class);
+        Properties properties = mock(Properties.class);
+
+        when(message.getBodyAsBinary()).thenReturn(null);
+        when(message.getApplicationProperties()).thenReturn(Map.of());
+        when(message.getMessageAnnotations()).thenReturn(Map.of());
+        when(message.getProperties()).thenReturn(properties);
+        when(properties.getGroupSequence()).thenReturn(0L);
+
+        long expected = utf8Bytes("group_sequence") + utf8Bytes("0");
         assertThat(MessageSizeEstimator.estimatedWireBytes(message)).isEqualTo(expected);
     }
 
