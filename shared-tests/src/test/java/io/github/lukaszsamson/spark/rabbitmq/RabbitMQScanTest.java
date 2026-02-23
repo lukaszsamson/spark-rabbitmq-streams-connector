@@ -138,6 +138,18 @@ class RabbitMQScanTest {
         }
 
         @Test
+        void timestampStartPlanningUsesPerStreamTimestampWithoutGlobalTimestamp() throws Exception {
+            Map<String, String> opts = baseOptions();
+            opts.put("startingOffsets", "timestamp");
+            opts.put("startingOffsetsByTimestamp", "{\"s1\":1700000000000}");
+            RabbitMQScan scan = new RabbitMQScan(new ConnectorOptions(opts), schema());
+            StreamStats stats = new Stats(10L, false, false, 20L);
+
+            long start = resolveStartOffset(scan, new ProbeTailEnvironment(), "s1", 10L, stats);
+            assertThat(start).isEqualTo(11L);
+        }
+
+        @Test
         void timestampStartPlanningWaitsForProbeWithinConfiguredPollTimeout() throws Exception {
             Map<String, String> opts = baseOptions();
             opts.put("startingOffsets", "timestamp");
@@ -165,6 +177,20 @@ class RabbitMQScanTest {
             if (end == null) {
                 return;
             }
+            assertThat(end).isEqualTo(17L);
+        }
+
+        @Test
+        void timestampEndPlanningUsesPerStreamTimestampOverride() throws Exception {
+            Map<String, String> opts = baseOptions();
+            opts.put("endingOffsetsByTimestamp", "{\"s1\":1700000000000}");
+            opts.put("pollTimeoutMs", "1000");
+            RabbitMQScan scan = new RabbitMQScan(new ConnectorOptions(opts), schema());
+            StreamStats stats = new Stats(0L, false, false, 99L);
+
+            long end = resolveEndOffset(scan,
+                    new DelayedProbeEnvironment(0L, new Stats(0L, false, false, 99L), 17L),
+                    "s1", stats);
             assertThat(end).isEqualTo(17L);
         }
 
@@ -234,6 +260,18 @@ class RabbitMQScanTest {
         Map<String, String> opts = baseOptions();
         opts.put("endingOffsets", "offset");
         opts.put("endingOffset", "10");
+
+        RabbitMQScan scan = new RabbitMQScan(new ConnectorOptions(opts), schema());
+        assertThatThrownBy(() -> scan.toMicroBatchStream("/tmp/checkpoint"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("not supported for streaming queries");
+    }
+
+    @Test
+    void toMicroBatchStreamRejectsEndingTimestampOption() {
+        Map<String, String> opts = baseOptions();
+        opts.put("endingOffsets", "timestamp");
+        opts.put("endingTimestamp", "1700000000000");
 
         RabbitMQScan scan = new RabbitMQScan(new ConnectorOptions(opts), schema());
         assertThatThrownBy(() -> scan.toMicroBatchStream("/tmp/checkpoint"))

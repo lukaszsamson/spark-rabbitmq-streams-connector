@@ -71,6 +71,11 @@ final class RabbitMQScan implements Scan {
                     "endingOffsets=offset is not supported for streaming queries. " +
                             "Use endingOffsets only with batch reads.");
         }
+        if (options.getEndingOffsets() == EndingOffsetsMode.TIMESTAMP) {
+            throw new IllegalArgumentException(
+                    "endingOffsets=timestamp is not supported for streaming queries. " +
+                            "Use endingOffsets only with batch reads.");
+        }
         return new RabbitMQMicroBatchStream(options, schema, checkpointLocation);
     }
 
@@ -264,23 +269,30 @@ final class RabbitMQScan implements Scan {
     }
 
     private long resolveStartOffset(Environment env, String stream, long firstAvailable, StreamStats stats) {
+        Map<String, Long> perStreamTs = options.getStartingOffsetsByTimestamp();
+        if (perStreamTs != null && perStreamTs.containsKey(stream)) {
+            return resolveTimestampStartingOffset(
+                    env, stream, firstAvailable, stats, perStreamTs.get(stream));
+        }
         return switch (options.getStartingOffsets()) {
             case EARLIEST -> firstAvailable;
             case LATEST -> resolveLatestOffset(env, stream, stats);
             case OFFSET -> options.getStartingOffset();
-            case TIMESTAMP -> resolveTimestampStartingOffset(env, stream, firstAvailable, stats);
+            case TIMESTAMP -> resolveTimestampStartingOffset(
+                    env, stream, firstAvailable, stats, options.getStartingTimestamp());
         };
     }
 
     private long resolveTimestampStartingOffset(
-            Environment env, String stream, long firstAvailable, StreamStats stats) {
+            Environment env, String stream, long firstAvailable, StreamStats stats,
+            long timestamp) {
         BlockingQueue<Long> observedOffsets = new LinkedBlockingQueue<>();
         com.rabbitmq.stream.Consumer probe = null;
         try {
             probe = env.consumerBuilder()
                     .stream(stream)
                     .offset(com.rabbitmq.stream.OffsetSpecification.timestamp(
-                            options.getStartingTimestamp()))
+                            timestamp))
                     .noTrackingStrategy()
                     .messageHandler((context, message) -> observedOffsets.offer(context.offset()))
                     .flow()
@@ -295,19 +307,21 @@ final class RabbitMQScan implements Scan {
             }
             throw new IllegalStateException(
                     "No offset matched from request for timestamp "
-                            + options.getStartingTimestamp()
+                            + timestamp
                             + " in stream '" + stream + "'");
         } catch (NoOffsetException e) {
             throw new IllegalStateException(
                     "No offset matched from request for timestamp "
-                            + options.getStartingTimestamp()
+                            + timestamp
                             + " in stream '" + stream + "'", e);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new IllegalStateException(
                     "No offset matched from request for timestamp "
-                            + options.getStartingTimestamp()
+                            + timestamp
                             + " in stream '" + stream + "'", e);
+        } catch (IllegalStateException e) {
+            throw e;
         } catch (Exception e) {
             LOG.warn("Failed to resolve timestamp start offset for stream '{}': {}",
                     stream, e.getMessage());
@@ -329,11 +343,64 @@ final class RabbitMQScan implements Scan {
     }
 
     private long resolveEndOffset(Environment env, String stream, StreamStats stats) {
+        Map<String, Long> perStreamTs = options.getEndingOffsetsByTimestamp();
+        if (perStreamTs != null && perStreamTs.containsKey(stream)) {
+            return resolveTimestampEndingOffset(env, stream, perStreamTs.get(stream));
+        }
+
         if (options.getEndingOffsets() == EndingOffsetsMode.OFFSET) {
             return options.getEndingOffset();
         }
 
+        if (options.getEndingOffsets() == EndingOffsetsMode.TIMESTAMP) {
+            return resolveTimestampEndingOffset(env, stream, options.getEndingTimestamp());
+        }
+
         return resolveLatestOffset(env, stream, stats);
+    }
+
+    private long resolveTimestampEndingOffset(Environment env, String stream, long timestamp) {
+        BlockingQueue<Long> observedOffsets = new LinkedBlockingQueue<>();
+        com.rabbitmq.stream.Consumer probe = null;
+        try {
+            probe = env.consumerBuilder()
+                    .stream(stream)
+                    .offset(com.rabbitmq.stream.OffsetSpecification.timestamp(timestamp))
+                    .noTrackingStrategy()
+                    .messageHandler((context, message) -> observedOffsets.offer(context.offset()))
+                    .flow()
+                    .initialCredits(1)
+                    .strategy(ConsumerFlowStrategy.creditWhenHalfMessagesProcessed(1))
+                    .builder()
+                    .build();
+
+            Long observed = observedOffsets.poll(timestampProbeTimeoutMs(), TimeUnit.MILLISECONDS);
+            if (observed != null) {
+                return observed;
+            }
+            StreamStats tailStats = env.queryStreamStats(stream);
+            return resolveTailOffset(tailStats);
+        } catch (NoOffsetException e) {
+            return 0;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException(
+                    "Interrupted resolving ending timestamp for stream '" + stream + "'", e);
+        } catch (Exception e) {
+            LOG.warn("Failed to resolve timestamp end offset for stream '{}': {}",
+                    stream, e.getMessage());
+            throw new IllegalStateException(
+                    "Failed to resolve timestamp end offset for stream '" + stream + "'", e);
+        } finally {
+            if (probe != null) {
+                try {
+                    probe.close();
+                } catch (Exception ex) {
+                    LOG.debug("Error closing timestamp-end probe consumer for stream '{}'",
+                            stream, ex);
+                }
+            }
+        }
     }
 
     private long resolveLatestOffset(Environment env, String stream, StreamStats stats) {
