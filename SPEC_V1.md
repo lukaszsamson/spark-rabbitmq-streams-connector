@@ -353,6 +353,7 @@ Type coercion notes:
 - `netty.byteBufAllocator` (string, optional; custom Netty byte buffer allocator factory)
 - `netty.channelCustomizer` (string, optional; custom Netty channel customizer)
 - `netty.bootstrapCustomizer` (string, optional; custom Netty bootstrap customizer)
+- `environmentIdleTimeoutMs` (long > 0; default 60000; pooled environment idle eviction timeout)
 
 ### Options validation
 - Validate options at `TableProvider.getTable()` / `ScanBuilder` construction.
@@ -370,6 +371,8 @@ Type coercion notes:
 - `endingOffsetsByTimestamp` (JSON map stream->epoch millis >= 0; per-stream override when endingOffsets=timestamp)
 - `maxRecordsPerTrigger` (long)
 - `maxBytesPerTrigger` (long, best-effort; uses estimated message size)
+- `minOffsetsPerTrigger` (long)
+- `maxTriggerDelay` (duration > 0; default 15m; max delay when `minOffsetsPerTrigger` is configured)
 - `minPartitions` (int)
 - `serverSideOffsetTracking` (bool; default true for streaming, false for batch; commit-time storage only, not auto-tracking)
 - `filterValues` (comma-separated; requires RabbitMQ 3.13+ and broker-side filtering enabled)

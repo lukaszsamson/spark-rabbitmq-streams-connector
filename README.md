@@ -211,7 +211,7 @@ By default, unrecognized columns cause an error. Set `ignoreUnknownColumns=true`
 | `maxProducersByConnection` | int | 256 | Max producers per connection |
 | `maxConsumersByConnection` | int | 256 | Max consumers per connection |
 | `maxTrackingConsumersByConnection` | int | 50 | Max tracking consumers per connection |
-| `environmentIdleTimeoutMs` | long | 60000 | Idle environment eviction timeout |
+| `environmentIdleTimeoutMs` | long | 60000 | Idle environment eviction timeout (must be > 0) |
 
 ### Source options
 
@@ -228,7 +228,7 @@ By default, unrecognized columns cause an error. Set `ignoreUnknownColumns=true`
 | `maxRecordsPerTrigger` | long | — | Max records per micro-batch trigger |
 | `maxBytesPerTrigger` | long | — | Max bytes per trigger (best-effort, uses estimated message size) |
 | `minOffsetsPerTrigger` | long | — | Min records before triggering a micro-batch (streaming only). Delays processing until threshold is met or `maxTriggerDelay` expires |
-| `maxTriggerDelay` | string | 15m | Max delay before processing a micro-batch regardless of `minOffsetsPerTrigger`. Duration format (e.g. `30s`, `5m`, `1h`) |
+| `maxTriggerDelay` | string | 15m | Max delay before processing a micro-batch regardless of `minOffsetsPerTrigger` (must be > 0). Duration format (e.g. `30s`, `5m`, `1h`) |
 | `minPartitions` | int | — | Minimum Spark input partitions (splits streams by offset ranges) |
 | `maxRecordsPerPartition` | long | — | Max records per Spark input partition. Streams with more records are split into smaller partitions. Can be combined with `minPartitions` |
 | `serverSideOffsetTracking` | bool | true (streaming) / false (batch) | Store offsets in RabbitMQ broker on commit |

@@ -981,7 +981,7 @@ class ConnectorOptionsTest {
             var map = minimalStreamOptions();
             map.put("compressionCodecFactoryClass", "com.nonexistent.CodecFactory");
             var opts = new ConnectorOptions(map);
-            assertThatThrownBy(opts::validateCommon)
+            assertThatThrownBy(opts::validateForSink)
                     .isInstanceOf(IllegalArgumentException.class)
                     .hasMessageContaining("compressionCodecFactoryClass")
                     .hasMessageContaining("not found");
@@ -992,7 +992,7 @@ class ConnectorOptionsTest {
             var map = minimalStreamOptions();
             map.put("compressionCodecFactoryClass", "java.lang.String");
             var opts = new ConnectorOptions(map);
-            assertThatThrownBy(opts::validateCommon)
+            assertThatThrownBy(opts::validateForSink)
                     .isInstanceOf(IllegalArgumentException.class)
                     .hasMessageContaining("compressionCodecFactoryClass")
                     .hasMessageContaining("does not implement");
@@ -1081,6 +1081,16 @@ class ConnectorOptionsTest {
         }
 
         @Test
+        void rejectsNonPositiveEnvironmentIdleTimeout() {
+            var map = minimalStreamOptions();
+            map.put("environmentIdleTimeoutMs", "0");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateCommon)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("environmentIdleTimeoutMs");
+        }
+
+        @Test
         void rejectsRemovedFilterValueColumnOption() {
             var map = minimalStreamOptions();
             map.put("filterValueColumn", "region");
@@ -1103,6 +1113,30 @@ class ConnectorOptionsTest {
         void validSourceConfig() {
             var opts = new ConnectorOptions(minimalStreamOptions());
             assertThatCode(opts::validateForSource).doesNotThrowAnyException();
+        }
+
+        @Test
+        void rejectsFilterValuePathForSourceReads() {
+            var map = minimalStreamOptions();
+            map.put("filterValuePath", "application_properties.region");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateForSource)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("filterValuePath")
+                    .hasMessageContaining("not applicable")
+                    .hasMessageContaining("source reads");
+        }
+
+        @Test
+        void rejectsCompressionCodecFactoryClassForSourceReads() {
+            var map = minimalStreamOptions();
+            map.put("compressionCodecFactoryClass", TestCompressionCodecFactory.class.getName());
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateForSource)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("compressionCodecFactoryClass")
+                    .hasMessageContaining("not applicable")
+                    .hasMessageContaining("source reads");
         }
 
         @Test
@@ -1367,6 +1401,21 @@ class ConnectorOptionsTest {
         }
 
         @Test
+        void rejectsStartingOffsetGreaterThanEndingOffset() {
+            var map = minimalStreamOptions();
+            map.put("startingOffsets", "offset");
+            map.put("startingOffset", "100");
+            map.put("endingOffsets", "offset");
+            map.put("endingOffset", "50");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateForSource)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("startingOffset")
+                    .hasMessageContaining("<=")
+                    .hasMessageContaining("endingOffset");
+        }
+
+        @Test
         void rejectsNegativeMaxTriggerDelay() {
             var map = minimalStreamOptions();
             map.put("maxTriggerDelay", "-1s");
@@ -1374,7 +1423,18 @@ class ConnectorOptionsTest {
             assertThatThrownBy(opts::validateForSource)
                     .isInstanceOf(IllegalArgumentException.class)
                     .hasMessageContaining("maxTriggerDelay")
-                    .hasMessageContaining(">= 0");
+                    .hasMessageContaining("> 0");
+        }
+
+        @Test
+        void rejectsZeroMaxTriggerDelay() {
+            var map = minimalStreamOptions();
+            map.put("maxTriggerDelay", "0");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateForSource)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("maxTriggerDelay")
+                    .hasMessageContaining("> 0");
         }
 
         @Test

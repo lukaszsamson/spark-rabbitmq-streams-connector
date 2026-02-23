@@ -438,11 +438,6 @@ public final class ConnectorOptions implements Serializable {
                     ConnectorNettyBootstrapCustomizer.class,
                     NETTY_BOOTSTRAP_CUSTOMIZER);
         }
-        if (compressionCodecFactoryClass != null && !compressionCodecFactoryClass.isEmpty()) {
-            ExtensionLoader.load(compressionCodecFactoryClass,
-                    ConnectorCompressionCodecFactory.class,
-                    COMPRESSION_CODEC_FACTORY_CLASS);
-        }
         if (rpcTimeoutMs != null && rpcTimeoutMs <= 0) {
             throw new IllegalArgumentException(
                     "'" + RPC_TIMEOUT_MS + "' must be > 0, got: " + rpcTimeoutMs);
@@ -472,6 +467,11 @@ public final class ConnectorOptions implements Serializable {
                     "'" + MAX_TRACKING_CONSUMERS_BY_CONNECTION + "' must be > 0, got: " +
                             maxTrackingConsumersByConnection);
         }
+        if (environmentIdleTimeoutMs <= 0) {
+            throw new IllegalArgumentException(
+                    "'" + ENVIRONMENT_IDLE_TIMEOUT_MS + "' must be > 0, got: " +
+                            environmentIdleTimeoutMs);
+        }
     }
 
     /**
@@ -482,6 +482,15 @@ public final class ConnectorOptions implements Serializable {
      */
     public void validateForSource() {
         validateCommon();
+
+        if (filterValuePath != null && !filterValuePath.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "'" + FILTER_VALUE_PATH + "' is not applicable to source reads");
+        }
+        if (compressionCodecFactoryClass != null && !compressionCodecFactoryClass.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "'" + COMPRESSION_CODEC_FACTORY_CLASS + "' is not applicable to source reads");
+        }
 
         // startingOffsets=offset requires startingOffset
         if (startingOffsets == StartingOffsetsMode.OFFSET && startingOffset == null) {
@@ -534,6 +543,15 @@ public final class ConnectorOptions implements Serializable {
             throw new IllegalArgumentException(
                     "'" + ENDING_OFFSET + "' must be >= 0, got: " + endingOffset);
         }
+        if (startingOffsets == StartingOffsetsMode.OFFSET
+                && endingOffsets == EndingOffsetsMode.OFFSET
+                && startingOffset != null
+                && endingOffset != null
+                && startingOffset > endingOffset) {
+            throw new IllegalArgumentException(
+                    "'" + STARTING_OFFSET + "' must be <= '" + ENDING_OFFSET + "', got: " +
+                            startingOffset + " > " + endingOffset);
+        }
         if (endingTimestamp != null && endingTimestamp < 0) {
             throw new IllegalArgumentException(
                     "'" + ENDING_TIMESTAMP + "' must be >= 0 (epoch millis), got: " +
@@ -567,9 +585,9 @@ public final class ConnectorOptions implements Serializable {
             throw new IllegalArgumentException(
                     "'" + MAX_BYTES_PER_TRIGGER + "' must be > 0, got: " + maxBytesPerTrigger);
         }
-        if (maxTriggerDelayMs < 0) {
+        if (maxTriggerDelayMs <= 0) {
             throw new IllegalArgumentException(
-                    "'" + MAX_TRIGGER_DELAY + "' must be >= 0, got: " + maxTriggerDelayMs);
+                    "'" + MAX_TRIGGER_DELAY + "' must be > 0, got: " + maxTriggerDelayMs);
         }
         if (minPartitions != null && minPartitions <= 0) {
             throw new IllegalArgumentException(
@@ -617,9 +635,6 @@ public final class ConnectorOptions implements Serializable {
                     FILTER_POST_FILTER_CLASS);
         }
 
-        if (filterValuePath != null && !filterValuePath.isEmpty()) {
-            ConnectorMessagePath.validate(filterValuePath, FILTER_VALUE_PATH);
-        }
     }
 
     /**
@@ -689,6 +704,11 @@ public final class ConnectorOptions implements Serializable {
         if (partitionerClass != null && !partitionerClass.isEmpty()) {
             ExtensionLoader.load(partitionerClass, ConnectorRoutingStrategy.class,
                     PARTITIONER_CLASS);
+        }
+        if (compressionCodecFactoryClass != null && !compressionCodecFactoryClass.isEmpty()) {
+            ExtensionLoader.load(compressionCodecFactoryClass,
+                    ConnectorCompressionCodecFactory.class,
+                    COMPRESSION_CODEC_FACTORY_CLASS);
         }
 
         if (filterValuePath != null && !filterValuePath.isEmpty()
