@@ -24,6 +24,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 
@@ -1283,6 +1284,7 @@ class BaseRabbitMQMicroBatchStream
 
         Environment env = getEnvironment();
         List<Future<?>> futures = new ArrayList<>();
+        AtomicBoolean storeFailureObserved = new AtomicBoolean(false);
         for (Map.Entry<String, Long> entry : toStore) {
             String stream = entry.getKey();
             long lastProcessed = entry.getValue() - 1;
@@ -1298,6 +1300,7 @@ class BaseRabbitMQMicroBatchStream
                                 stream);
                         return;
                     }
+                    storeFailureObserved.set(true);
                     LOG.warn("Failed to store offset {} for consumer '{}' on stream '{}': {}",
                             lastProcessed, consumerName, stream, e.getMessage());
                 }
@@ -1342,6 +1345,9 @@ class BaseRabbitMQMicroBatchStream
                     f.cancel(true);
                 }
             }
+        }
+        if (storeFailureObserved.get()) {
+            commitObservationComplete = false;
         }
 
         if (commitObservationComplete) {

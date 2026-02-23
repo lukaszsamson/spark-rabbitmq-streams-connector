@@ -1020,6 +1020,27 @@ class RabbitMQMicroBatchStreamTest {
                     .count();
             assertThat(s1Stores).isEqualTo(2L);
         }
+
+        @Test
+        void persistBrokerOffsetsDoesNotCacheWhenStoreOffsetExceptionIsCaught() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            CaughtStoreFailureOffsetTrackingEnvironment env =
+                    new CaughtStoreFailureOffsetTrackingEnvironment("s2");
+            setPrivateField(stream, "environment", env);
+
+            RabbitMQStreamOffset end = new RabbitMQStreamOffset(Map.of("s1", 10L, "s2", 20L));
+            stream.commit(end);
+            stream.commit(end);
+
+            long s1Stores = env.recordedOffsets.stream()
+                    .filter(entry -> "s1".equals(entry.getKey()))
+                    .count();
+            assertThat(s1Stores).isEqualTo(2L);
+        }
     }
 
     @Nested
@@ -2497,6 +2518,23 @@ class RabbitMQMicroBatchStreamTest {
         public void storeOffset(String reference, String stream, long offset) {
             if (failingStream.equals(stream)) {
                 throw new AssertionError("synthetic future execution failure");
+            }
+            super.storeOffset(reference, stream, offset);
+        }
+    }
+
+    private static final class CaughtStoreFailureOffsetTrackingEnvironment
+            extends OffsetTrackingEnvironment {
+        private final String failingStream;
+
+        private CaughtStoreFailureOffsetTrackingEnvironment(String failingStream) {
+            this.failingStream = failingStream;
+        }
+
+        @Override
+        public void storeOffset(String reference, String stream, long offset) {
+            if (failingStream.equals(stream)) {
+                throw new RuntimeException("synthetic caught store failure");
             }
             super.storeOffset(reference, stream, offset);
         }
