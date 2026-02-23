@@ -216,7 +216,7 @@ class RabbitMQWriteTest {
         }
 
         @Test
-        void commitResetsWriterCommitMessages() {
+        void commitDoesNotMutateWriterCommitMessages() {
             Write write = buildWrite();
             BatchWrite batchWrite = write.toBatch();
             WriterCommitMessage[] messages = {
@@ -224,8 +224,8 @@ class RabbitMQWriteTest {
                     new RabbitMQWriterCommitMessage(1, 2, 200, 10000),
             };
             batchWrite.commit(messages);
-            assertThat(messages[0]).isNull();
-            assertThat(messages[1]).isNull();
+            assertThat(messages[0]).isNotNull();
+            assertThat(messages[1]).isNotNull();
         }
 
         @Test
@@ -264,18 +264,18 @@ class RabbitMQWriteTest {
         }
 
         @Test
-        void commitResetsWriterCommitMessages() {
+        void commitDoesNotMutateWriterCommitMessages() {
             Write write = buildWrite();
             StreamingWrite streamingWrite = write.toStreaming();
             WriterCommitMessage[] messages = {
                     new RabbitMQWriterCommitMessage(0, 1, 50, 2500),
             };
             streamingWrite.commit(0L, messages);
-            assertThat(messages[0]).isNull();
+            assertThat(messages[0]).isNotNull();
         }
 
         @Test
-        void commitIsIdempotentOnClearedMessages() {
+        void commitIsIdempotentOnRepeatedMessages() {
             Write write = buildWrite();
             StreamingWrite streamingWrite = write.toStreaming();
             WriterCommitMessage[] messages = {
@@ -284,7 +284,7 @@ class RabbitMQWriteTest {
             // Call commit twice for the same epoch
             streamingWrite.commit(0L, messages);
             streamingWrite.commit(0L, messages);
-            assertThat(messages[0]).isNull();
+            assertThat(messages[0]).isNotNull();
         }
 
         @Test

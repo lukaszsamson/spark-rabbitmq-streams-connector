@@ -50,9 +50,6 @@ final class RabbitMQStreamingWrite implements StreamingWrite {
         }
         LOG.info("Streaming write committed epoch {}: {} partitions, {} total records, {} total bytes",
                 epochId, messages.length, totalRecords, totalBytes);
-        for (int i = 0; i < messages.length; i++) {
-            messages[i] = null;
-        }
     }
 
     @Override
