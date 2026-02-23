@@ -472,8 +472,11 @@ class RabbitMQMicroBatchStreamTest {
         }
 
         @Test
-        void backfillsNewStreamWhenMissingFromStartOffsetUsingConfiguredStartingOffsets() throws Exception {
-            RabbitMQMicroBatchStream stream = createStream(minimalOptions());
+        void backfillsNewStreamWhenMissingFromStartOffsetUsingConfiguredStartingOffsetsInSuperStreamMode() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("superstream", "super");
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
             setPrivateField(stream, "environment", new FirstOffsetEnvironment(0L));
 
             RabbitMQStreamOffset start = new RabbitMQStreamOffset(Map.of("s1", 10L));
