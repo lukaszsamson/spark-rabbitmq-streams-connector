@@ -180,6 +180,21 @@ class RealTimeModeTest {
         }
 
         @Test
+        void planInputPartitionsKeepsTemporarilyEmptyStream() throws Exception {
+            RabbitMQMicroBatchStream stream = createStream(minimalOptions());
+            setPrivateField(stream, "streams", List.of("test-stream"));
+            setPrivateField(stream, "environment", new EmptyStreamEnvironment());
+
+            RabbitMQStreamOffset start = new RabbitMQStreamOffset(Map.of("test-stream", 0L));
+            InputPartition[] partitions = stream.planInputPartitions(start);
+
+            assertThat(partitions).hasSize(1);
+            RabbitMQInputPartition p = (RabbitMQInputPartition) partitions[0];
+            assertThat(p.getStartOffset()).isEqualTo(0L);
+            assertThat(p.getEndOffset()).isEqualTo(Long.MAX_VALUE);
+        }
+
+        @Test
         void planInputPartitionsTimestampMarksInitialPartitionForConfiguredSeek() throws Exception {
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
@@ -590,7 +605,7 @@ class RealTimeModeTest {
      * Minimal Environment that returns fixed stats for any stream query.
      * Used to satisfy validateStartOffset() calls during planInputPartitions.
      */
-    private static final class NoOpEnvironment implements Environment {
+    private static class NoOpEnvironment implements Environment {
         @Override
         public StreamCreator streamCreator() {
             throw new UnsupportedOperationException();
@@ -633,6 +648,13 @@ class RealTimeModeTest {
 
         @Override
         public void close() {
+        }
+    }
+
+    private static final class EmptyStreamEnvironment extends NoOpEnvironment {
+        @Override
+        public StreamStats queryStreamStats(String stream) {
+            throw new NoOffsetException("empty");
         }
     }
 

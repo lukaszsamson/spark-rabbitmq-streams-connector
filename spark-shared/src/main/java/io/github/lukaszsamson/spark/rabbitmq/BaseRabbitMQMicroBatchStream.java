@@ -525,7 +525,12 @@ class BaseRabbitMQMicroBatchStream
             }
             return startOff;
         } catch (NoOffsetException e) {
-            // Stream is empty
+            // Real-time mode uses an unbounded end offset and must keep empty streams active
+            // so data published later on the same stream can still be consumed.
+            if (endOff == Long.MAX_VALUE) {
+                return startOff;
+            }
+            // Finite ranges can safely skip empty streams for the current trigger.
             return -1;
         } catch (com.rabbitmq.stream.StreamDoesNotExistException e) {
             if (options.isFailOnDataLoss()) {
