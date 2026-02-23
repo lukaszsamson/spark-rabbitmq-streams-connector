@@ -12,8 +12,12 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Method;
+import java.util.List;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -72,6 +76,22 @@ class RabbitMQScanTest {
             assertThatThrownBy(() -> strict.resolveSuperStreamPartitionsForTests(java.util.List.of()))
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessageContaining("has no partition streams");
+        }
+
+        @Test
+        void resolveOffsetRangesUsesParallelPlanningForMultipleStreams() {
+            Map<String, String> opts = baseOptions();
+            opts.put("endingOffsets", "offset");
+            opts.put("endingOffset", "100");
+            RabbitMQScan scan = new RabbitMQScan(new ConnectorOptions(opts), schema());
+            ConcurrencyTrackingEnvironment env = new ConcurrencyTrackingEnvironment(4, 10L, 100L);
+
+            Map<String, long[]> ranges = resolveOffsetRanges(scan, env,
+                    List.of("s1", "s2", "s3", "s4"));
+
+            assertThat(ranges).hasSize(4);
+            assertThat(env.maxConcurrent()).isGreaterThan(1);
+            assertThat(ranges.get("s1")).containsExactly(10L, 100L);
         }
 
         @Test
@@ -235,6 +255,11 @@ class RabbitMQScanTest {
 
     private static long[] resolveStreamOffsetRange(RabbitMQScan scan, Environment env, String stream) {
         return scan.resolveStreamOffsetRangeForTests(env, stream);
+    }
+
+    private static Map<String, long[]> resolveOffsetRanges(
+            RabbitMQScan scan, Environment env, List<String> streams) {
+        return scan.resolveOffsetRangesForTests(env, streams);
     }
 
     private static long resolveStartOffset(RabbitMQScan scan, Environment env,
@@ -521,6 +546,78 @@ class RabbitMQScanTest {
         @Override
         public StreamStats queryStreamStats(String stream) {
             return new Stats(first, false, false, committed);
+        }
+
+        @Override
+        public StreamCreator streamCreator() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void deleteStream(String stream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void deleteSuperStream(String superStream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void storeOffset(String reference, String stream, long offset) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public boolean streamExists(String stream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public ProducerBuilder producerBuilder() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public ConsumerBuilder consumerBuilder() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void close() {
+        }
+    }
+
+    private static final class ConcurrencyTrackingEnvironment implements Environment {
+        private final CountDownLatch started;
+        private final AtomicInteger inFlight = new AtomicInteger();
+        private final AtomicInteger maxConcurrent = new AtomicInteger();
+        private final long firstOffset;
+        private final long committedOffset;
+
+        private ConcurrencyTrackingEnvironment(int expectedCalls, long firstOffset, long committedOffset) {
+            this.started = new CountDownLatch(expectedCalls);
+            this.firstOffset = firstOffset;
+            this.committedOffset = committedOffset;
+        }
+
+        @Override
+        public StreamStats queryStreamStats(String stream) {
+            int current = inFlight.incrementAndGet();
+            maxConcurrent.accumulateAndGet(current, Math::max);
+            started.countDown();
+            try {
+                started.await(500, TimeUnit.MILLISECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            } finally {
+                inFlight.decrementAndGet();
+            }
+            return new Stats(firstOffset, false, false, committedOffset);
+        }
+
+        private int maxConcurrent() {
+            return maxConcurrent.get();
         }
 
         @Override

@@ -17,6 +17,10 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 
@@ -118,22 +122,68 @@ final class RabbitMQScan implements Scan {
      *         streams with zero messages are excluded
      */
     private Map<String, long[]> resolveOffsetRanges(List<String> streams) {
-        Map<String, long[]> ranges = new LinkedHashMap<>();
-
         try (Environment env = EnvironmentBuilderHelper.buildEnvironment(options)) {
+            Map<String, long[]> ranges = resolveOffsetRanges(env, streams);
+            if (ranges.isEmpty()) {
+                LOG.info("All streams are empty; batch will produce zero rows");
+            }
+            return ranges;
+        }
+    }
+
+    private Map<String, long[]> resolveOffsetRanges(Environment env, List<String> streams) {
+        Map<String, long[]> ranges = new LinkedHashMap<>();
+        int parallelism = Math.min(streams.size(), StoredOffsetLookup.MAX_CONCURRENT_LOOKUPS);
+        if (parallelism <= 1) {
             for (String stream : streams) {
                 long[] range = resolveStreamOffsetRange(env, stream);
                 if (range != null) {
                     ranges.put(stream, range);
                 }
             }
+            return ranges;
         }
 
-        if (ranges.isEmpty()) {
-            LOG.info("All streams are empty; batch will produce zero rows");
+        ExecutorService executor = Executors.newFixedThreadPool(parallelism, r -> {
+            Thread t = new Thread(r, "rabbitmq-scan-range-resolver");
+            t.setDaemon(true);
+            return t;
+        });
+        try {
+            Map<String, Future<long[]>> futures = new LinkedHashMap<>();
+            for (String stream : streams) {
+                futures.put(stream, executor.submit(() -> resolveStreamOffsetRange(env, stream)));
+            }
+            for (Map.Entry<String, Future<long[]>> entry : futures.entrySet()) {
+                long[] range = awaitResolvedRange(entry.getKey(), entry.getValue());
+                if (range != null) {
+                    ranges.put(entry.getKey(), range);
+                }
+            }
+            return ranges;
+        } finally {
+            executor.shutdownNow();
         }
+    }
 
-        return ranges;
+    private long[] awaitResolvedRange(String stream, Future<long[]> future) {
+        try {
+            return future.get();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException(
+                    "Interrupted while resolving offset range for stream '" + stream + "'", e);
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof RuntimeException runtimeException) {
+                throw runtimeException;
+            }
+            if (cause instanceof Error error) {
+                throw error;
+            }
+            throw new IllegalStateException(
+                    "Failed to resolve offset range for stream '" + stream + "'", cause);
+        }
     }
 
     /**
@@ -296,6 +346,10 @@ final class RabbitMQScan implements Scan {
 
     long[] resolveStreamOffsetRangeForTests(Environment env, String stream) {
         return resolveStreamOffsetRange(env, stream);
+    }
+
+    Map<String, long[]> resolveOffsetRangesForTests(Environment env, List<String> streams) {
+        return resolveOffsetRanges(env, streams);
     }
 
     long resolveStartOffsetForTests(Environment env, String stream, long firstAvailable, StreamStats stats) {
