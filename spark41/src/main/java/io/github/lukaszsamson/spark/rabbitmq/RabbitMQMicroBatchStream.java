@@ -88,6 +88,11 @@ final class RabbitMQMicroBatchStream extends BaseRabbitMQMicroBatchStream
         return result;
     }
 
+    @Override
+    boolean shouldPersistCachedLatestOffsetOnStop() {
+        return realTimeMode || super.shouldPersistCachedLatestOffsetOnStop();
+    }
+
     // ---- Spark 4.1 direct API overrides ----
 
     @Override

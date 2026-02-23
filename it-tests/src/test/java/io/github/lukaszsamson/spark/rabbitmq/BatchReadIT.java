@@ -935,8 +935,8 @@ class BatchReadIT extends AbstractRabbitMQIT {
     @Test
     void batchReadCustomPostFilter() {
         // Publish 25 "keep-" messages and 25 "drop-" messages
-        publishMessages(stream, 25, "keep-");
-        publishMessages(stream, 25, "drop-");
+        publishMessagesWithFilterValue(stream, 25, "keep-", "alpha");
+        publishMessagesWithFilterValue(stream, 25, "drop-", "alpha");
 
         // Read with TestPostFilter which accepts only messages starting with "keep-"
         Dataset<Row> df = spark.read()
@@ -944,6 +944,8 @@ class BatchReadIT extends AbstractRabbitMQIT {
                 .option("endpoints", streamEndpoint())
                 .option("stream", stream)
                 .option("startingOffsets", "earliest")
+                .option("filterValues", "alpha")
+                .option("filterValuePath", "application_properties.filter")
                 .option("filterPostFilterClass",
                         "io.github.lukaszsamson.spark.rabbitmq.TestPostFilter")
                 .option("pollTimeoutMs", "500")
@@ -1533,9 +1535,12 @@ class BatchReadIT extends AbstractRabbitMQIT {
                     .option("endpoints", streamEndpoint())
                     .option("stream", stream)
                     .option("startingOffsets", "earliest")
+                    .option("filterValues", "alpha")
+                    .option("filterValuePath", "application_properties.filter")
                     .option("filterPostFilterClass",
                             "io.github.lukaszsamson.spark.rabbitmq.TestPostFilter")
                     .option("filterWarningOnMismatch", "true")
+                    .option("failOnDataLoss", "false")
                     .option("pollTimeoutMs", "200")
                     .option("maxWaitMs", "10000")
                     .option("metadataFields", "")
@@ -1559,9 +1564,12 @@ class BatchReadIT extends AbstractRabbitMQIT {
                     .option("endpoints", streamEndpoint())
                     .option("stream", stream)
                     .option("startingOffsets", "earliest")
+                    .option("filterValues", "alpha")
+                    .option("filterValuePath", "application_properties.filter")
                     .option("filterPostFilterClass",
                             "io.github.lukaszsamson.spark.rabbitmq.TestPostFilter")
                     .option("filterWarningOnMismatch", "false")
+                    .option("failOnDataLoss", "false")
                     .option("pollTimeoutMs", "200")
                     .option("maxWaitMs", "10000")
                     .option("metadataFields", "")

@@ -418,8 +418,17 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
                     .values(options.getFilterValues().toArray(new String[0]))
                     .matchUnfiltered(options.isFilterMatchUnfiltered())
                     // RabbitMQ stream client requires both filter values and post-filter logic.
-                    .postFilter(msg -> brokerPostFilter == null
-                            || brokerPostFilter.accept(toMessageView(msg)))
+                    .postFilter(msg -> {
+                        if (brokerPostFilter == null) {
+                            return true;
+                        }
+                        boolean accepted = brokerPostFilter.accept(toMessageView(msg));
+                        if (!accepted && options.isFilterWarningOnMismatch()) {
+                            LOG.warn("Post-filter dropped message on stream '{}' in broker callback",
+                                    stream);
+                        }
+                        return accepted;
+                    })
                     .builder();
         }
 

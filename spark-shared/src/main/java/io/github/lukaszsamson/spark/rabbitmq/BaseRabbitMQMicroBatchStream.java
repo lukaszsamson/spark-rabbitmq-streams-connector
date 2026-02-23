@@ -16,6 +16,12 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import scala.Option;
 
+import java.net.URI;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.DirectoryStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.*;
 import java.util.concurrent.*;
 import java.lang.reflect.InvocationTargetException;
@@ -226,9 +232,9 @@ class BaseRabbitMQMicroBatchStream
 
     @Override
     public void stop() {
-        // Persist only Spark-committed offsets (never planned offsets) as best-effort metadata
-        // before shutdown, to avoid writing broker offsets ahead of processed data.
-        Map<String, Long> committed = lastCommittedEndOffsets;
+        // Persist best-effort broker offsets before shutdown.
+        // Prefer explicit source commits, then checkpoint-committed offsets.
+        Map<String, Long> committed = resolveStopPersistenceOffsets();
         if (committed != null && !committed.isEmpty()) {
             try {
                 persistBrokerOffsets(committed);
@@ -269,6 +275,11 @@ class BaseRabbitMQMicroBatchStream
             String stream = entry.getKey();
             long endOff = entry.getValue();
             Long knownStart = startOffsets.get(stream);
+            if (knownStart == null && !options.isSuperStreamMode()) {
+                LOG.warn("Start offset for stream '{}' is missing in start map; skipping split " +
+                        "to avoid backfilling from configured startingOffsets", stream);
+                continue;
+            }
             long startOff = knownStart != null ? knownStart : resolveStartingOffset(stream);
 
             if (endOff <= startOff) {
@@ -1336,6 +1347,143 @@ class BaseRabbitMQMicroBatchStream
         if (commitObservationComplete) {
             lastStoredEndOffsets = new LinkedHashMap<>(endOffsets);
         }
+    }
+
+    private Map<String, Long> resolveStopPersistenceOffsets() {
+        Map<String, Long> committed = lastCommittedEndOffsets;
+        if (committed != null && !committed.isEmpty()) {
+            return committed;
+        }
+
+        Map<String, Long> fromCheckpoint = loadCommittedOffsetsFromCheckpoint();
+        if (fromCheckpoint != null && !fromCheckpoint.isEmpty()) {
+            return fromCheckpoint;
+        }
+
+        if (shouldPersistCachedLatestOffsetOnStop()) {
+            RabbitMQStreamOffset latest = cachedLatestOffset;
+            if (latest != null && !latest.getStreamOffsets().isEmpty()) {
+                return latest.getStreamOffsets();
+            }
+        }
+        return null;
+    }
+
+    private Map<String, Long> loadCommittedOffsetsFromCheckpoint() {
+        Path checkpointPath = toLocalCheckpointPath();
+        if (checkpointPath == null) {
+            return null;
+        }
+        Path commitsDir = checkpointPath.resolve("commits");
+        Path offsetsDir = checkpointPath.resolve("offsets");
+        if (!Files.isDirectory(commitsDir) || !Files.isDirectory(offsetsDir)) {
+            return null;
+        }
+
+        try {
+            long latestCommittedBatch = latestBatchId(commitsDir);
+            if (latestCommittedBatch < 0) {
+                return null;
+            }
+            Path offsetFile = offsetsDir.resolve(Long.toString(latestCommittedBatch));
+            if (!Files.isRegularFile(offsetFile)) {
+                return null;
+            }
+
+            List<String> lines = Files.readAllLines(offsetFile, StandardCharsets.UTF_8);
+            if (lines.size() < 3) {
+                return null;
+            }
+
+            Set<String> knownStreams = new LinkedHashSet<>();
+            List<String> discovered = streams;
+            if (discovered != null) {
+                knownStreams.addAll(discovered);
+            }
+
+            for (int i = 2; i < lines.size(); i++) {
+                String raw = lines.get(i).trim();
+                if (raw.isEmpty() || "-".equals(raw)) {
+                    continue;
+                }
+                try {
+                    Map<String, Long> parsed = RabbitMQStreamOffset.fromJson(raw).getStreamOffsets();
+                    if (parsed.isEmpty()) {
+                        continue;
+                    }
+                    if (!knownStreams.isEmpty() && Collections.disjoint(knownStreams, parsed.keySet())) {
+                        continue;
+                    }
+                    return new LinkedHashMap<>(parsed);
+                } catch (RuntimeException ignored) {
+                    // Not this source's offset line.
+                }
+            }
+        } catch (Exception e) {
+            LOG.debug("Unable to load committed offsets from checkpoint '{}': {}",
+                    checkpointLocation, e.toString());
+        }
+        return null;
+    }
+
+    private Path toLocalCheckpointPath() {
+        if (checkpointLocation == null || checkpointLocation.isBlank()) {
+            return null;
+        }
+        try {
+            URI uri = URI.create(checkpointLocation);
+            if (uri.getScheme() != null) {
+                if (!"file".equalsIgnoreCase(uri.getScheme())) {
+                    return null;
+                }
+                return Paths.get(uri);
+            }
+        } catch (Exception ignored) {
+            // Fall through to plain path parsing below.
+        }
+        try {
+            return Paths.get(checkpointLocation);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private long latestBatchId(Path logDir) throws java.io.IOException {
+        long latest = -1L;
+        try (DirectoryStream<Path> files = Files.newDirectoryStream(logDir)) {
+            for (Path file : files) {
+                long id = parseBatchId(file.getFileName().toString());
+                if (id > latest) {
+                    latest = id;
+                }
+            }
+        }
+        return latest;
+    }
+
+    private long parseBatchId(String fileName) {
+        if (fileName == null || fileName.isEmpty()) {
+            return -1L;
+        }
+        int dotIdx = fileName.indexOf('.');
+        String base = dotIdx >= 0 ? fileName.substring(0, dotIdx) : fileName;
+        if (base.isEmpty()) {
+            return -1L;
+        }
+        for (int i = 0; i < base.length(); i++) {
+            if (!Character.isDigit(base.charAt(i))) {
+                return -1L;
+            }
+        }
+        try {
+            return Long.parseLong(base);
+        } catch (NumberFormatException e) {
+            return -1L;
+        }
+    }
+
+    boolean shouldPersistCachedLatestOffsetOnStop() {
+        return availableNowSnapshot != null;
     }
 
     private boolean isMissingStreamException(Throwable throwable) {
