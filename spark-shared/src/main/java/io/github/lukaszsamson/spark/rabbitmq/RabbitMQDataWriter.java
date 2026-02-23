@@ -109,8 +109,13 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
                     throw new IOException(
                             "Column 'publishing_id' must be >= 0, got: " + explicitPublishingId);
                 }
+                if (nextPublishingId >= 0 && explicitPublishingId < nextPublishingId) {
+                    throw new IOException(
+                            "Column 'publishing_id' must be monotonically increasing per writer. " +
+                                    "Expected >= " + nextPublishingId + ", got: " + explicitPublishingId);
+                }
                 builder.publishingId(explicitPublishingId);
-                if (nextPublishingId >= 0 && explicitPublishingId >= nextPublishingId) {
+                if (nextPublishingId >= 0) {
                     nextPublishingId = explicitPublishingId + 1;
                 }
             } else if (nextPublishingId >= 0) {

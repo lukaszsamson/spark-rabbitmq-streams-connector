@@ -873,6 +873,21 @@ class RabbitMQWriteTest {
         }
 
         @Test
+        void rejectsNonMonotonicExplicitPublishingId() throws Exception {
+            ConnectorOptions options = minimalSinkOptions();
+            RabbitMQDataWriter writer = new RabbitMQDataWriter(
+                    options, sinkSchemaWithPublishingId(), 0, 1, -1);
+            setPrivateField(writer, "producer", new NoopProducer());
+            setPrivateField(writer, "nextPublishingId", 11L);
+
+            assertThatThrownBy(() -> writer.write(
+                    new GenericInternalRow(new Object[]{"a".getBytes(), 5L})))
+                    .isInstanceOf(IOException.class)
+                    .hasMessageContaining("publishing_id")
+                    .hasMessageContaining("monotonically increasing");
+        }
+
+        @Test
         void rejectsNegativeExplicitPublishingId() throws Exception {
             ConnectorOptions options = minimalSinkOptions();
             RabbitMQDataWriter writer = new RabbitMQDataWriter(
