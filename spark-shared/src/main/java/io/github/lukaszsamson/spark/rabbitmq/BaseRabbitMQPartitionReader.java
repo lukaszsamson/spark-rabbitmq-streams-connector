@@ -36,6 +36,8 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
 
     static final Logger LOG = LoggerFactory.getLogger(BaseRabbitMQPartitionReader.class);
     private static final long CLOSED_CHECK_INTERVAL_MS = 100L;
+    private static final long MIN_TAIL_PROBE_CACHE_WINDOW_MS = 25L;
+    private static final long MAX_TAIL_PROBE_CACHE_WINDOW_MS = 250L;
     final String stream;
     final long startOffset;
     final long endOffset;
@@ -60,6 +62,8 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
     long lastObservedOffset = -1;
     boolean filteredTailReached = false;
     boolean finished = false;
+    long lastTailProbeNanos = -1L;
+    long lastTailProbeOffset = -1L;
 
     // Task-level metric counters
     long recordsRead = 0;
@@ -617,6 +621,14 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
     }
 
     long probeLastMessageOffset() {
+        long nowNanos = System.nanoTime();
+        if (lastTailProbeNanos > 0) {
+            long elapsedMs = TimeUnit.NANOSECONDS.toMillis(nowNanos - lastTailProbeNanos);
+            if (elapsedMs < tailProbeCacheWindowMs()) {
+                return lastTailProbeOffset;
+            }
+        }
+
         ArrayBlockingQueue<Long> observedOffsets = new ArrayBlockingQueue<>(1);
         Consumer probe = null;
         try {
@@ -631,10 +643,15 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
                     .build();
             long probeTimeoutMs = Math.max(1L, Math.min(250L, options.getMaxWaitMs()));
             Long observed = observedOffsets.poll(probeTimeoutMs, TimeUnit.MILLISECONDS);
-            return observed == null ? -1 : observed;
+            long resolved = observed == null ? -1 : observed;
+            lastTailProbeOffset = resolved;
+            lastTailProbeNanos = System.nanoTime();
+            return resolved;
         } catch (Exception e) {
             LOG.debug("Unable to probe last-message tail offset for stream '{}': {}",
                     stream, e.getMessage());
+            lastTailProbeOffset = -1L;
+            lastTailProbeNanos = System.nanoTime();
             return -1;
         } finally {
             if (probe != null) {
@@ -646,6 +663,12 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
                 }
             }
         }
+    }
+
+    long tailProbeCacheWindowMs() {
+        long pollTimeoutMs = Math.max(1L, options.getPollTimeoutMs());
+        return Math.max(MIN_TAIL_PROBE_CACHE_WINDOW_MS,
+                Math.min(MAX_TAIL_PROBE_CACHE_WINDOW_MS, pollTimeoutMs));
     }
 
     static MessagePostFilter createPostFilter(ConnectorOptions options) {
