@@ -54,6 +54,8 @@ class BaseRabbitMQMicroBatchStream
     static final int COMMIT_TIMEOUT_SECONDS = 30;
     /** Reuse latest-offset tail probe results briefly to avoid per-trigger consumer churn. */
     static final long LATEST_TAIL_PROBE_CACHE_WINDOW_MS = 1_000L;
+    /** Reuse full latestOffset() results briefly to keep per-trigger planning stable. */
+    static final long LATEST_OFFSET_RESULT_CACHE_WINDOW_MS = 250L;
     static final long MIN_TIMESTAMP_START_PROBE_TIMEOUT_MS = 250L;
 
     final ConnectorOptions options;
@@ -75,6 +77,8 @@ class BaseRabbitMQMicroBatchStream
     volatile RabbitMQStreamOffset cachedLatestOffset;
     /** Cached true tail offset (before ReadLimit application). */
     volatile RabbitMQStreamOffset cachedTailOffset;
+    /** Short-lived cache of latestOffset(start, limit) result for repeated trigger calls. */
+    volatile LatestOffsetInvocationCache latestOffsetInvocationCache;
 
     /**
      * Snapshot of tail offsets captured by {@link #prepareForTriggerAvailableNow()}.
@@ -99,6 +103,12 @@ class BaseRabbitMQMicroBatchStream
     volatile long lastAccumulatedMessageRecords;
 
     record CachedTailProbe(long tailExclusive, long expiresAtNanos) {}
+    record LatestOffsetInvocationCache(
+            String startOffsetJson,
+            String readLimitKey,
+            RabbitMQStreamOffset latestOffset,
+            RabbitMQStreamOffset tailOffset,
+            long expiresAtNanos) {}
 
     BaseRabbitMQMicroBatchStream(ConnectorOptions options, StructType schema,
                               String checkpointLocation) {
@@ -212,6 +222,8 @@ class BaseRabbitMQMicroBatchStream
 
     @Override
     public void commit(Offset end) {
+        clearLatestOffsetInvocationCache();
+
         // Update running average message size from completed batch readers.
         // Prefer Spark accumulators so executor JVM metrics are visible to the driver.
         int updatedSize = drainAverageFromAccumulators(estimatedMessageSize);
@@ -233,6 +245,8 @@ class BaseRabbitMQMicroBatchStream
 
     @Override
     public void stop() {
+        clearLatestOffsetInvocationCache();
+
         // Persist best-effort broker offsets before shutdown.
         // Prefer explicit source commits, then checkpoint-committed offsets.
         Map<String, Long> committed = resolveStopPersistenceOffsets();
@@ -266,6 +280,8 @@ class BaseRabbitMQMicroBatchStream
 
     @Override
     public InputPartition[] planInputPartitions(Offset start, Offset end) {
+        clearLatestOffsetInvocationCache();
+
         RabbitMQStreamOffset startOffset = (RabbitMQStreamOffset) start;
         RabbitMQStreamOffset endOffset = (RabbitMQStreamOffset) end;
 
@@ -587,6 +603,11 @@ class BaseRabbitMQMicroBatchStream
 
     @Override
     public Offset latestOffset(Offset startOffset, ReadLimit limit) {
+        RabbitMQStreamOffset invocationCached = getCachedLatestOffsetInvocation(startOffset, limit);
+        if (invocationCached != null) {
+            return invocationCached;
+        }
+
         Map<String, Long> tailOffsets = availableNowSnapshot != null
                 ? new LinkedHashMap<>(availableNowSnapshot)
                 : queryTailOffsets();
@@ -601,6 +622,7 @@ class BaseRabbitMQMicroBatchStream
             RabbitMQStreamOffset latest = new RabbitMQStreamOffset(tailOffsets);
             cachedTailOffset = latest;
             cachedLatestOffset = latest;
+            cacheLatestOffsetInvocation(startOffset, limit, latest, latest);
             return latest;
         }
 
@@ -636,10 +658,12 @@ class BaseRabbitMQMicroBatchStream
             LOG.debug("No new data available, returning stable start offsets");
             if (effectiveStartMap.equals(startMap)) {
                 cachedLatestOffset = start;
+                cacheLatestOffsetInvocation(startOffset, limit, start, cachedTailOffset);
                 return start;
             }
             RabbitMQStreamOffset expanded = new RabbitMQStreamOffset(effectiveStartMap);
             cachedLatestOffset = expanded;
+            cacheLatestOffsetInvocation(startOffset, limit, expanded, cachedTailOffset);
             return expanded;
         }
 
@@ -648,6 +672,7 @@ class BaseRabbitMQMicroBatchStream
 
         RabbitMQStreamOffset latest = new RabbitMQStreamOffset(endOffsets);
         cachedLatestOffset = latest;
+        cacheLatestOffsetInvocation(startOffset, limit, latest, cachedTailOffset);
         return latest;
     }
 
@@ -660,9 +685,81 @@ class BaseRabbitMQMicroBatchStream
 
     @Override
     public void prepareForTriggerAvailableNow() {
+        clearLatestOffsetInvocationCache();
         Map<String, Long> snapshot = queryTailOffsetsForAvailableNow();
         this.availableNowSnapshot = snapshot;
         LOG.info("Trigger.AvailableNow: snapshot tail offsets = {}", snapshot);
+    }
+
+    private RabbitMQStreamOffset getCachedLatestOffsetInvocation(Offset startOffset, ReadLimit limit) {
+        LatestOffsetInvocationCache cached = latestOffsetInvocationCache;
+        if (cached == null) {
+            return null;
+        }
+        long nowNanos = System.nanoTime();
+        if (nowNanos >= cached.expiresAtNanos()) {
+            latestOffsetInvocationCache = null;
+            return null;
+        }
+        if (!Objects.equals(cached.startOffsetJson(), latestOffsetStartCacheKey(startOffset))
+                || !Objects.equals(cached.readLimitKey(), readLimitCacheKey(limit))) {
+            return null;
+        }
+        cachedTailOffset = cached.tailOffset();
+        cachedLatestOffset = cached.latestOffset();
+        return cached.latestOffset();
+    }
+
+    private void cacheLatestOffsetInvocation(
+            Offset startOffset,
+            ReadLimit limit,
+            RabbitMQStreamOffset latestOffset,
+            RabbitMQStreamOffset tailOffset) {
+        latestOffsetInvocationCache = new LatestOffsetInvocationCache(
+                latestOffsetStartCacheKey(startOffset),
+                readLimitCacheKey(limit),
+                latestOffset,
+                tailOffset,
+                System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(LATEST_OFFSET_RESULT_CACHE_WINDOW_MS));
+    }
+
+    private void clearLatestOffsetInvocationCache() {
+        latestOffsetInvocationCache = null;
+    }
+
+    private String latestOffsetStartCacheKey(Offset startOffset) {
+        return startOffset == null ? null : startOffset.json();
+    }
+
+    private String readLimitCacheKey(ReadLimit limit) {
+        if (limit == null) {
+            return "null";
+        }
+        if (limit instanceof ReadAllAvailable) {
+            return "allAvailable";
+        }
+        if (limit instanceof ReadMaxRows maxRows) {
+            return "maxRows:" + maxRows.maxRows();
+        }
+        if (limit instanceof ReadMinRows minRows) {
+            return "minRows:" + minRows.minRows() + ":" + minRows.maxTriggerDelayMs();
+        }
+        Long maxBytes = extractReadMaxBytes(limit);
+        if (maxBytes != null) {
+            return "maxBytes:" + maxBytes;
+        }
+        if (limit instanceof CompositeReadLimit composite) {
+            StringBuilder signature = new StringBuilder("composite[");
+            ReadLimit[] components = composite.getReadLimits();
+            for (int i = 0; i < components.length; i++) {
+                if (i > 0) {
+                    signature.append(',');
+                }
+                signature.append(readLimitCacheKey(components[i]));
+            }
+            return signature.append(']').toString();
+        }
+        return "unknown:" + limit.getClass().getName();
     }
 
     // ---- ReportsSourceMetrics ----

@@ -772,8 +772,25 @@ class RabbitMQMicroBatchStreamTest {
 
             assertThat(first.getStreamOffsets()).containsEntry("test-stream", 15L);
             assertThat(second.getStreamOffsets()).containsEntry("test-stream", 15L);
-            assertThat(env.queryStatsCalls).isEqualTo(2);
+            assertThat(env.queryStatsCalls).isEqualTo(1);
             assertThat(env.probeBuilderCalls).isEqualTo(1);
+        }
+
+        @Test
+        void planInputPartitionsClearsLatestOffsetInvocationCache() throws Exception {
+            RabbitMQMicroBatchStream stream = createStream(minimalOptions());
+            ProbeCountingEnvironment env = new ProbeCountingEnvironment(10L, java.util.List.of(14L));
+            setPrivateField(stream, "environment", env);
+
+            RabbitMQStreamOffset start = new RabbitMQStreamOffset(Map.of("test-stream", 10L));
+            RabbitMQStreamOffset end =
+                    (RabbitMQStreamOffset) stream.latestOffset(start, ReadLimit.allAvailable());
+
+            stream.planInputPartitions(start, end);
+            int queryStatsBeforeSecondLatest = env.queryStatsCalls;
+            stream.latestOffset(start, ReadLimit.allAvailable());
+
+            assertThat(env.queryStatsCalls).isEqualTo(queryStatsBeforeSecondLatest + 1);
         }
     }
 
