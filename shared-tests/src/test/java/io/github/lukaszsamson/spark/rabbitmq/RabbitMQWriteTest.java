@@ -562,6 +562,29 @@ class RabbitMQWriteTest {
         }
 
         @Test
+        void writeRejectsNullRoutingKeyValueForSuperStreamHashKey() throws Exception {
+            StructType schema = new StructType(new StructField[]{
+                    new StructField("value", DataTypes.BinaryType, false, Metadata.empty()),
+                    new StructField("routing_key", DataTypes.StringType, true, Metadata.empty()),
+            });
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("superstream", "super");
+            opts.put("routingStrategy", "hash");
+            ConnectorOptions options = new ConnectorOptions(opts);
+
+            RabbitMQDataWriter writer = new RabbitMQDataWriter(
+                    options, schema, 0, 1, -1);
+            setPrivateField(writer, "producer", new NoopProducer());
+
+            InternalRow row = new GenericInternalRow(new Object[]{"body".getBytes(), null});
+
+            assertThatThrownBy(() -> writer.write(row))
+                    .isInstanceOf(IOException.class)
+                    .hasMessageContaining("Routing key is required");
+        }
+
+        @Test
         void writeWithoutRoutingKeyDoesNotInvokeCustomRoutingStrategy() throws Exception {
             TestRoutingStrategy.invoked = false;
             TestRoutingStrategy.routeLookupInvoked = false;

@@ -255,7 +255,7 @@ public final class RowToMessageConverter implements Serializable {
         for (int i = 0; i < mapData.numElements(); i++) {
             String key = keyArray.getUTF8String(i).toString();
             String value = valueArray.isNullAt(i) ? null
-                    : valueArray.getUTF8String(i).toString();
+                    : utf8ToString(valueArray.getUTF8String(i));
             apb.entry(key, value);
         }
         apb.messageBuilder();
@@ -269,7 +269,7 @@ public final class RowToMessageConverter implements Serializable {
         for (int i = 0; i < mapData.numElements(); i++) {
             String key = keyArray.getUTF8String(i).toString();
             String value = valueArray.isNullAt(i) ? null
-                    : valueArray.getUTF8String(i).toString();
+                    : utf8ToString(valueArray.getUTF8String(i));
             mab.entry(key, value);
         }
         mab.messageBuilder();
@@ -288,5 +288,9 @@ public final class RowToMessageConverter implements Serializable {
             }
         }
         return -1;
+    }
+
+    private static String utf8ToString(UTF8String value) {
+        return value != null ? value.toString() : null;
     }
 }

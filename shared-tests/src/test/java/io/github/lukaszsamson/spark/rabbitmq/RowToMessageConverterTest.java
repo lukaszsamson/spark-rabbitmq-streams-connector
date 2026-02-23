@@ -5,8 +5,10 @@ import com.rabbitmq.stream.MessageBuilder;
 import com.rabbitmq.stream.codec.QpidProtonCodec;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.catalyst.expressions.GenericInternalRow;
+import org.apache.spark.sql.catalyst.util.ArrayData;
 import org.apache.spark.sql.catalyst.util.ArrayBasedMapData;
 import org.apache.spark.sql.catalyst.util.GenericArrayData;
+import org.apache.spark.sql.catalyst.util.MapData;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.Metadata;
 import org.apache.spark.sql.types.StructField;
@@ -598,6 +600,30 @@ class RowToMessageConverterTest {
         }
 
         @Test
+        void toleratesInconsistentNonNullApplicationPropertySlotWithNullUtf8Value() {
+            var converter = new RowToMessageConverter(schemaWithAppProperties());
+            MapData mapData = org.mockito.Mockito.mock(MapData.class);
+            ArrayData keyArray = org.mockito.Mockito.mock(ArrayData.class);
+            ArrayData valueArray = org.mockito.Mockito.mock(ArrayData.class);
+            org.mockito.Mockito.when(mapData.numElements()).thenReturn(1);
+            org.mockito.Mockito.when(mapData.keyArray()).thenReturn(keyArray);
+            org.mockito.Mockito.when(mapData.valueArray()).thenReturn(valueArray);
+            org.mockito.Mockito.when(keyArray.getUTF8String(0))
+                    .thenReturn(UTF8String.fromString("k1"));
+            org.mockito.Mockito.when(valueArray.isNullAt(0)).thenReturn(false);
+            org.mockito.Mockito.when(valueArray.getUTF8String(0)).thenReturn(null);
+
+            InternalRow row = new GenericInternalRow(new Object[]{
+                    "body".getBytes(), mapData
+            });
+
+            Message msg = converter.convert(row, CODEC.messageBuilder());
+            Map<String, Object> appProps = msg.getApplicationProperties();
+            assertThat(appProps).containsKey("k1");
+            assertThat(appProps.get("k1")).isNull();
+        }
+
+        @Test
         void convertsApplicationPropertiesAtIndexZero() {
             var converter = new RowToMessageConverter(schemaWithAppPropertiesFirst());
             var mapData = createStringMap("k1", "v1");
@@ -634,6 +660,30 @@ class RowToMessageConverterTest {
             assertThat(annotations).containsKey("ann1");
             assertThat(annotations.get("ann1")).isNull();
             assertThat(annotations.get("ann2")).isEqualTo("val2");
+        }
+
+        @Test
+        void toleratesInconsistentNonNullAnnotationSlotWithNullUtf8Value() {
+            var converter = new RowToMessageConverter(schemaWithMsgAnnotations());
+            MapData mapData = org.mockito.Mockito.mock(MapData.class);
+            ArrayData keyArray = org.mockito.Mockito.mock(ArrayData.class);
+            ArrayData valueArray = org.mockito.Mockito.mock(ArrayData.class);
+            org.mockito.Mockito.when(mapData.numElements()).thenReturn(1);
+            org.mockito.Mockito.when(mapData.keyArray()).thenReturn(keyArray);
+            org.mockito.Mockito.when(mapData.valueArray()).thenReturn(valueArray);
+            org.mockito.Mockito.when(keyArray.getUTF8String(0))
+                    .thenReturn(UTF8String.fromString("ann1"));
+            org.mockito.Mockito.when(valueArray.isNullAt(0)).thenReturn(false);
+            org.mockito.Mockito.when(valueArray.getUTF8String(0)).thenReturn(null);
+
+            InternalRow row = new GenericInternalRow(new Object[]{
+                    "body".getBytes(), mapData
+            });
+
+            Message msg = converter.convert(row, CODEC.messageBuilder());
+            Map<String, Object> annotations = msg.getMessageAnnotations();
+            assertThat(annotations).containsKey("ann1");
+            assertThat(annotations.get("ann1")).isNull();
         }
 
         @Test
