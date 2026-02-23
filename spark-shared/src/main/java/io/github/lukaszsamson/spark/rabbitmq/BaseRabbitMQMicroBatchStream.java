@@ -25,6 +25,7 @@ import java.nio.file.Paths;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 
@@ -1081,14 +1082,19 @@ class BaseRabbitMQMicroBatchStream
     }
 
     long probeTailOffsetFromLastMessage(Environment env, String stream) {
-        BlockingQueue<Long> observedOffsets = new LinkedBlockingQueue<>();
+        ArrayBlockingQueue<Long> observedOffsets = new ArrayBlockingQueue<>(1);
+        AtomicLong maxObservedOffset = new AtomicLong(-1L);
         com.rabbitmq.stream.Consumer probe = null;
         try {
             probe = env.consumerBuilder()
                     .stream(stream)
                     .offset(com.rabbitmq.stream.OffsetSpecification.last())
                     .noTrackingStrategy()
-                    .messageHandler((context, message) -> observedOffsets.offer(context.offset()))
+                    .messageHandler((context, message) -> {
+                        long offset = context.offset();
+                        maxObservedOffset.accumulateAndGet(offset, Math::max);
+                        observedOffsets.offer(offset);
+                    })
                     .flow()
                     .initialCredits(1)
                     .strategy(ConsumerFlowStrategy.creditWhenHalfMessagesProcessed(1))
@@ -1100,14 +1106,21 @@ class BaseRabbitMQMicroBatchStream
                 return 0;
             }
 
-            long maxSeen = first;
+            long maxSeen = Math.max(first, maxObservedOffset.get());
             while (true) {
                 Long next = observedOffsets.poll(40, TimeUnit.MILLISECONDS);
+                long observed = maxObservedOffset.get();
                 if (next == null) {
+                    if (observed > maxSeen) {
+                        maxSeen = observed;
+                    }
                     break;
                 }
                 if (next > maxSeen) {
                     maxSeen = next;
+                }
+                if (observed > maxSeen) {
+                    maxSeen = observed;
                 }
             }
             return maxSeen + 1;
