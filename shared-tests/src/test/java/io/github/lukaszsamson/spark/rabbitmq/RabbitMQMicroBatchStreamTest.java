@@ -941,6 +941,14 @@ class RabbitMQMicroBatchStreamTest {
         }
 
         @Test
+        void probeTailCapturesStaggeredOffsetsWithinIdleGraceWindow() throws Exception {
+            RabbitMQMicroBatchStream stream = createStream(minimalOptions());
+            long result = invokeProbe(stream,
+                    new FixedOffsetProbeEnvironment(java.util.List.of(5L, 9L), 0L, 120L));
+            assertThat(result).isEqualTo(10L);
+        }
+
+        @Test
         void probeTailPreservesInterruptFlag() throws Exception {
             RabbitMQMicroBatchStream stream = createStream(minimalOptions());
             Thread.currentThread().interrupt();
@@ -2105,14 +2113,27 @@ class RabbitMQMicroBatchStreamTest {
 
     private static final class FixedOffsetProbeEnvironment implements com.rabbitmq.stream.Environment {
         private final java.util.List<Long> offsets;
+        private final long initialDelayMs;
+        private final long interMessageDelayMs;
 
         private FixedOffsetProbeEnvironment(java.util.List<Long> offsets) {
+            this(offsets, 0L, 0L);
+        }
+
+        private FixedOffsetProbeEnvironment(java.util.List<Long> offsets, long delayMs) {
+            this(offsets, delayMs, 0L);
+        }
+
+        private FixedOffsetProbeEnvironment(
+                java.util.List<Long> offsets, long initialDelayMs, long interMessageDelayMs) {
             this.offsets = offsets;
+            this.initialDelayMs = initialDelayMs;
+            this.interMessageDelayMs = interMessageDelayMs;
         }
 
         @Override
         public com.rabbitmq.stream.ConsumerBuilder consumerBuilder() {
-            return new FixedOffsetProbeConsumerBuilder(offsets);
+            return new FixedOffsetProbeConsumerBuilder(offsets, initialDelayMs, interMessageDelayMs);
         }
 
         @Override
@@ -2297,16 +2318,23 @@ class RabbitMQMicroBatchStreamTest {
 
     private static final class FixedOffsetProbeConsumerBuilder implements com.rabbitmq.stream.ConsumerBuilder {
         private final java.util.List<Long> offsets;
-        private final long delayMs;
+        private final long initialDelayMs;
+        private final long interMessageDelayMs;
         private com.rabbitmq.stream.MessageHandler handler;
 
         private FixedOffsetProbeConsumerBuilder(java.util.List<Long> offsets) {
-            this(offsets, 0L);
+            this(offsets, 0L, 0L);
         }
 
         private FixedOffsetProbeConsumerBuilder(java.util.List<Long> offsets, long delayMs) {
+            this(offsets, delayMs, 0L);
+        }
+
+        private FixedOffsetProbeConsumerBuilder(
+                java.util.List<Long> offsets, long initialDelayMs, long interMessageDelayMs) {
             this.offsets = offsets;
-            this.delayMs = delayMs;
+            this.initialDelayMs = initialDelayMs;
+            this.interMessageDelayMs = interMessageDelayMs;
         }
 
         @Override
@@ -2388,7 +2416,7 @@ class RabbitMQMicroBatchStreamTest {
         @Override
         public com.rabbitmq.stream.Consumer build() {
             if (handler != null) {
-                if (delayMs <= 0L) {
+                if (initialDelayMs <= 0L && interMessageDelayMs <= 0L) {
                     for (Long offset : offsets) {
                         handler.handle(new FixedContext(offset),
                                 CODEC.messageBuilder().addData(new byte[0]).build());
@@ -2396,10 +2424,16 @@ class RabbitMQMicroBatchStreamTest {
                 } else {
                     Thread emitter = new Thread(() -> {
                         try {
-                            Thread.sleep(delayMs);
-                            for (Long offset : offsets) {
+                            if (initialDelayMs > 0L) {
+                                Thread.sleep(initialDelayMs);
+                            }
+                            for (int i = 0; i < offsets.size(); i++) {
+                                Long offset = offsets.get(i);
                                 handler.handle(new FixedContext(offset),
                                         CODEC.messageBuilder().addData(new byte[0]).build());
+                                if (interMessageDelayMs > 0L && i + 1 < offsets.size()) {
+                                    Thread.sleep(interMessageDelayMs);
+                                }
                             }
                         } catch (InterruptedException e) {
                             Thread.currentThread().interrupt();

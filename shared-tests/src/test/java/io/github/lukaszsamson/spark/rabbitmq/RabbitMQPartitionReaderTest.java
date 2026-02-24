@@ -258,6 +258,86 @@ class RabbitMQPartitionReaderTest {
         }
 
         @Test
+        void nextFailsWhenClosedConsumerRevealsOffsetGap() throws Exception {
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 0, 3, minimalOptions());
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
+
+            BlockingQueue<RabbitMQPartitionReader.QueuedMessage> queue = new LinkedBlockingQueue<>();
+            queue.add(new RabbitMQPartitionReader.QueuedMessage(
+                    CODEC.messageBuilder().addData("b".getBytes()).build(),
+                    1L, 0L, new NoopContext()));
+            queue.add(new RabbitMQPartitionReader.QueuedMessage(
+                    CODEC.messageBuilder().addData("c".getBytes()).build(),
+                    2L, 0L, new NoopContext()));
+
+            setPrivateField(reader, "consumer", new NoopConsumer());
+            setPrivateField(reader, "queue", queue);
+            setPrivateField(reader, "consumerClosed", new java.util.concurrent.atomic.AtomicBoolean(true));
+
+            assertThatThrownBy(reader::next)
+                    .isInstanceOf(IOException.class)
+                    .hasMessageContaining("Detected offset gap after consumer closure");
+        }
+
+        @Test
+        void nextCompletesWhenClosedConsumerRevealsOffsetGapAndFailOnDataLossFalse() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("failOnDataLoss", "false");
+
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 0, 3, new ConnectorOptions(opts));
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
+
+            BlockingQueue<RabbitMQPartitionReader.QueuedMessage> queue = new LinkedBlockingQueue<>();
+            queue.add(new RabbitMQPartitionReader.QueuedMessage(
+                    CODEC.messageBuilder().addData("b".getBytes()).build(),
+                    1L, 0L, new NoopContext()));
+            queue.add(new RabbitMQPartitionReader.QueuedMessage(
+                    CODEC.messageBuilder().addData("c".getBytes()).build(),
+                    2L, 0L, new NoopContext()));
+
+            setPrivateField(reader, "consumer", new NoopConsumer());
+            setPrivateField(reader, "queue", queue);
+            setPrivateField(reader, "consumerClosed", new java.util.concurrent.atomic.AtomicBoolean(true));
+
+            assertThat(reader.next()).isFalse();
+            assertThat(reader.currentMetricsValues()[5].value()).isEqualTo(1L);
+        }
+
+        @Test
+        void nextDrainsContiguousMessagesWhenConsumerAlreadyClosed() throws Exception {
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 0, 3, minimalOptions());
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
+
+            BlockingQueue<RabbitMQPartitionReader.QueuedMessage> queue = new LinkedBlockingQueue<>();
+            queue.add(new RabbitMQPartitionReader.QueuedMessage(
+                    CODEC.messageBuilder().addData("a".getBytes()).build(),
+                    0L, 0L, new NoopContext()));
+            queue.add(new RabbitMQPartitionReader.QueuedMessage(
+                    CODEC.messageBuilder().addData("b".getBytes()).build(),
+                    1L, 0L, new NoopContext()));
+            queue.add(new RabbitMQPartitionReader.QueuedMessage(
+                    CODEC.messageBuilder().addData("c".getBytes()).build(),
+                    2L, 0L, new NoopContext()));
+
+            setPrivateField(reader, "consumer", new NoopConsumer());
+            setPrivateField(reader, "queue", queue);
+            setPrivateField(reader, "consumerClosed", new java.util.concurrent.atomic.AtomicBoolean(true));
+
+            assertThat(reader.next()).isTrue();
+            assertThat(reader.get().getLong(2)).isEqualTo(0L);
+            assertThat(reader.next()).isTrue();
+            assertThat(reader.get().getLong(2)).isEqualTo(1L);
+            assertThat(reader.next()).isTrue();
+            assertThat(reader.get().getLong(2)).isEqualTo(2L);
+            assertThat(reader.next()).isFalse();
+        }
+
+        @Test
         void nextReturnsFalsePromptlyWhenReaderClosedDuringLongPoll() throws Exception {
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");

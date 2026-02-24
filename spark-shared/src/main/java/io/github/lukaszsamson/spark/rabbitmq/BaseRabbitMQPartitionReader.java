@@ -259,6 +259,25 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
             totalWaitMs = 0;
             waitStartNanos = System.nanoTime();
 
+            if (consumerClosed.get()
+                    && shouldDetectOffsetGapsAfterConsumerClosure()
+                    && qm.offset() >= startOffset) {
+                long expectedNextOffset = expectedNextObservedOffset();
+                if (qm.offset() > expectedNextOffset) {
+                    String message = "Detected offset gap after consumer closure on stream '"
+                            + stream + "': expected offset " + expectedNextOffset
+                            + " but observed " + qm.offset() + " for planned range ["
+                            + startOffset + ", " + endOffset + ")";
+                    if (options.isFailOnDataLoss()) {
+                        throw new IOException(message);
+                    }
+                    LOG.warn("{}; completing split because failOnDataLoss=false", message);
+                    dataLoss++;
+                    finished = true;
+                    return false;
+                }
+            }
+
             // Stop at end offset (exclusive) without granting additional credit.
             if (qm.offset() >= endOffset) {
                 finished = true;
@@ -525,6 +544,17 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
     boolean isTimestampConfiguredStartingOffset() {
         return useConfiguredStartingOffset
                 && options.getStartingOffsets() == StartingOffsetsMode.TIMESTAMP;
+    }
+
+    boolean shouldDetectOffsetGapsAfterConsumerClosure() {
+        return !isBrokerFilterConfigured() && !isTimestampConfiguredStartingOffset();
+    }
+
+    long expectedNextObservedOffset() {
+        if (lastObservedOffset < startOffset) {
+            return startOffset;
+        }
+        return lastObservedOffset + 1;
     }
 
     long resolveStartingTimestampForStream() {

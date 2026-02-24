@@ -59,6 +59,8 @@ class BaseRabbitMQMicroBatchStream
     static final long LATEST_OFFSET_RESULT_CACHE_WINDOW_MS = 250L;
     static final long TAIL_PROBE_WAIT_MS = 250L;
     static final long TAIL_PROBE_DRAIN_WAIT_MS = 40L;
+    static final long TAIL_PROBE_IDLE_GRACE_MS = 200L;
+    static final long TAIL_PROBE_MAX_EXTRA_WAIT_MS = 750L;
     static final long MIN_TIMESTAMP_START_PROBE_TIMEOUT_MS = 250L;
 
     final ConnectorOptions options;
@@ -104,6 +106,8 @@ class BaseRabbitMQMicroBatchStream
     /** Last driver-side accumulator totals already applied to the running estimate. */
     volatile long lastAccumulatedMessageBytes;
     volatile long lastAccumulatedMessageRecords;
+    /** Guards compound read-modify-write updates on mutable admission-control state. */
+    final Object mutableStateLock = new Object();
 
     record CachedTailProbe(long tailExclusive, long expiresAtNanos) {}
     record LatestOffsetInvocationCache(
@@ -229,15 +233,16 @@ class BaseRabbitMQMicroBatchStream
 
         // Update running average message size from completed batch readers.
         // Prefer Spark accumulators so executor JVM metrics are visible to the driver.
-        int updatedSize = drainAverageFromAccumulators(estimatedMessageSize);
-        if (updatedSize == estimatedMessageSize) {
+        int previousEstimate = currentEstimatedMessageSize();
+        int updatedSize = drainAverageFromAccumulators();
+        if (updatedSize == previousEstimate) {
             updatedSize = MessageSizeTracker.drainAverage(
-                    messageSizeTrackerScope, estimatedMessageSize);
+                    messageSizeTrackerScope, previousEstimate);
         }
-        if (updatedSize != estimatedMessageSize) {
+        int effectivePreviousEstimate = setEstimatedMessageSizeAndGetPrevious(updatedSize);
+        if (updatedSize != effectivePreviousEstimate) {
             LOG.debug("Updated estimated message size: {} -> {} bytes",
-                    estimatedMessageSize, updatedSize);
-            estimatedMessageSize = updatedSize;
+                    effectivePreviousEstimate, updatedSize);
         }
 
         RabbitMQStreamOffset endOffset = (RabbitMQStreamOffset) end;
@@ -581,6 +586,7 @@ class BaseRabbitMQMicroBatchStream
     // Spark 3.5 compat: uses reflection for ReadMaxBytes (not available in 3.5).
     // Overridden in spark40/spark41 subclasses to use ReadLimit.maxBytes() directly.
     ReadLimit buildUpperLimit(Long maxRows, Long maxBytes) {
+        int estimatedSize = currentEstimatedMessageSize();
         if (maxRows != null && maxBytes != null) {
             ReadLimit maxBytesLimit = createReadMaxBytesLimit(maxBytes);
             if (maxBytesLimit != null) {
@@ -589,7 +595,7 @@ class BaseRabbitMQMicroBatchStream
                         maxBytesLimit
                 });
             }
-            long bytesAsRows = Math.max(1, maxBytes / estimatedMessageSize);
+            long bytesAsRows = Math.max(1, maxBytes / estimatedSize);
             return ReadLimit.compositeLimit(new ReadLimit[]{
                     ReadLimit.maxRows(maxRows),
                     ReadLimit.maxRows(bytesAsRows)
@@ -603,7 +609,7 @@ class BaseRabbitMQMicroBatchStream
             if (maxBytesLimit != null) {
                 return maxBytesLimit;
             }
-            long bytesAsRows = Math.max(1, maxBytes / estimatedMessageSize);
+            long bytesAsRows = Math.max(1, maxBytes / estimatedSize);
             return ReadLimit.maxRows(bytesAsRows);
         }
         return null;
@@ -872,17 +878,33 @@ class BaseRabbitMQMicroBatchStream
             totalAvailable += Math.max(0, entry.getValue() - startOff);
         }
 
-        // Enough data available — proceed with the batch
-        if (totalAvailable >= minRows) {
-            lastTriggerMillis = System.currentTimeMillis();
+        long nowMillis = System.currentTimeMillis();
+        boolean processBatch;
+        boolean dueToDelayExpiry;
+        synchronized (mutableStateLock) {
+            if (totalAvailable >= minRows) {
+                lastTriggerMillis = nowMillis;
+                processBatch = true;
+                dueToDelayExpiry = false;
+            } else if ((nowMillis - lastTriggerMillis) >= maxDelayMs) {
+                lastTriggerMillis = nowMillis;
+                processBatch = true;
+                dueToDelayExpiry = true;
+            } else {
+                processBatch = false;
+                dueToDelayExpiry = false;
+            }
+        }
+
+        // Enough data available — proceed with the batch.
+        if (processBatch && !dueToDelayExpiry) {
             return tailOffsets;
         }
 
-        // Max delay expired — proceed even with insufficient data
-        if ((System.currentTimeMillis() - lastTriggerMillis) >= maxDelayMs) {
+        // Max delay expired — proceed even with insufficient data.
+        if (processBatch) {
             LOG.debug("Max trigger delay of {}ms expired, processing batch with {} records",
                     maxDelayMs, totalAvailable);
-            lastTriggerMillis = System.currentTimeMillis();
             return tailOffsets;
         }
 
@@ -1116,31 +1138,52 @@ class BaseRabbitMQMicroBatchStream
                     })
                     .flow()
                     .initialCredits(1)
-                    .strategy(ConsumerFlowStrategy.creditWhenHalfMessagesProcessed(1))
+                    // Probe callback never calls context.processed(), so use a strategy that
+                    // does not depend on processed() to keep chunk delivery moving.
+                    .strategy(ConsumerFlowStrategy.creditOnChunkArrival(1))
                     .builder()
                     .build();
 
-            Long first = observedOffsets.poll(
-                    Math.max(1L, firstMessageWaitMs), TimeUnit.MILLISECONDS);
+            long firstWaitMs = Math.max(1L, firstMessageWaitMs);
+            Long first = observedOffsets.poll(firstWaitMs, TimeUnit.MILLISECONDS);
             if (first == null) {
                 return -1L;
             }
 
             long maxSeen = Math.max(first, maxObservedOffset.get());
+            long extraWaitMs = Math.min(
+                    TAIL_PROBE_MAX_EXTRA_WAIT_MS,
+                    Math.max(TAIL_PROBE_DRAIN_WAIT_MS, firstWaitMs * 3));
+            long idleGraceMs = Math.min(
+                    extraWaitMs,
+                    Math.max(TAIL_PROBE_DRAIN_WAIT_MS, TAIL_PROBE_IDLE_GRACE_MS));
+            long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(extraWaitMs);
+            long lastAdvanceNanos = System.nanoTime();
             while (true) {
-                Long next = observedOffsets.poll(TAIL_PROBE_DRAIN_WAIT_MS, TimeUnit.MILLISECONDS);
-                long observed = maxObservedOffset.get();
-                if (next == null) {
-                    if (observed > maxSeen) {
-                        maxSeen = observed;
-                    }
+                long remainingNanos = deadlineNanos - System.nanoTime();
+                if (remainingNanos <= 0) {
                     break;
                 }
-                if (next > maxSeen) {
+                long remainingMs = Math.max(1L, TimeUnit.NANOSECONDS.toMillis(remainingNanos));
+                long pollMs = Math.max(1L, Math.min(TAIL_PROBE_DRAIN_WAIT_MS, remainingMs));
+                Long next = observedOffsets.poll(pollMs, TimeUnit.MILLISECONDS);
+                long observed = maxObservedOffset.get();
+                boolean advanced = false;
+                if (next != null && next > maxSeen) {
                     maxSeen = next;
+                    advanced = true;
                 }
                 if (observed > maxSeen) {
                     maxSeen = observed;
+                    advanced = true;
+                }
+                if (advanced) {
+                    lastAdvanceNanos = System.nanoTime();
+                    continue;
+                }
+                long idleMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - lastAdvanceNanos);
+                if (idleMs >= idleGraceMs) {
+                    break;
                 }
             }
             return maxSeen;
@@ -1339,20 +1382,37 @@ class BaseRabbitMQMicroBatchStream
         }
     }
 
-    private int drainAverageFromAccumulators(int currentEstimate) {
+    private int drainAverageFromAccumulators() {
         if (messageSizeBytesAccumulator == null || messageSizeRecordsAccumulator == null) {
-            return currentEstimate;
+            return currentEstimatedMessageSize();
         }
         long totalBytes = messageSizeBytesAccumulator.value();
         long totalRecords = messageSizeRecordsAccumulator.value();
-        long deltaBytes = totalBytes - lastAccumulatedMessageBytes;
-        long deltaRecords = totalRecords - lastAccumulatedMessageRecords;
-        if (deltaBytes < 0 || deltaRecords <= 0) {
-            return currentEstimate;
+        synchronized (mutableStateLock) {
+            int currentEstimate = estimatedMessageSize;
+            long deltaBytes = totalBytes - lastAccumulatedMessageBytes;
+            long deltaRecords = totalRecords - lastAccumulatedMessageRecords;
+            if (deltaBytes < 0 || deltaRecords <= 0) {
+                return currentEstimate;
+            }
+            lastAccumulatedMessageBytes = totalBytes;
+            lastAccumulatedMessageRecords = totalRecords;
+            return Math.max(1, (int) (deltaBytes / deltaRecords));
         }
-        lastAccumulatedMessageBytes = totalBytes;
-        lastAccumulatedMessageRecords = totalRecords;
-        return Math.max(1, (int) (deltaBytes / deltaRecords));
+    }
+
+    private int currentEstimatedMessageSize() {
+        synchronized (mutableStateLock) {
+            return estimatedMessageSize;
+        }
+    }
+
+    private int setEstimatedMessageSizeAndGetPrevious(int newEstimate) {
+        synchronized (mutableStateLock) {
+            int previous = estimatedMessageSize;
+            estimatedMessageSize = newEstimate;
+            return previous;
+        }
     }
 
     private static String deriveMessageSizeTrackerScope(

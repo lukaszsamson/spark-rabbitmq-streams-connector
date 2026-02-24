@@ -475,34 +475,11 @@ final class RabbitMQScan implements Scan {
     }
 
     private long probeTailOffsetFromLastMessage(Environment env, String stream) {
-        BlockingQueue<Long> observedOffsets = new LinkedBlockingQueue<>();
-        com.rabbitmq.stream.Consumer probe = null;
         try {
-            probe = env.consumerBuilder()
-                    .stream(stream)
-                    .offset(com.rabbitmq.stream.OffsetSpecification.last())
-                    .noTrackingStrategy()
-                    .messageHandler((context, message) -> observedOffsets.offer(context.offset()))
-                    .flow()
-                    .initialCredits(1)
-                    .strategy(ConsumerFlowStrategy.creditWhenHalfMessagesProcessed(1))
-                    .builder()
-                    .build();
-
-            Long first = observedOffsets.poll(250, TimeUnit.MILLISECONDS);
-            if (first == null) {
+            long maxSeen = BaseRabbitMQMicroBatchStream.probeLastMessageOffsetInclusive(
+                    env, stream, BaseRabbitMQMicroBatchStream.TAIL_PROBE_WAIT_MS);
+            if (maxSeen < 0) {
                 return 0;
-            }
-
-            long maxSeen = first;
-            while (true) {
-                Long next = observedOffsets.poll(40, TimeUnit.MILLISECONDS);
-                if (next == null) {
-                    break;
-                }
-                if (next > maxSeen) {
-                    maxSeen = next;
-                }
             }
             return maxSeen + 1;
         } catch (NoOffsetException e) {
@@ -514,14 +491,6 @@ final class RabbitMQScan implements Scan {
             LOG.debug("Unable to probe last message tail offset for stream '{}': {}",
                     stream, e.getMessage());
             return 0;
-        } finally {
-            if (probe != null) {
-                try {
-                    probe.close();
-                } catch (Exception e) {
-                    LOG.debug("Error closing tail probe consumer for stream '{}'", stream, e);
-                }
-            }
         }
     }
 }
