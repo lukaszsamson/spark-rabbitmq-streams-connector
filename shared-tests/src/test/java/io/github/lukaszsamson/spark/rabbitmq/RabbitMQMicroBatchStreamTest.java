@@ -21,6 +21,7 @@ import com.rabbitmq.stream.codec.QpidProtonCodec;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.*;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.ThreadPoolExecutor;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -959,7 +960,7 @@ class RabbitMQMicroBatchStreamTest {
         }
 
         @Test
-        void prepareForTriggerAvailableNowReusesRecentTailProbeCache() throws Exception {
+        void prepareForTriggerAvailableNowUsesFreshTailProbe() throws Exception {
             RabbitMQMicroBatchStream stream = createStream(minimalOptions());
             ProbeCountingEnvironment env = new ProbeCountingEnvironment(10L, java.util.List.of(14L));
             setPrivateField(stream, "environment", env);
@@ -970,8 +971,24 @@ class RabbitMQMicroBatchStreamTest {
 
             stream.prepareForTriggerAvailableNow();
 
-            assertThat(env.probeBuilderCalls).isEqualTo(1);
+            assertThat(env.probeBuilderCalls).isEqualTo(2);
             assertThat(env.queryStatsCalls).isEqualTo(2);
+        }
+
+        @Test
+        void prepareForTriggerAvailableNowIgnoresWarmTailProbeCache() throws Exception {
+            RabbitMQMicroBatchStream stream = createStream(minimalOptions());
+            ProbeCountingEnvironment env = new ProbeCountingEnvironment(10L, java.util.List.of(14L));
+            setPrivateField(stream, "environment", env);
+            putCachedTailProbe(stream, "test-stream", 5L, TimeUnit.SECONDS.toNanos(1));
+
+            stream.prepareForTriggerAvailableNow();
+
+            RabbitMQStreamOffset latest = (RabbitMQStreamOffset) stream.latestOffset(
+                    new RabbitMQStreamOffset(Map.of("test-stream", 0L)),
+                    ReadLimit.allAvailable());
+            assertThat(latest.getStreamOffsets()).containsEntry("test-stream", 15L);
+            assertThat(env.probeBuilderCalls).isEqualTo(1);
         }
 
         @Test
@@ -1073,6 +1090,24 @@ class RabbitMQMicroBatchStreamTest {
             stream.stop();
 
             assertThat(env.recordedOffsets).containsExactly(Map.entry("test-stream", 9L));
+        }
+
+        @Test
+        void stopDoesNotPersistAvailableNowPlannedOffsetsWhenCommitNotCalled() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            OffsetTrackingEnvironment env = new OffsetTrackingEnvironment();
+            setPrivateField(stream, "environment", env);
+            setPrivateField(stream, "availableNowSnapshot", Map.of("test-stream", 10L));
+            setPrivateField(stream, "cachedLatestOffset",
+                    new RabbitMQStreamOffset(Map.of("test-stream", 10L)));
+
+            stream.stop();
+
+            assertThat(env.recordedOffsets).isEmpty();
         }
 
         @Test
@@ -1771,6 +1806,22 @@ class RabbitMQMicroBatchStreamTest {
                 com.rabbitmq.stream.Environment.class, String.class);
         method.setAccessible(true);
         return (long) method.invoke(stream, env, "test-stream");
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void putCachedTailProbe(
+            RabbitMQMicroBatchStream stream, String streamName, long tailExclusive, long ttlNanos)
+            throws Exception {
+        Field cacheField = findField(RabbitMQMicroBatchStream.class, "latestTailProbeCache");
+        cacheField.setAccessible(true);
+        Map<String, Object> cache = (Map<String, Object>) cacheField.get(stream);
+
+        Class<?> cachedTailProbe = Class.forName(
+                "io.github.lukaszsamson.spark.rabbitmq.BaseRabbitMQMicroBatchStream$CachedTailProbe");
+        var constructor = cachedTailProbe.getDeclaredConstructor(long.class, long.class);
+        constructor.setAccessible(true);
+        Object value = constructor.newInstance(tailExclusive, System.nanoTime() + ttlNanos);
+        cache.put(streamName, value);
     }
 
 

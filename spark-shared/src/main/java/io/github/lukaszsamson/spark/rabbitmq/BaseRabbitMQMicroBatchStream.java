@@ -714,6 +714,30 @@ class BaseRabbitMQMicroBatchStream
             }
         }
         tailOffsets = safeTail;
+
+        // Normalize stale starts before applying read limits. Without this, rate-limited
+        // planning can advance from a stale retained offset in tiny steps (e.g. +100/trigger),
+        // producing repeated empty batches when failOnDataLoss=false.
+        Map<String, Long> normalizedStart = new LinkedHashMap<>();
+        Map<String, Long> normalizedTail = new LinkedHashMap<>();
+        for (Map.Entry<String, Long> entry : tailOffsets.entrySet()) {
+            String stream = entry.getKey();
+            long startOff = effectiveStartMap.getOrDefault(stream, 0L);
+            long endOff = entry.getValue();
+            long validatedStart = validateStartOffset(stream, startOff, endOff);
+            if (validatedStart < 0L) {
+                continue;
+            }
+            normalizedStart.put(stream, validatedStart);
+            normalizedTail.put(stream, Math.max(endOff, validatedStart));
+        }
+        if (normalizedTail.isEmpty()) {
+            LOG.debug("No readable streams after start-offset normalization");
+            return startOffset != null ? startOffset : new RabbitMQStreamOffset(Map.of());
+        }
+
+        effectiveStartMap = normalizedStart;
+        tailOffsets = normalizedTail;
         cachedTailOffset = new RabbitMQStreamOffset(tailOffsets);
 
         // Check if any stream has new data
@@ -1411,7 +1435,15 @@ class BaseRabbitMQMicroBatchStream
 
     private long queryStreamTailOffsetForAvailableNow(Environment env, String stream) {
         long statsTail = queryStreamTailOffset(env, stream);
-        long probedTail = probeTailOffsetForLatestWithCache(env, stream);
+        // AvailableNow snapshot must reflect a fresh "now" boundary.
+        // Do not reuse latestOffset tail-probe cache here.
+        long probedTail = probeTailOffsetFromLastMessage(env, stream);
+        long nowNanos = System.nanoTime();
+        latestTailProbeCache.put(
+                stream,
+                new CachedTailProbe(
+                        probedTail,
+                        nowNanos + TimeUnit.MILLISECONDS.toNanos(LATEST_TAIL_PROBE_CACHE_WINDOW_MS)));
         return mergeTailOffsetsForAvailableNow(statsTail, probedTail);
     }
 
@@ -1685,13 +1717,6 @@ class BaseRabbitMQMicroBatchStream
         if (fromCheckpoint != null && !fromCheckpoint.isEmpty()) {
             return fromCheckpoint;
         }
-
-        if (shouldPersistCachedLatestOffsetOnStop()) {
-            RabbitMQStreamOffset latest = cachedLatestOffset;
-            if (latest != null && !latest.getStreamOffsets().isEmpty()) {
-                return latest.getStreamOffsets();
-            }
-        }
         return null;
     }
 
@@ -1806,10 +1831,6 @@ class BaseRabbitMQMicroBatchStream
         } catch (NumberFormatException e) {
             return -1L;
         }
-    }
-
-    boolean shouldPersistCachedLatestOffsetOnStop() {
-        return availableNowSnapshot != null;
     }
 
     private boolean isMissingStreamException(Throwable throwable) {

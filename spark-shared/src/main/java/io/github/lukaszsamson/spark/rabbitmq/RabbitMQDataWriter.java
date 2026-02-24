@@ -34,6 +34,7 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
     private static final Logger LOG = LoggerFactory.getLogger(RabbitMQDataWriter.class);
     private static final long DEFAULT_PUBLISHER_CONFIRM_TIMEOUT_MS = 30_000L;
     private static final long CLIENT_MIN_CONFIRM_TIMEOUT_MS = 1_000L;
+    private static final int MAX_BROKER_REFERENCE_LENGTH = 255;
 
     private final ConnectorOptions options;
     private final int partitionId;
@@ -516,16 +517,25 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
         if (baseName == null || baseName.isEmpty()) {
             return null;
         }
+        String derivedName;
         if (epochId >= 0) {
             String queryScope = sanitizeProducerToken(queryId);
             if (queryScope != null) {
-                return baseName + "-q" + queryScope + "-p" + partitionId + "-e" + epochId;
+                derivedName = baseName + "-q" + queryScope + "-p" + partitionId + "-e" + epochId;
+            } else {
+                derivedName = baseName + "-p" + partitionId + "-e" + epochId;
             }
-            return baseName + "-p" + partitionId + "-e" + epochId;
+        } else {
+            // Batch writes may run concurrent task attempts for one partition; include taskId
+            // to avoid producer-name collisions (RabbitMQ permits only one live producer/name).
+            derivedName = baseName + "-p" + partitionId + "-t" + taskId;
         }
-        // Batch writes may run concurrent task attempts for one partition; include taskId
-        // to avoid producer-name collisions (RabbitMQ permits only one live producer/name).
-        return baseName + "-p" + partitionId + "-t" + taskId;
+        if (derivedName.length() > MAX_BROKER_REFERENCE_LENGTH) {
+            throw new IllegalArgumentException(
+                    "Derived producer reference must be shorter than 256 characters, got: "
+                            + derivedName.length());
+        }
+        return derivedName;
     }
 
     private static String sanitizeProducerToken(String token) {

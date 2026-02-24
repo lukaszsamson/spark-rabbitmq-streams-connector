@@ -492,6 +492,17 @@ class ConnectorOptionsTest {
         }
 
         @Test
+        void autoClampsDefaultPollTimeoutWhenMaxWaitIsLower() {
+            var map = minimalStreamOptions();
+            map.put("maxWaitMs", "10000");
+
+            var opts = new ConnectorOptions(map);
+
+            assertThat(opts.getPollTimeoutMs()).isEqualTo(10_000L);
+            assertThatCode(opts::validateForSource).doesNotThrowAnyException();
+        }
+
+        @Test
         void parsesSingleActiveConsumer() {
             var map = minimalStreamOptions();
             map.put("consumerName", "orders-consumer");
@@ -1344,6 +1355,17 @@ class ConnectorOptionsTest {
         }
 
         @Test
+        void rejectsConsumerNameLongerThanClientReferenceLimit() {
+            var map = minimalStreamOptions();
+            map.put("consumerName", "x".repeat(256));
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateForSource)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("consumerName")
+                    .hasMessageContaining("shorter than 256");
+        }
+
+        @Test
         void acceptsValidOffsetConfig() {
             var map = minimalStreamOptions();
             map.put("startingOffsets", "offset");
@@ -1541,6 +1563,17 @@ class ConnectorOptionsTest {
             map.put("subEntrySize", "10");
             var opts = new ConnectorOptions(map);
             assertThatCode(opts::validateForSink).doesNotThrowAnyException();
+        }
+
+        @Test
+        void rejectsProducerNameLongerThanClientReferenceLimit() {
+            var map = minimalStreamOptions();
+            map.put("producerName", "x".repeat(256));
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateForSink)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("producerName")
+                    .hasMessageContaining("shorter than 256");
         }
 
         @Test

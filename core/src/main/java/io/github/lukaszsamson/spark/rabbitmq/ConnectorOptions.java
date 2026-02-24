@@ -14,6 +14,7 @@ import java.util.stream.Collectors;
  */
 public final class ConnectorOptions implements Serializable {
     private static final long serialVersionUID = 1L;
+    static final int MAX_BROKER_REFERENCE_LENGTH = 255;
 
     // ---- Option key constants ----
 
@@ -302,8 +303,16 @@ public final class ConnectorOptions implements Serializable {
         this.filterPostFilterClass = getString(options, FILTER_POST_FILTER_CLASS);
         this.filterWarningOnMismatch = getBoolean(options, FILTER_WARNING_ON_MISMATCH,
                 DEFAULT_FILTER_WARNING_ON_MISMATCH);
-        this.pollTimeoutMs = getLongPrimitive(options, POLL_TIMEOUT_MS, DEFAULT_POLL_TIMEOUT_MS);
+        long configuredPollTimeoutMs = getLongPrimitive(
+                options, POLL_TIMEOUT_MS, DEFAULT_POLL_TIMEOUT_MS);
         this.maxWaitMs = getLongPrimitive(options, MAX_WAIT_MS, DEFAULT_MAX_WAIT_MS);
+        boolean pollTimeoutExplicitlyConfigured = options.keySet().stream()
+                .anyMatch(key -> key != null && key.equalsIgnoreCase(POLL_TIMEOUT_MS));
+        if (!pollTimeoutExplicitlyConfigured && configuredPollTimeoutMs > this.maxWaitMs) {
+            this.pollTimeoutMs = this.maxWaitMs;
+        } else {
+            this.pollTimeoutMs = configuredPollTimeoutMs;
+        }
         this.callbackEnqueueTimeoutMs = getLongPrimitive(options, CALLBACK_ENQUEUE_TIMEOUT_MS,
                 DEFAULT_CALLBACK_ENQUEUE_TIMEOUT_MS);
         this.initialCredits = getIntPrimitive(options, INITIAL_CREDITS, DEFAULT_INITIAL_CREDITS);
@@ -597,13 +606,13 @@ public final class ConnectorOptions implements Serializable {
             throw new IllegalArgumentException(
                     "'" + MAX_RECORDS_PER_PARTITION + "' must be > 0, got: " + maxRecordsPerPartition);
         }
-        if (pollTimeoutMs <= 0) {
-            throw new IllegalArgumentException(
-                    "'" + POLL_TIMEOUT_MS + "' must be > 0, got: " + pollTimeoutMs);
-        }
         if (maxWaitMs <= 0) {
             throw new IllegalArgumentException(
                     "'" + MAX_WAIT_MS + "' must be > 0, got: " + maxWaitMs);
+        }
+        if (pollTimeoutMs <= 0) {
+            throw new IllegalArgumentException(
+                    "'" + POLL_TIMEOUT_MS + "' must be > 0, got: " + pollTimeoutMs);
         }
         if (pollTimeoutMs > maxWaitMs) {
             throw new IllegalArgumentException(
@@ -632,6 +641,12 @@ public final class ConnectorOptions implements Serializable {
             throw new IllegalArgumentException(
                     "'" + CONSUMER_NAME + "' is required when '" + SINGLE_ACTIVE_CONSUMER +
                             "' is true");
+        }
+        if (consumerName != null && !consumerName.isEmpty()
+                && consumerName.length() > MAX_BROKER_REFERENCE_LENGTH) {
+            throw new IllegalArgumentException(
+                    "'" + CONSUMER_NAME + "' must be shorter than 256 characters, got: "
+                            + consumerName.length());
         }
 
         // Validate extension class: filterPostFilterClass
@@ -703,6 +718,12 @@ public final class ConnectorOptions implements Serializable {
             throw new IllegalArgumentException(
                     "'" + BATCH_PUBLISHING_DELAY_MS + "' must be >= 0, got: " +
                             batchPublishingDelayMs);
+        }
+        if (producerName != null && !producerName.isEmpty()
+                && producerName.length() > MAX_BROKER_REFERENCE_LENGTH) {
+            throw new IllegalArgumentException(
+                    "'" + PRODUCER_NAME + "' must be shorter than 256 characters, got: "
+                            + producerName.length());
         }
 
         // Validate extension class: partitionerClass

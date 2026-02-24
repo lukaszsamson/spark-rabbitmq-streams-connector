@@ -95,11 +95,6 @@ final class RabbitMQMicroBatchStream extends BaseRabbitMQMicroBatchStream
         return result;
     }
 
-    @Override
-    boolean shouldPersistCachedLatestOffsetOnStop() {
-        return realTimeMode || super.shouldPersistCachedLatestOffsetOnStop();
-    }
-
     private void refreshTailOffsetsForRealTimeMetricsIfDue() {
         long now = System.currentTimeMillis();
         if (now - lastRealTimeTailRefreshMillis < REAL_TIME_TAIL_REFRESH_INTERVAL_MS) {

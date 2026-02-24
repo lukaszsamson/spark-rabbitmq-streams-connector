@@ -12,7 +12,11 @@ import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class RabbitMQMicroBatchStreamRealTimeLagMetricsTest {
@@ -46,6 +50,21 @@ class RabbitMQMicroBatchStreamRealTimeLagMetricsTest {
         } finally {
             stream.stop();
         }
+    }
+
+    @Test
+    void stopDoesNotPersistRealTimeCachedLatestWithoutCommit() {
+        RabbitMQMicroBatchStream stream = new RabbitMQMicroBatchStream(
+                minimalOptions(), new StructType(), "/tmp/rt-stop-offset-test");
+        stream.prepareForRealTimeMode();
+
+        Environment env = mock(Environment.class);
+        stream.environment = env;
+        stream.cachedLatestOffset = new RabbitMQStreamOffset(Map.of("test-stream", 42L));
+
+        stream.stop();
+
+        verify(env, never()).storeOffset(anyString(), anyString(), anyLong());
     }
 
     private static ConnectorOptions minimalOptions() {

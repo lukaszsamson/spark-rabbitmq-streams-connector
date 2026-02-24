@@ -1,8 +1,8 @@
 package io.github.lukaszsamson.spark.rabbitmq;
 
-import io.github.lukaszsamson.spark.shaded.com.rabbitmq.stream.Message;
-import io.github.lukaszsamson.spark.shaded.com.rabbitmq.stream.MessageHandler;
-import io.github.lukaszsamson.spark.shaded.com.rabbitmq.stream.ObservationCollector;
+import com.rabbitmq.stream.Message;
+import com.rabbitmq.stream.MessageHandler;
+import com.rabbitmq.stream.ObservationCollector;
 
 import java.util.concurrent.atomic.AtomicLong;
 

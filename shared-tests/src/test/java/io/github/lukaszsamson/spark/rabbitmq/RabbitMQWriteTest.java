@@ -701,6 +701,29 @@ class RabbitMQWriteTest {
         }
 
         @Test
+        void rejectsDerivedStreamingProducerNameLongerThanBrokerReferenceLimit() throws Exception {
+            Map<String, String> opts = minimalSinkMap();
+            opts.put("producerName", "p".repeat(240));
+            ConnectorOptions options = new ConnectorOptions(opts);
+
+            RabbitMQDataWriter writer = new RabbitMQDataWriter(
+                    options, minimalSinkSchema(), 2, 7, 11, "q".repeat(40));
+            CapturingProducerBuilder builder = new CapturingProducerBuilder();
+            seedEnvironmentPool(options, new BuilderEnvironment(builder));
+
+            assertThatThrownBy(() -> writer.write(new GenericInternalRow(new Object[]{"x".getBytes()})))
+                    .isInstanceOf(IOException.class)
+                    .hasRootCauseInstanceOf(IllegalArgumentException.class)
+                    .satisfies(error -> {
+                        Throwable root = error;
+                        while (root.getCause() != null) {
+                            root = root.getCause();
+                        }
+                        assertThat(root.getMessage()).contains("shorter than 256");
+                    });
+        }
+
+        @Test
         void dedupProducerNamesInBatchMustAvoidTaskAttemptCollisions() throws Exception {
             Map<String, String> opts = minimalSinkMap();
             opts.put("producerName", "dedup");
