@@ -3,7 +3,13 @@ package io.github.lukaszsamson.spark.rabbitmq;
 import org.apache.spark.sql.connector.catalog.Table;
 import org.apache.spark.sql.connector.catalog.TableCapability;
 import org.apache.spark.sql.connector.expressions.Transform;
+import org.apache.spark.sql.connector.read.Scan;
+import org.apache.spark.sql.connector.write.LogicalWriteInfo;
+import org.apache.spark.sql.connector.write.Write;
+import org.apache.spark.sql.connector.write.WriteBuilder;
 import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.Metadata;
+import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.CaseInsensitiveStringMap;
 import org.junit.jupiter.api.Nested;
@@ -164,6 +170,33 @@ class RabbitMQStreamTableProviderTest {
         }
 
         @Test
+        void newScanBuilderMergesTableOptionsWithPerOperationOverrides() {
+            RabbitMQStreamTable table = (RabbitMQStreamTable) provider.getTable(
+                    null, new Transform[]{}, minimalOptions());
+
+            Map<String, String> scanOverrides = new HashMap<>();
+            scanOverrides.put("stream", "scan-override");
+            Scan scan = table.newScanBuilder(new CaseInsensitiveStringMap(scanOverrides)).build();
+
+            assertThat(scan.description()).contains("stream=scan-override");
+            assertThat(scan.readSchema().fieldNames()).contains("value", "stream", "offset", "chunk_timestamp");
+        }
+
+        @Test
+        void newWriteBuilderMergesTableOptionsWithPerOperationOverrides() {
+            RabbitMQStreamTable table = (RabbitMQStreamTable) provider.getTable(
+                    null, new Transform[]{}, minimalOptions());
+
+            Map<String, String> writeOverrides = new HashMap<>();
+            writeOverrides.put("stream", "write-override");
+            LogicalWriteInfo info = logicalWriteInfo(minimalSinkSchema(), "test-query", writeOverrides);
+
+            WriteBuilder builder = table.newWriteBuilder(info);
+            Write write = builder.build();
+            assertThat(write.description()).contains("stream=write-override");
+        }
+
+        @Test
         void failsOnMissingStreamAndSuperstream() {
             var map = new HashMap<String, String>();
             map.put("endpoints", "localhost:5552");
@@ -223,5 +256,31 @@ class RabbitMQStreamTableProviderTest {
                     .isEqualTo(
                             "io.github.lukaszsamson.spark.rabbitmq.EnvironmentBuilderHelperTest$TestAddressResolver");
         }
+    }
+
+    private static StructType minimalSinkSchema() {
+        return new StructType(new StructField[]{
+                new StructField("value", DataTypes.BinaryType, false, Metadata.empty()),
+        });
+    }
+
+    private static LogicalWriteInfo logicalWriteInfo(
+            StructType schema, String queryId, Map<String, String> options) {
+        return new LogicalWriteInfo() {
+            @Override
+            public CaseInsensitiveStringMap options() {
+                return new CaseInsensitiveStringMap(options);
+            }
+
+            @Override
+            public String queryId() {
+                return queryId;
+            }
+
+            @Override
+            public StructType schema() {
+                return schema;
+            }
+        };
     }
 }

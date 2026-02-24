@@ -14,8 +14,12 @@ import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.CaseInsensitiveStringMap;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -37,10 +41,18 @@ public class RabbitMQStreamTable implements Table, SupportsRead, SupportsWrite {
 
     private final ConnectorOptions options;
     private final StructType schema;
+    private final Map<String, String> tableOptions;
 
     public RabbitMQStreamTable(ConnectorOptions options) {
+        this(options, Map.of());
+    }
+
+    public RabbitMQStreamTable(ConnectorOptions options, Map<String, String> tableOptions) {
         this.options = options;
         this.schema = buildSourceSchema(options.getMetadataFields());
+        this.tableOptions = tableOptions == null
+                ? Collections.emptyMap()
+                : Collections.unmodifiableMap(new LinkedHashMap<>(tableOptions));
     }
 
     @Override
@@ -60,9 +72,10 @@ public class RabbitMQStreamTable implements Table, SupportsRead, SupportsWrite {
 
     @Override
     public ScanBuilder newScanBuilder(CaseInsensitiveStringMap sparkOptions) {
-        // Use per-operation options so that scan-time overrides are honored.
-        ConnectorOptions scanOptions = sparkOptions.isEmpty() ? options
-                : new ConnectorOptions(sparkOptions);
+        // Spark V2 semantics: per-operation options override table options.
+        ConnectorOptions scanOptions = sparkOptions.isEmpty()
+                ? options
+                : mergeOptionsWithOperationOverrides(tableOptions, sparkOptions.asCaseSensitiveMap());
         StructType scanSchema = sparkOptions.isEmpty() ? schema
                 : buildSourceSchema(scanOptions.getMetadataFields());
         return new RabbitMQScanBuilder(scanOptions, scanSchema);
@@ -70,16 +83,35 @@ public class RabbitMQStreamTable implements Table, SupportsRead, SupportsWrite {
 
     @Override
     public WriteBuilder newWriteBuilder(LogicalWriteInfo info) {
-        // Use per-operation options so that write-time overrides are honored.
+        // Spark V2 semantics: per-operation options override table options.
         CaseInsensitiveStringMap writeOpts = info.options();
-        ConnectorOptions writeOptions = writeOpts.isEmpty() ? options
-                : new ConnectorOptions(writeOpts);
+        ConnectorOptions writeOptions = writeOpts.isEmpty()
+                ? options
+                : mergeOptionsWithOperationOverrides(tableOptions, writeOpts.asCaseSensitiveMap());
         return new RabbitMQWriteBuilder(writeOptions, info.schema(), info.queryId());
     }
 
     /** Returns the parsed connector options. */
     public ConnectorOptions getOptions() {
         return options;
+    }
+
+    private static ConnectorOptions mergeOptionsWithOperationOverrides(
+            Map<String, String> tableOptions, Map<String, String> operationOptions) {
+        Map<String, String> merged = new LinkedHashMap<>();
+        putNormalizedKeys(merged, tableOptions);
+        putNormalizedKeys(merged, operationOptions);
+        return new ConnectorOptions(merged);
+    }
+
+    private static void putNormalizedKeys(Map<String, String> target, Map<String, String> source) {
+        for (Map.Entry<String, String> entry : source.entrySet()) {
+            String key = entry.getKey();
+            if (key == null) {
+                continue;
+            }
+            target.put(key.toLowerCase(Locale.ROOT), entry.getValue());
+        }
     }
 
     // ---- Schema construction ----

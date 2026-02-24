@@ -33,6 +33,6 @@ public class RabbitMQStreamTableProvider implements TableProvider, DataSourceReg
                           Map<String, String> properties) {
         ConnectorOptions options = new ConnectorOptions(properties);
         options.validateCommon();
-        return new RabbitMQStreamTable(options);
+        return new RabbitMQStreamTable(options, properties);
     }
 }
