@@ -164,6 +164,20 @@ class RabbitMQScanTest {
         }
 
         @Test
+        void timestampStartPlanningWithoutMatchingRecordFallsBackToTailAndYieldsEmptyRange() {
+            Map<String, String> opts = baseOptions();
+            opts.put("startingOffsets", "timestamp");
+            opts.put("startingTimestamp", "4102444800000"); // 2100-01-01T00:00:00Z
+            RabbitMQScan scan = new RabbitMQScan(new ConnectorOptions(opts), schema());
+
+            long[] range = resolveStreamOffsetRange(scan,
+                    new DelayedProbeEnvironment(0L, new Stats(10L, false, false, 99L)),
+                    "s1");
+
+            assertThat(range).isNull();
+        }
+
+        @Test
         void timestampEndPlanningWaitsForProbeWithinConfiguredPollTimeoutWhenSupported() throws Exception {
             Map<String, String> opts = baseOptions();
             opts.put("endingOffsets", "timestamp");

@@ -381,6 +381,7 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
                 .noTrackingStrategy()
                 .messageHandler(this::enqueueFromCallback)
                 .flow()
+                .initialCredits(options.getInitialCredits())
                 .strategy(ConsumerFlowStrategy.creditWhenHalfMessagesProcessed(
                         options.getInitialCredits()))
                 .builder();
@@ -466,6 +467,7 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
                                 " on stream '" + stream + "'"));
             }
         } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
             consumerError.compareAndSet(null,
                     new IOException("Interrupted while enqueuing message at offset "
                             + context.offset() + " on stream '" + stream + "'", e));

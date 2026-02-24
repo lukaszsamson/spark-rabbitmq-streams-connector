@@ -137,6 +137,16 @@ class RowToMessageConverterTest {
         });
     }
 
+    private static StructType schemaWithAppPropertiesAndRoutingKey() {
+        return new StructType(new StructField[]{
+                new StructField("value", DataTypes.BinaryType, false, Metadata.empty()),
+                new StructField("application_properties",
+                        DataTypes.createMapType(DataTypes.StringType, DataTypes.StringType),
+                        true, Metadata.empty()),
+                new StructField("routing_key", DataTypes.StringType, true, Metadata.empty()),
+        });
+    }
+
     private static StructType schemaWithMsgAnnotations() {
         return new StructType(new StructField[]{
                 new StructField("value", DataTypes.BinaryType, false, Metadata.empty()),
@@ -631,6 +641,35 @@ class RowToMessageConverterTest {
 
             Message msg = converter.convert(row, CODEC.messageBuilder());
             assertThat(msg.getApplicationProperties()).containsEntry("k1", "v1");
+        }
+
+        @Test
+        void mergesRoutingKeyColumnIntoApplicationProperties() {
+            var converter = new RowToMessageConverter(schemaWithAppPropertiesAndRoutingKey());
+            var mapData = createStringMap("k1", "v1", "k2", "v2");
+            InternalRow row = new GenericInternalRow(new Object[]{
+                    "body".getBytes(), mapData, UTF8String.fromString("rk-1")
+            });
+
+            Message msg = converter.convert(row, CODEC.messageBuilder());
+            assertThat(msg.getApplicationProperties())
+                    .containsEntry("k1", "v1")
+                    .containsEntry("k2", "v2")
+                    .containsEntry("routing_key", "rk-1");
+        }
+
+        @Test
+        void routingKeyColumnOverridesMapRoutingKey() {
+            var converter = new RowToMessageConverter(schemaWithAppPropertiesAndRoutingKey());
+            var mapData = createStringMap("routing_key", "map-rk", "k1", "v1");
+            InternalRow row = new GenericInternalRow(new Object[]{
+                    "body".getBytes(), mapData, UTF8String.fromString("column-rk")
+            });
+
+            Message msg = converter.convert(row, CODEC.messageBuilder());
+            assertThat(msg.getApplicationProperties())
+                    .containsEntry("routing_key", "column-rk")
+                    .containsEntry("k1", "v1");
         }
 
         @Test

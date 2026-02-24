@@ -7,9 +7,9 @@ import com.rabbitmq.stream.StreamCreator;
 import com.rabbitmq.stream.StreamStats;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.List;
-import java.util.function.Function;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -36,14 +36,12 @@ class SuperStreamPartitionDiscoveryTest {
     }
 
     @Test
-    void discoversPartitionsViaEnvironmentLocatorOperationFallback() throws Exception {
-        LocatorOperationEnvironment environment =
-                new LocatorOperationEnvironment(List.of("super-0", "super-1"));
-
-        List<String> partitions = invokeDiscoverViaEnvironment(environment, "super");
-
-        assertThat(partitions).containsExactly("super-0", "super-1");
-        assertThat(environment.locatorCalls).isEqualTo(1);
+    void failsFastWhenEnvironmentQueryMethodIsUnavailable() {
+        assertThatThrownBy(() -> invokeDiscoverViaEnvironment(new LegacyEnvironment(), "super"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("requires RabbitMQ stream client support")
+                .hasMessageContaining("querySuperStreamPartitions")
+                .hasRootCauseInstanceOf(NoSuchMethodException.class);
     }
 
     @Test
@@ -63,7 +61,15 @@ class SuperStreamPartitionDiscoveryTest {
         Method method = SuperStreamPartitionDiscovery.class.getDeclaredMethod(
                 "discoverPartitionsViaEnvironment", Environment.class, String.class);
         method.setAccessible(true);
-        return (List<String>) method.invoke(null, environment, superStream);
+        try {
+            return (List<String>) method.invoke(null, environment, superStream);
+        } catch (InvocationTargetException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof Exception exception) {
+                throw exception;
+            }
+            throw e;
+        }
     }
 
     private abstract static class NoopEnvironment implements Environment {
@@ -125,29 +131,6 @@ class SuperStreamPartitionDiscoveryTest {
         }
     }
 
-    private static final class LocatorOperationEnvironment extends NoopEnvironment {
-        private final ClientStub clientStub;
-        private int locatorCalls;
-
-        private LocatorOperationEnvironment(List<String> partitions) {
-            this.clientStub = new ClientStub(partitions);
-        }
-
-        public <T> T locatorOperation(Function<ClientStub, T> operation) {
-            locatorCalls++;
-            return operation.apply(clientStub);
-        }
-    }
-
-    private static final class ClientStub {
-        private final List<String> partitions;
-
-        private ClientStub(List<String> partitions) {
-            this.partitions = partitions;
-        }
-
-        public List<String> partitions(String superStream) {
-            return partitions;
-        }
+    private static final class LegacyEnvironment extends NoopEnvironment {
     }
 }

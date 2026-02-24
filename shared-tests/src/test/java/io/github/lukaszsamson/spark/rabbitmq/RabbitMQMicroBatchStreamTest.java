@@ -672,6 +672,27 @@ class RabbitMQMicroBatchStreamTest {
         }
 
         @Test
+        void latestOffsetNullStartStillAppliesReadLimit() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("superstream", "super");
+            opts.put("startingOffsets", "offset");
+            opts.put("startingOffset", "0");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            Map<String, Long> snapshot = new LinkedHashMap<>();
+            snapshot.put("s1", 100L);
+            snapshot.put("s2", 80L);
+            setPrivateField(stream, "availableNowSnapshot", snapshot);
+
+            RabbitMQStreamOffset latest = (RabbitMQStreamOffset) stream.latestOffset(
+                    null, ReadLimit.maxRows(20));
+            assertThat(latest.getStreamOffsets())
+                    .containsEntry("s1", 10L)
+                    .containsEntry("s2", 10L);
+        }
+
+        @Test
         void latestOffsetClampsTailBelowStartOffsets() throws Exception {
             RabbitMQMicroBatchStream stream = createStream(minimalOptions());
             Map<String, Long> snapshot = Map.of("s1", 5L, "s2", 100L);

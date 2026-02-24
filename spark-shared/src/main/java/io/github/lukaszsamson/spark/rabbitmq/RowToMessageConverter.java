@@ -112,20 +112,19 @@ public final class RowToMessageConverter implements Serializable {
             builder.properties().creationTime(topLevelCreationTimeMillis).messageBuilder();
         }
 
-        // Optional: application_properties
-        if (appPropertiesIndex >= 0 && !row.isNullAt(appPropertiesIndex)) {
-            applyApplicationProperties(row.getMap(appPropertiesIndex), builder);
-        }
-
         // Optional: routing_key → stored in application properties for routing
+        String routingKey = null;
         if (routingKeyIndex >= 0 && !row.isNullAt(routingKeyIndex)) {
             UTF8String routingKeyUtf8 = row.getUTF8String(routingKeyIndex);
             if (routingKeyUtf8 != null) {
-                builder.applicationProperties()
-                        .entry("routing_key", routingKeyUtf8.toString())
-                        .messageBuilder();
+                routingKey = routingKeyUtf8.toString();
             }
         }
+        // Optional: application_properties (merged with routing_key in one section)
+        MapData appProperties = appPropertiesIndex >= 0 && !row.isNullAt(appPropertiesIndex)
+                ? row.getMap(appPropertiesIndex)
+                : null;
+        applyApplicationProperties(appProperties, routingKey, builder);
 
         // Optional: message_annotations
         if (msgAnnotationsIndex >= 0 && !row.isNullAt(msgAnnotationsIndex)) {
@@ -247,16 +246,24 @@ public final class RowToMessageConverter implements Serializable {
 
     // ---- Map conversions ----
 
-    private void applyApplicationProperties(MapData mapData, MessageBuilder builder) {
-        if (mapData.numElements() == 0) return;
+    private void applyApplicationProperties(
+            MapData mapData, String routingKey, MessageBuilder builder) {
+        boolean hasMapData = mapData != null && mapData.numElements() > 0;
+        if (!hasMapData && routingKey == null) return;
         MessageBuilder.ApplicationPropertiesBuilder apb = builder.applicationProperties();
-        var keyArray = mapData.keyArray();
-        var valueArray = mapData.valueArray();
-        for (int i = 0; i < mapData.numElements(); i++) {
-            String key = keyArray.getUTF8String(i).toString();
-            String value = valueArray.isNullAt(i) ? null
-                    : utf8ToString(valueArray.getUTF8String(i));
-            apb.entry(key, value);
+        if (hasMapData) {
+            var keyArray = mapData.keyArray();
+            var valueArray = mapData.valueArray();
+            for (int i = 0; i < mapData.numElements(); i++) {
+                String key = keyArray.getUTF8String(i).toString();
+                String value = valueArray.isNullAt(i) ? null
+                        : utf8ToString(valueArray.getUTF8String(i));
+                apb.entry(key, value);
+            }
+        }
+        if (routingKey != null) {
+            // Explicit routing_key column has precedence over map-provided routing_key.
+            apb.entry("routing_key", routingKey);
         }
         apb.messageBuilder();
     }

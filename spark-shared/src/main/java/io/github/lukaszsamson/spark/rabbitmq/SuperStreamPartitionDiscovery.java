@@ -2,7 +2,6 @@ package io.github.lukaszsamson.spark.rabbitmq;
 
 import com.rabbitmq.stream.Environment;
 import java.util.List;
-import java.util.function.Function;
 
 /**
  * Discovers partition streams for a RabbitMQ superstream.
@@ -40,28 +39,16 @@ final class SuperStreamPartitionDiscovery {
     private static List<String> discoverPartitionsViaEnvironment(Environment environment,
                                                                  String superStream) {
         try {
-            // Prefer explicit partition query API when available in the client version.
-            try {
-                var queryMethod = environment.getClass()
-                        .getMethod("querySuperStreamPartitions", String.class);
-                Object result = queryMethod.invoke(environment, superStream);
-                return copyPartitions(result);
-            } catch (NoSuchMethodException ignored) {
-                // Fall back to StreamEnvironment locator operation below.
-            }
-
-            var locatorOperation = environment.getClass()
-                    .getDeclaredMethod("locatorOperation", Function.class);
-            locatorOperation.setAccessible(true);
-            Function<Object, List<String>> partitionQuery = client -> {
-                try {
-                    var partitionsMethod = client.getClass().getMethod("partitions", String.class);
-                    return copyPartitions(partitionsMethod.invoke(client, superStream));
-                } catch (ReflectiveOperationException e) {
-                    throw new RuntimeException(e);
-                }
-            };
-            return copyPartitions(locatorOperation.invoke(environment, partitionQuery));
+            var queryMethod = environment.getClass()
+                    .getMethod("querySuperStreamPartitions", String.class);
+            Object result = queryMethod.invoke(environment, superStream);
+            return copyPartitions(result);
+        } catch (NoSuchMethodException e) {
+            throw new IllegalStateException(
+                    "Superstream partition discovery requires RabbitMQ stream client support " +
+                            "for Environment.querySuperStreamPartitions(String). " +
+                            "Internal client API fallback is intentionally disabled.",
+                    e);
         } catch (RuntimeException e) {
             throw e;
         } catch (ReflectiveOperationException e) {

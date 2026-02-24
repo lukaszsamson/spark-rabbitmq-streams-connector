@@ -644,7 +644,7 @@ class RabbitMQPartitionReaderTest {
         }
 
         @Test
-        void callbackEnqueueInterruptSurfacesConsumerErrorWithoutInterruptingThread()
+        void callbackEnqueueInterruptSurfacesConsumerErrorAndRestoresInterruptFlag()
                 throws Exception {
             RabbitMQInputPartition partition = new RabbitMQInputPartition(
                     "test-stream", 0, 10, minimalOptions());
@@ -656,7 +656,8 @@ class RabbitMQPartitionReaderTest {
             reader.enqueueFromCallback(new NoopContext(),
                     CODEC.messageBuilder().addData("x".getBytes()).build());
 
-            assertThat(Thread.currentThread().isInterrupted()).isFalse();
+            assertThat(Thread.currentThread().isInterrupted()).isTrue();
+            Thread.interrupted();
             setPrivateField(reader, "consumer", new NoopConsumer());
             setPrivateField(reader, "queue",
                     new java.util.concurrent.LinkedBlockingQueue<RabbitMQPartitionReader.QueuedMessage>());

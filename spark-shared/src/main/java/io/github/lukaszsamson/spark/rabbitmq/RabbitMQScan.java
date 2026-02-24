@@ -310,18 +310,17 @@ final class RabbitMQScan implements Scan {
             if (observed != null) {
                 return Math.max(firstAvailable, observed);
             }
-            throw new IllegalStateException(
-                    "No offset matched from request for timestamp "
-                            + timestamp + " in stream '" + stream + "'");
+            // No messages at/after timestamp: plan an empty range at the tail.
+            long tailExclusive = resolveLatestOffset(env, stream, stats);
+            return Math.max(firstAvailable, tailExclusive);
         } catch (NoOffsetException e) {
-            throw new IllegalStateException(
-                    "No offset matched from request for timestamp "
-                            + timestamp + " in stream '" + stream + "'", e);
+            // No matching records for timestamp; plan from tail (empty range).
+            long tailExclusive = resolveLatestOffset(env, stream, stats);
+            return Math.max(firstAvailable, tailExclusive);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new IllegalStateException(
-                    "No offset matched from request for timestamp "
-                            + timestamp + " in stream '" + stream + "'", e);
+                    "Interrupted resolving timestamp start offset for stream '" + stream + "'", e);
         } catch (IllegalStateException e) {
             throw e;
         } catch (Exception e) {

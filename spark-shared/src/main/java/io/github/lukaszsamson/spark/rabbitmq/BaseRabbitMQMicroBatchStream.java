@@ -626,16 +626,12 @@ class BaseRabbitMQMicroBatchStream
             return startOffset != null ? startOffset : new RabbitMQStreamOffset(Map.of());
         }
 
-        if (startOffset == null) {
-            RabbitMQStreamOffset latest = new RabbitMQStreamOffset(tailOffsets);
-            cachedTailOffset = latest;
-            cachedLatestOffset = latest;
-            cacheLatestOffsetInvocation(startOffset, limit, latest, latest);
-            return latest;
-        }
-
-        RabbitMQStreamOffset start = (RabbitMQStreamOffset) startOffset;
-        Map<String, Long> startMap = start.getStreamOffsets();
+        RabbitMQStreamOffset start = startOffset == null
+                ? null
+                : (RabbitMQStreamOffset) startOffset;
+        Map<String, Long> startMap = start == null
+                ? Map.of()
+                : start.getStreamOffsets();
         Map<String, Long> effectiveStartMap = new LinkedHashMap<>(startMap);
         for (String stream : tailOffsets.keySet()) {
             effectiveStartMap.computeIfAbsent(stream, this::resolveStartingOffset);
@@ -664,7 +660,7 @@ class BaseRabbitMQMicroBatchStream
         }
         if (!hasNewData) {
             LOG.debug("No new data available, returning stable start offsets");
-            if (effectiveStartMap.equals(startMap)) {
+            if (start != null && effectiveStartMap.equals(startMap)) {
                 cachedLatestOffset = start;
                 cacheLatestOffsetInvocation(startOffset, limit, start, cachedTailOffset);
                 return start;
