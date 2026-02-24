@@ -139,36 +139,60 @@ final class EnvironmentPool {
         EnvironmentKey key = EnvironmentKey.from(options);
 
         while (true) {
-            final boolean[] created = {false};
-            PooledEntry entry = pool.computeIfAbsent(key, k -> {
-                created[0] = true;
-                return new PooledEntry(EnvironmentBuilderHelper.buildEnvironment(options));
-            });
+            // Fast path: reuse existing entry if present.
+            PooledEntry existing = pool.get(key);
+            if (existing != null) {
+                Environment acquired = tryAcquireExistingEntry(key, existing);
+                if (acquired != null) {
+                    return acquired;
+                }
+                continue;
+            }
 
-            if (created[0]) {
+            // Create outside map atomic operations to avoid blocking CHM bin locks.
+            Environment createdEnvironment = EnvironmentBuilderHelper.buildEnvironment(options);
+            PooledEntry createdEntry = new PooledEntry(createdEnvironment);
+            PooledEntry raced = pool.putIfAbsent(key, createdEntry);
+            if (raced == null) {
                 LOG.info("Created new pooled environment for key {}", key.endpoints());
-                return entry.environment;
+                return createdEnvironment;
             }
 
-            synchronized (entry) {
-                if (pool.get(key) != entry) {
-                    continue;
-                }
-                int current = entry.refCount.get();
-                if (current < 0) {
-                    pool.remove(key, entry);
-                    continue;
-                }
-                entry.refCount.set(current + 1);
-                ScheduledFuture<?> eviction = entry.evictionTask;
-                if (eviction != null) {
-                    eviction.cancel(false);
-                    entry.evictionTask = null;
-                }
-                LOG.debug("Reusing pooled environment for key {}, refCount={}",
-                        key.endpoints(), current + 1);
-                return entry.environment;
+            closeUnusedEnvironment(key, createdEnvironment);
+            Environment acquired = tryAcquireExistingEntry(key, raced);
+            if (acquired != null) {
+                return acquired;
             }
+        }
+    }
+
+    private Environment tryAcquireExistingEntry(EnvironmentKey key, PooledEntry entry) {
+        synchronized (entry) {
+            if (pool.get(key) != entry) {
+                return null;
+            }
+            int current = entry.refCount.get();
+            if (current < 0) {
+                pool.remove(key, entry);
+                return null;
+            }
+            entry.refCount.set(current + 1);
+            ScheduledFuture<?> eviction = entry.evictionTask;
+            if (eviction != null) {
+                eviction.cancel(false);
+                entry.evictionTask = null;
+            }
+            LOG.debug("Reusing pooled environment for key {}, refCount={}",
+                    key.endpoints(), current + 1);
+            return entry.environment;
+        }
+    }
+
+    private void closeUnusedEnvironment(EnvironmentKey key, Environment environment) {
+        try {
+            environment.close();
+        } catch (Exception e) {
+            LOG.debug("Error closing race-created environment for key {}", key.endpoints(), e);
         }
     }
 
