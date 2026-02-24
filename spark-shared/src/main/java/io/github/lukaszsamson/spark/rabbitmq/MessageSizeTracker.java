@@ -1,6 +1,5 @@
 package io.github.lukaszsamson.spark.rabbitmq;
 
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -21,8 +20,23 @@ final class MessageSizeTracker {
     private MessageSizeTracker() {}
 
     private static final class Totals {
-        private final AtomicLong totalBytes = new AtomicLong();
-        private final AtomicLong totalRecords = new AtomicLong();
+        private long totalBytes;
+        private long totalRecords;
+
+        synchronized void add(long bytes, long records) {
+            totalBytes += bytes;
+            totalRecords += records;
+        }
+
+        synchronized Snapshot drain() {
+            Snapshot snapshot = new Snapshot(totalBytes, totalRecords);
+            totalBytes = 0;
+            totalRecords = 0;
+            return snapshot;
+        }
+    }
+
+    private record Snapshot(long totalBytes, long totalRecords) {
     }
 
     private static String normalizeScope(String scope) {
@@ -42,8 +56,7 @@ final class MessageSizeTracker {
 
     static void record(String scope, long bytes, long records) {
         Totals totals = totalsByScope.computeIfAbsent(normalizeScope(scope), ignored -> new Totals());
-        totals.totalBytes.addAndGet(bytes);
-        totals.totalRecords.addAndGet(records);
+        totals.add(bytes, records);
     }
 
     /**
@@ -62,8 +75,9 @@ final class MessageSizeTracker {
         if (totals == null) {
             return currentEstimate;
         }
-        long bytes = totals.totalBytes.getAndSet(0);
-        long records = totals.totalRecords.getAndSet(0);
+        Snapshot snapshot = totals.drain();
+        long bytes = snapshot.totalBytes();
+        long records = snapshot.totalRecords();
         if (records <= 0) {
             return currentEstimate;
         }
