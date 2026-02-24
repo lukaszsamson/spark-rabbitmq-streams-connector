@@ -5,6 +5,8 @@ import org.apache.spark.sql.connector.metric.CustomSumMetric;
 import org.apache.spark.sql.connector.write.*;
 import org.apache.spark.sql.connector.write.streaming.StreamingDataWriterFactory;
 import org.apache.spark.sql.connector.write.streaming.StreamingWrite;
+import org.apache.spark.SparkConf;
+import org.apache.spark.SparkEnv;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.catalyst.expressions.GenericInternalRow;
 import org.apache.spark.sql.types.DataTypes;
@@ -136,6 +138,23 @@ class RabbitMQWriteTest {
                     .isInstanceOf(IllegalArgumentException.class)
                     .hasMessageContaining("hashFunctionClass");
         }
+
+        @Test
+        void buildPropagatesQueryIdToStreamingDedupProducerName() throws Exception {
+            Map<String, String> optsMap = minimalSinkMap();
+            optsMap.put("producerName", "dedup");
+            ConnectorOptions opts = new ConnectorOptions(optsMap);
+            Write write = new RabbitMQWriteBuilder(opts, minimalSinkSchema(), "query-1").build();
+            RabbitMQDataWriterFactory factory = (RabbitMQDataWriterFactory) getPrivateField(
+                    write, "writerFactory");
+            RabbitMQDataWriter writer = (RabbitMQDataWriter) factory.createWriter(2, 7, 11);
+            CapturingProducerBuilder builder = new CapturingProducerBuilder();
+            seedEnvironmentPool(opts, new BuilderEnvironment(builder));
+
+            writer.write(new GenericInternalRow(new Object[]{"x".getBytes()}));
+
+            assertThat(builder.name).isEqualTo("dedup-qquery-1-p2-e11");
+        }
     }
 
     // ======================================================================
@@ -172,6 +191,27 @@ class RabbitMQWriteTest {
         void toStreamingReturnsStreamingWrite() {
             Write write = buildWrite();
             assertThat(write.toStreaming()).isInstanceOf(RabbitMQStreamingWrite.class);
+        }
+
+        @Test
+        void toStreamingFailsFastWhenSpeculationEnabledWithDeduplication() {
+            SparkEnv previous = SparkEnv.get();
+            SparkEnv sparkEnv = org.mockito.Mockito.mock(SparkEnv.class);
+            SparkConf conf = new SparkConf(false).set("spark.speculation", "true");
+            org.mockito.Mockito.when(sparkEnv.conf()).thenReturn(conf);
+            SparkEnv.set(sparkEnv);
+            try {
+                Map<String, String> optsMap = minimalSinkMap();
+                optsMap.put("producerName", "dedup");
+                ConnectorOptions opts = new ConnectorOptions(optsMap);
+                Write write = new RabbitMQWriteBuilder(opts, minimalSinkSchema(), "q").build();
+
+                assertThatThrownBy(write::toStreaming)
+                        .isInstanceOf(IllegalStateException.class)
+                        .hasMessageContaining("spark.speculation=true");
+            } finally {
+                SparkEnv.set(previous);
+            }
         }
 
         @Test
@@ -626,21 +666,38 @@ class RabbitMQWriteTest {
         }
 
         @Test
-        void deriveStreamingProducerNameUsesEpochAndStartsPublishingIdAtZero() throws Exception {
+        void deriveStreamingProducerNameUsesQueryScopeAndEpochAndStartsPublishingIdAtZero()
+                throws Exception {
             Map<String, String> opts = minimalSinkMap();
             opts.put("producerName", "dedup");
             ConnectorOptions options = new ConnectorOptions(opts);
 
             RabbitMQDataWriter writer = new RabbitMQDataWriter(
-                    options, minimalSinkSchema(), 2, 7, 11);
+                    options, minimalSinkSchema(), 2, 7, 11, "stream-query-1");
             CapturingProducerBuilder builder = new CapturingProducerBuilder();
             seedEnvironmentPool(options, new BuilderEnvironment(builder));
 
             writer.write(new GenericInternalRow(new Object[]{"x".getBytes()}));
 
-            assertThat(builder.name).isEqualTo("dedup-p2-e11");
+            assertThat(builder.name).isEqualTo("dedup-qstream-query-1-p2-e11");
             long nextId = (long) getPrivateField(writer, "nextPublishingId");
             assertThat(nextId).isEqualTo(1L);
+        }
+
+        @Test
+        void deriveStreamingProducerNameSanitizesQueryScope() throws Exception {
+            Map<String, String> opts = minimalSinkMap();
+            opts.put("producerName", "dedup");
+            ConnectorOptions options = new ConnectorOptions(opts);
+
+            RabbitMQDataWriter writer = new RabbitMQDataWriter(
+                    options, minimalSinkSchema(), 2, 7, 11, "query:with/slash");
+            CapturingProducerBuilder builder = new CapturingProducerBuilder();
+            seedEnvironmentPool(options, new BuilderEnvironment(builder));
+
+            writer.write(new GenericInternalRow(new Object[]{"x".getBytes()}));
+
+            assertThat(builder.name).isEqualTo("dedup-qquery_with_slash-p2-e11");
         }
 
         @Test

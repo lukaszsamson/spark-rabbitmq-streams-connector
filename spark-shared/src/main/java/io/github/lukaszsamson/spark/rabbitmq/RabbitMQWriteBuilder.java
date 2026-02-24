@@ -42,7 +42,8 @@ final class RabbitMQWriteBuilder
 
     @Override
     public Write build() {
-        RabbitMQDataWriterFactory factory = new RabbitMQDataWriterFactory(options, inputSchema);
+        RabbitMQDataWriterFactory factory = new RabbitMQDataWriterFactory(
+                options, inputSchema, queryId);
         return new RabbitMQWrite(options, factory);
     }
 }

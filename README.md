@@ -277,7 +277,7 @@ By default, unrecognized columns cause an error. Set `ignoreUnknownColumns=true`
 
 The connector provides at-least-once semantics for both source and sink:
 - **Source**: If a task fails before Spark commits, the same offset range is re-read on retry.
-- **Sink**: Publisher confirms ensure messages are persisted. With deduplication enabled (`producerName` set), streaming retries in the same `(partitionId, epochId)` reuse the same producer identity and publishing sequence.
+- **Sink**: Publisher confirms ensure messages are persisted. With deduplication enabled (`producerName` set), streaming retries in the same `(queryId, partitionId, epochId)` reuse the same producer identity and publishing sequence.
 
 ### Offset sources (priority order)
 
@@ -352,8 +352,9 @@ TLS is configured via JKS keystores/truststores converted to Netty `SslContext` 
 - Only one live producer per `producerName` is allowed.
 - Publishing must be single-threaded per producer name.
 - Deduplication is not guaranteed when sub-entry batching/compression is enabled (`subEntrySize > 1`).
-- Streaming deduplication names are derived as `producerName + "-p" + partitionId + "-e" + epochId` and start publishing IDs at `0` for each epoch-scoped producer identity.
+- Streaming deduplication names are derived as `producerName + "-q" + sanitized(queryId) + "-p" + partitionId + "-e" + epochId` and start publishing IDs at `0` for each epoch-scoped producer identity.
 - Batch deduplication names remain task-scoped (`... + "-t" + taskId`) to avoid attempt collisions.
+- Streaming deduplication is incompatible with `spark.speculation=true`; the connector fails fast when speculation is enabled and `producerName` is set.
 
 ## Extension interfaces
 

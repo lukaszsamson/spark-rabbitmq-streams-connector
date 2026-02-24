@@ -20,19 +20,25 @@ final class RabbitMQDataWriterFactory
 
     private final ConnectorOptions options;
     private final StructType inputSchema;
+    private final String queryId;
 
     RabbitMQDataWriterFactory(ConnectorOptions options, StructType inputSchema) {
+        this(options, inputSchema, null);
+    }
+
+    RabbitMQDataWriterFactory(ConnectorOptions options, StructType inputSchema, String queryId) {
         this.options = options;
         this.inputSchema = inputSchema;
+        this.queryId = queryId;
     }
 
     @Override
     public DataWriter<InternalRow> createWriter(int partitionId, long taskId) {
-        return new RabbitMQDataWriter(options, inputSchema, partitionId, taskId, -1);
+        return new RabbitMQDataWriter(options, inputSchema, partitionId, taskId, -1, queryId);
     }
 
     @Override
     public DataWriter<InternalRow> createWriter(int partitionId, long taskId, long epochId) {
-        return new RabbitMQDataWriter(options, inputSchema, partitionId, taskId, epochId);
+        return new RabbitMQDataWriter(options, inputSchema, partitionId, taskId, epochId, queryId);
     }
 }

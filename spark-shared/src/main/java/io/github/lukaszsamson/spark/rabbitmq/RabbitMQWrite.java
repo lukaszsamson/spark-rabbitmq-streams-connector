@@ -1,5 +1,6 @@
 package io.github.lukaszsamson.spark.rabbitmq;
 
+import org.apache.spark.SparkEnv;
 import org.apache.spark.sql.connector.metric.CustomMetric;
 import org.apache.spark.sql.connector.write.BatchWrite;
 import org.apache.spark.sql.connector.write.Write;
@@ -38,11 +39,30 @@ final class RabbitMQWrite implements Write {
 
     @Override
     public StreamingWrite toStreaming() {
+        validateStreamingDedupSpeculationCompatibility(options);
         return new RabbitMQStreamingWrite(writerFactory);
     }
 
     @Override
     public CustomMetric[] supportedCustomMetrics() {
         return RabbitMQSinkMetrics.SUPPORTED_METRICS;
+    }
+
+    static void validateStreamingDedupSpeculationCompatibility(ConnectorOptions options) {
+        String producerName = options.getProducerName();
+        if (producerName == null || producerName.isBlank()) {
+            return;
+        }
+        SparkEnv sparkEnv = SparkEnv.get();
+        if (sparkEnv == null || sparkEnv.conf() == null) {
+            return;
+        }
+        if (!sparkEnv.conf().getBoolean("spark.speculation", false)) {
+            return;
+        }
+        throw new IllegalStateException(
+                "Streaming deduplication with 'producerName' is incompatible with " +
+                        "'spark.speculation=true'. RabbitMQ Streams allows only one live producer " +
+                        "per producer name. Disable speculation or unset 'producerName'.");
     }
 }

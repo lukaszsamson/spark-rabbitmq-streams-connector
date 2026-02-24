@@ -39,6 +39,7 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
     private final int partitionId;
     private final long taskId;
     private final long epochId;
+    private final String queryId;
 
     private final RowToMessageConverter converter;
 
@@ -67,10 +68,16 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
 
     RabbitMQDataWriter(ConnectorOptions options, StructType inputSchema,
                        int partitionId, long taskId, long epochId) {
+        this(options, inputSchema, partitionId, taskId, epochId, null);
+    }
+
+    RabbitMQDataWriter(ConnectorOptions options, StructType inputSchema,
+                       int partitionId, long taskId, long epochId, String queryId) {
         this.options = options;
         this.partitionId = partitionId;
         this.taskId = taskId;
         this.epochId = epochId;
+        this.queryId = queryId;
         this.converter = new RowToMessageConverter(inputSchema);
     }
 
@@ -299,6 +306,13 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
     // ---- Producer initialization ----
 
     private void initProducer() throws IOException {
+        if (epochId >= 0) {
+            try {
+                RabbitMQWrite.validateStreamingDedupSpeculationCompatibility(options);
+            } catch (IllegalStateException e) {
+                throw new IOException(e.getMessage(), e);
+            }
+        }
         environment = EnvironmentPool.getInstance().acquire(options);
         pooledEnvironment = true;
         String derivedName = null;
@@ -492,7 +506,7 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
     /**
      * Derive the producer name for deduplication.
      *
-     * <p>Uses an epoch-scoped producer identity for streaming retries and a
+     * <p>Uses a query- and epoch-scoped producer identity for streaming retries and a
      * task-scoped identity for batch writes.
      *
      * @return the derived name, or null if dedup is not enabled
@@ -503,11 +517,31 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
             return null;
         }
         if (epochId >= 0) {
+            String queryScope = sanitizeProducerToken(queryId);
+            if (queryScope != null) {
+                return baseName + "-q" + queryScope + "-p" + partitionId + "-e" + epochId;
+            }
             return baseName + "-p" + partitionId + "-e" + epochId;
         }
         // Batch writes may run concurrent task attempts for one partition; include taskId
         // to avoid producer-name collisions (RabbitMQ permits only one live producer/name).
         return baseName + "-p" + partitionId + "-t" + taskId;
+    }
+
+    private static String sanitizeProducerToken(String token) {
+        if (token == null || token.isBlank()) {
+            return null;
+        }
+        StringBuilder sanitized = new StringBuilder(token.length());
+        for (int i = 0; i < token.length(); i++) {
+            char c = token.charAt(i);
+            if (Character.isLetterOrDigit(c) || c == '-' || c == '_') {
+                sanitized.append(c);
+            } else {
+                sanitized.append('_');
+            }
+        }
+        return sanitized.toString();
     }
 
     /**

@@ -252,14 +252,14 @@ Type coercion notes:
 - Uses RabbitMQ Streams `Producer` with publisher confirms enabled.
 - Optional deduplication is enabled via `producerName` and monotonically increasing `publishingId` per writer.
 - When `publishing_id` is present in a sink row, it overrides auto-generated publishing IDs for that row.
-- Derived producer name for streaming writes: `producerName` + `-p` + `partitionId` + `-e` + `epochId`.
+- Derived producer name for streaming writes: `producerName` + `-q` + sanitized `queryId` + `-p` + `partitionId` + `-e` + `epochId`.
 - Streaming dedup publishing IDs start at `0` for each epoch-scoped producer identity.
 - Batch writes keep task-scoped producer names (`... + -t + taskId`) to avoid attempt collisions.
 - Deduplication constraints:
   - Only one live producer per `producerName`.
   - Publishing must be single-threaded per producer name.
   - Deduplication is not guaranteed when sub-entry batching/compression is enabled.
-  - Speculative execution in streaming can still cause producer-name contention for the same `(partitionId, epochId)`.
+  - Streaming deduplication requires `spark.speculation=false`; the connector fails fast otherwise.
 - `retryOnRecovery` remains enabled for at-least-once semantics.
 - Register a `Resource.StateListener` on producers to log RECOVERING/CLOSED transitions.
 
@@ -291,15 +291,15 @@ Type coercion notes:
 
 ## Speculative execution
 - Batch write keeps Spark's default commit coordinator behavior enabled.
-- Streaming deduplication uses epoch-scoped producer names; speculative attempts for the same partition/epoch may contend on the same identity.
+- Streaming deduplication is explicitly incompatible with speculation (`spark.speculation=true`) and fails fast when `producerName` is set.
 
 ## Commit coordinator
 - `StreamingWrite.useCommitCoordinator() = false` (Kafka parity).
 - `BatchWrite.useCommitCoordinator() = true`.
 
 ## Speculative execution with deduplication
-- Streaming uses epoch-scoped producer names (`partitionId + epochId`) to make retries of the same micro-batch re-use the same dedup identity.
-- Speculative execution can still create concurrent-producer contention for the same identity; operators should avoid enabling speculation for strict dedup workflows.
+- Streaming uses query-scoped + epoch-scoped producer names (`queryId + partitionId + epochId`) so independent queries cannot collide on producer identity.
+- Because RabbitMQ allows only one live producer per name, streaming dedup requires `spark.speculation=false`; the connector fails fast when speculation is enabled.
 
 ## Superstreams support
 ### Topology discovery
@@ -563,7 +563,7 @@ Acceptance criteria:
 Deliverables:
 - `WriteBuilder -> Write -> BatchWrite/StreamingWrite`
 - `DataWriter` confirm tracking, retry/error handling
-- Dedup producer naming strategy with speculation-safe suffixes
+- Dedup producer naming strategy scoped by query/partition/epoch
 - Superstream routing (`hash/key/custom`) + routing-key validation
 
 Acceptance criteria:
