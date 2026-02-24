@@ -359,6 +359,24 @@ class RabbitMQMicroBatchStreamTest {
         }
 
         @Test
+        void initialOffsetDerivedConsumerNameUnknownLookupFailureFailsFast() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("startingOffsets", "offset");
+            opts.put("startingOffset", "7");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            Environment env = new ThrowingConsumerBuilderEnvironment(
+                    new RuntimeException("dns resolution failed"));
+            setPrivateField(stream, "environment", env);
+
+            assertThatThrownBy(stream::initialOffset)
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("Failed to look up stored offset");
+        }
+
+        @Test
         void initialOffsetMergesPartialStoredOffsetsWithFallback() throws Exception {
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
@@ -2403,7 +2421,7 @@ class RabbitMQMicroBatchStreamTest {
 
         @Override
         public long storedOffset() {
-            throw new UnsupportedOperationException();
+            throw new NoOffsetException("no offset");
         }
     }
 

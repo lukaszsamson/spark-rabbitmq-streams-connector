@@ -159,6 +159,19 @@ class StoredOffsetLookupTest {
             Exception nonFatal = new RuntimeException("stream does not exist");
             invokeIsFatal(nonFatal);
         }
+
+        @Test
+        void trackingConsumerLimitMessageIsNotFatal() {
+            Exception nonFatal = new RuntimeException(
+                    "max tracking consumers by connection reached");
+            invokeIsFatal(nonFatal);
+        }
+
+        @Test
+        void unknownErrorsAreFatalByDefault() {
+            Exception fatal = new RuntimeException("dns resolution failed");
+            assertThatThrownBy(() -> invokeIsFatal(fatal)).isInstanceOf(IllegalStateException.class);
+        }
     }
 
     @Nested

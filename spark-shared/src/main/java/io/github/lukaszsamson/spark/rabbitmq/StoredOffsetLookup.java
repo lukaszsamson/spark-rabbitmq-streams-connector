@@ -212,39 +212,54 @@ final class StoredOffsetLookup {
      * Determine if an exception represents a fatal error that should not be
      * retried or fallen back from.
      *
-     * <p>Fatal errors include authentication failures, connection failures,
-     * but exclude stream-deleted/missing conditions, which are handled by
-     * failOnDataLoss in the normal planning/read path.
+     * <p>Stored offset lookup should fail fast for all errors except a small
+     * set of known non-fatal conditions (missing stream / tracking-consumer
+     * capacity limits). Unknown failures are treated as fatal to avoid silent
+     * fallback to startingOffsets.
      */
     private static boolean isFatalError(Exception e) {
-        String msg = e.getMessage();
-        if (msg == null) {
-            msg = "";
-        }
-        String lowerMsg = msg.toLowerCase(java.util.Locale.ROOT);
+        return !isKnownNonFatalError(e);
+    }
 
-        // Authentication/authorization failures
-        if (lowerMsg.contains("authentication") || lowerMsg.contains("access refused")
-                || lowerMsg.contains("unauthorized") || lowerMsg.contains("sasl")) {
-            return true;
-        }
-
-        // Connection failures
-        if (lowerMsg.contains("connection refused") || lowerMsg.contains("connection closed")
-                || lowerMsg.contains("cannot connect")) {
-            return true;
-        }
-
-        // Check cause chain for known fatal exception types
-        Throwable cause = e;
-        while (cause != null) {
-            if (cause instanceof com.rabbitmq.stream.AuthenticationFailureException) {
+    private static boolean isKnownNonFatalError(Throwable error) {
+        Throwable current = error;
+        while (current != null) {
+            if (current instanceof com.rabbitmq.stream.StreamDoesNotExistException
+                    || current instanceof com.rabbitmq.stream.StreamNotAvailableException) {
                 return true;
             }
-            cause = cause.getCause();
+            String msg = current.getMessage();
+            if (msg != null && isTrackingConsumerLimitMessage(msg)) {
+                return true;
+            }
+            if (msg != null) {
+                String lowerMsg = msg.toLowerCase(java.util.Locale.ROOT);
+                if (lowerMsg.contains("stream does not exist")
+                        || lowerMsg.contains("stream not available")) {
+                    return true;
+                }
+            }
+            current = current.getCause();
         }
-
         return false;
+    }
+
+    private static boolean isTrackingConsumerLimitMessage(String message) {
+        String lowerMsg = message.toLowerCase(java.util.Locale.ROOT);
+        if (lowerMsg.contains("max tracking consumers")
+                || lowerMsg.contains("tracking consumer limit")
+                || lowerMsg.contains("maxtrackingconsumersbyconnection")) {
+            return true;
+        }
+        boolean mentionsTrackingConsumer = lowerMsg.contains("tracking consumer")
+                || lowerMsg.contains("tracking consumers")
+                || lowerMsg.contains("tracking-consumer");
+        boolean mentionsCapacity = lowerMsg.contains("limit")
+                || lowerMsg.contains("max")
+                || lowerMsg.contains("reached")
+                || lowerMsg.contains("too many")
+                || lowerMsg.contains("precondition_failed");
+        return mentionsTrackingConsumer && mentionsCapacity;
     }
 
     /**
