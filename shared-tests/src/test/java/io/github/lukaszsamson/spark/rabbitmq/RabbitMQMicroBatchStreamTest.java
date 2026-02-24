@@ -742,6 +742,20 @@ class RabbitMQMicroBatchStreamTest {
         }
 
         @Test
+        @Tag("spark4x")
+        void firstReadMinRowsEvaluationStartsDelayWindowAtInvocationTime() throws Exception {
+            RabbitMQMicroBatchStream stream = createStream(minimalOptions());
+            setPrivateField(stream, "availableNowSnapshot", Map.of("s1", 10L));
+
+            RabbitMQStreamOffset start = new RabbitMQStreamOffset(Map.of("s1", 9L));
+            Thread.sleep(120L);
+
+            RabbitMQStreamOffset latest = (RabbitMQStreamOffset) stream.latestOffset(
+                    start, ReadLimit.minRows(5, 50L));
+            assertThat(latest).isEqualTo(start);
+        }
+
+        @Test
         void latestOffsetUsesConfiguredStartForStreamsMissingFromCheckpoint() throws Exception {
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");

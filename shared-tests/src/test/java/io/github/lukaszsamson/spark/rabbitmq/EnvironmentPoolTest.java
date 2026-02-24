@@ -532,6 +532,21 @@ class EnvironmentPoolTest {
         }
 
         @Test
+        void closeAllShutsDownEvictionScheduler() throws Exception {
+            EnvironmentPool pool = EnvironmentPool.getInstance();
+            ConnectorOptions options = opts("localhost:5552", "test-stream");
+            EnvironmentPool.EnvironmentKey key = EnvironmentPool.EnvironmentKey.from(options);
+            Object entry = newEntry(new CountingEnvironment());
+            putEntry(key, entry);
+
+            pool.release(options);
+            assertThat(pool.isEvictionSchedulerShutdown()).isFalse();
+
+            pool.closeAll();
+            assertThat(pool.isEvictionSchedulerShutdown()).isTrue();
+        }
+
+        @Test
         void keyDoesNotNormalizeEquivalentEndpoints() {
             Map<String, String> map1 = minimalMap("localhost:5552", "test-stream");
             Map<String, String> map2 = minimalMap(" localhost:5552 ", "test-stream");

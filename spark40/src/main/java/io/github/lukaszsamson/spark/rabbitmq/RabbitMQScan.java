@@ -23,6 +23,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -35,12 +36,27 @@ import java.util.concurrent.atomic.AtomicInteger;
 final class RabbitMQScan implements Scan {
 
     private static final Logger LOG = LoggerFactory.getLogger(RabbitMQScan.class);
+    private static final long TAIL_PROBE_TIMEOUT_MS = 1_500L;
     private static final long MIN_TIMESTAMP_PROBE_TIMEOUT_MS = 250L;
+    private static final int TAIL_PROBE_EXECUTOR_PARALLELISM = Math.max(
+            1,
+            Math.min(Runtime.getRuntime().availableProcessors(),
+                    StoredOffsetLookup.MAX_CONCURRENT_LOOKUPS));
     private static final int RANGE_RESOLVER_EXECUTOR_PARALLELISM = Math.max(
             1,
             Math.min(Runtime.getRuntime().availableProcessors(),
                     StoredOffsetLookup.MAX_CONCURRENT_LOOKUPS));
+    private static final AtomicInteger TAIL_PROBE_THREAD_COUNTER = new AtomicInteger(0);
     private static final AtomicInteger RANGE_RESOLVER_THREAD_COUNTER = new AtomicInteger(0);
+    // Shared pool to avoid per-stream short-lived executor churn during tail probing.
+    private static final ExecutorService TAIL_PROBE_TIMEOUT_EXECUTOR =
+            Executors.newFixedThreadPool(TAIL_PROBE_EXECUTOR_PARALLELISM, r -> {
+                Thread t = new Thread(
+                        r,
+                        "rabbitmq-scan-tail-probe-" + TAIL_PROBE_THREAD_COUNTER.incrementAndGet());
+                t.setDaemon(true);
+                return t;
+            });
     private static final ExecutorService RANGE_RESOLVER_EXECUTOR =
             Executors.newFixedThreadPool(RANGE_RESOLVER_EXECUTOR_PARALLELISM, r -> {
                 Thread t = new Thread(
@@ -413,8 +429,29 @@ final class RabbitMQScan implements Scan {
         // endingOffsets=latest: combine stats-derived tail with a direct last-message probe
         // to avoid underestimating on older broker/client combinations.
         long statsTail = resolveTailOffset(stats);
-        long probedTail = probeTailOffsetFromLastMessage(env, stream);
+        long probedTail = probeTailOffsetFromLastMessageWithTimeout(
+                env, stream, TAIL_PROBE_TIMEOUT_MS);
         return Math.max(statsTail, probedTail);
+    }
+
+    private long probeTailOffsetFromLastMessageWithTimeout(
+            Environment env, String stream, long timeoutMs) {
+        Future<Long> future = TAIL_PROBE_TIMEOUT_EXECUTOR.submit(
+                () -> probeTailOffsetFromLastMessage(env, stream));
+        try {
+            return future.get(timeoutMs, TimeUnit.MILLISECONDS);
+        } catch (TimeoutException e) {
+            future.cancel(true);
+            LOG.debug("Tail probe timed out after {} ms for stream '{}'", timeoutMs, stream);
+            return 0;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            future.cancel(true);
+            return 0;
+        } catch (ExecutionException e) {
+            LOG.debug("Tail probe failed for stream '{}': {}", stream, e.getMessage());
+            return 0;
+        }
     }
 
     long[] resolveStreamOffsetRangeForTests(Environment env, String stream) {

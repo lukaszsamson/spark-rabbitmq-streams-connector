@@ -12,6 +12,7 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Method;
+import java.time.Duration;
 import java.util.List;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -21,6 +22,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 
 /**
  * Unit tests for {@link RabbitMQScan} planning logic and offset resolution
@@ -206,6 +208,20 @@ class RabbitMQScanTest {
                     new DelayedProbeEnvironment(0L, new Stats(0L, false, false, 99L), 17L),
                     "s1", stats);
             assertThat(end).isEqualTo(17L);
+        }
+
+        @Test
+        void latestEndPlanningBoundsTailProbeWhenConsumerBuilderBlocks() throws Exception {
+            Map<String, String> opts = baseOptions();
+            opts.put("endingOffsets", "latest");
+            RabbitMQScan scan = new RabbitMQScan(new ConnectorOptions(opts), schema());
+            StreamStats stats = new Stats(0L, false, false, 123L);
+
+            long end = assertTimeoutPreemptively(Duration.ofSeconds(3), () ->
+                    resolveEndOffset(scan,
+                            new BlockingConsumerBuilderEnvironment(5_000L, stats),
+                            "s1", stats));
+            assertThat(end).isEqualTo(124L);
         }
 
         @Test
@@ -502,6 +518,72 @@ class RabbitMQScanTest {
             if (stats == null) {
                 throw new UnsupportedOperationException();
             }
+            return stats;
+        }
+
+        @Override
+        public StreamCreator streamCreator() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void deleteStream(String stream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void deleteSuperStream(String superStream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void storeOffset(String reference, String stream, long offset) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public boolean streamExists(String stream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public ProducerBuilder producerBuilder() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void close() {
+        }
+    }
+
+    private static final class BlockingConsumerBuilderEnvironment implements Environment {
+        private final long blockMs;
+        private final StreamStats stats;
+
+        private BlockingConsumerBuilderEnvironment(long blockMs, StreamStats stats) {
+            this.blockMs = blockMs;
+            this.stats = stats;
+        }
+
+        @Override
+        public ConsumerBuilder consumerBuilder() {
+            long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(blockMs);
+            while (System.nanoTime() < deadlineNanos) {
+                long remainingMs = TimeUnit.NANOSECONDS.toMillis(deadlineNanos - System.nanoTime());
+                if (remainingMs <= 0L) {
+                    break;
+                }
+                try {
+                    Thread.sleep(Math.min(remainingMs, 50L));
+                } catch (InterruptedException ignored) {
+                    // Intentionally ignore interrupts to emulate an unresponsive client call.
+                }
+            }
+            return new ProbeTailConsumerBuilder();
+        }
+
+        @Override
+        public StreamStats queryStreamStats(String stream) {
             return stats;
         }
 

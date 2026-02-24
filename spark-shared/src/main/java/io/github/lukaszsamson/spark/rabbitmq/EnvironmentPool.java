@@ -289,6 +289,7 @@ final class EnvironmentPool {
             }
         });
         pool.clear();
+        shutdownEvictionScheduler();
     }
 
     // Visible for tests

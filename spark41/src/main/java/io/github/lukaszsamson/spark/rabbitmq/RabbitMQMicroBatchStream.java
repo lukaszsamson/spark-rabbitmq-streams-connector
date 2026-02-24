@@ -19,8 +19,12 @@ import java.util.*;
 final class RabbitMQMicroBatchStream extends BaseRabbitMQMicroBatchStream
         implements SupportsRealTimeMode {
 
+    private static final long REAL_TIME_TAIL_REFRESH_INTERVAL_MS = 1_000L;
+
     /** Whether real-time mode has been activated via {@link #prepareForRealTimeMode()}. */
     private volatile boolean realTimeMode = false;
+    private final Object realTimeTailRefreshLock = new Object();
+    private volatile long lastRealTimeTailRefreshMillis = 0L;
 
     RabbitMQMicroBatchStream(ConnectorOptions options, StructType schema,
                               String checkpointLocation) {
@@ -85,12 +89,40 @@ final class RabbitMQMicroBatchStream extends BaseRabbitMQMicroBatchStream
         }
         RabbitMQStreamOffset result = new RabbitMQStreamOffset(merged);
         cachedLatestOffset = result;
+        if (realTimeMode) {
+            refreshTailOffsetsForRealTimeMetricsIfDue();
+        }
         return result;
     }
 
     @Override
     boolean shouldPersistCachedLatestOffsetOnStop() {
         return realTimeMode || super.shouldPersistCachedLatestOffsetOnStop();
+    }
+
+    private void refreshTailOffsetsForRealTimeMetricsIfDue() {
+        long now = System.currentTimeMillis();
+        if (now - lastRealTimeTailRefreshMillis < REAL_TIME_TAIL_REFRESH_INTERVAL_MS) {
+            return;
+        }
+        synchronized (realTimeTailRefreshLock) {
+            now = System.currentTimeMillis();
+            if (now - lastRealTimeTailRefreshMillis < REAL_TIME_TAIL_REFRESH_INTERVAL_MS) {
+                return;
+            }
+            try {
+                Map<String, Long> tailOffsets = queryTailOffsetsForReporting();
+                if (!tailOffsets.isEmpty()) {
+                    cachedTailOffset = new RabbitMQStreamOffset(tailOffsets);
+                }
+            } catch (RuntimeException e) {
+                // Lag metrics refresh should not fail real-time query execution.
+                LOG.debug("Unable to refresh real-time tail offsets for lag metrics: {}",
+                        e.toString());
+            } finally {
+                lastRealTimeTailRefreshMillis = now;
+            }
+        }
     }
 
     // ---- Spark 4.1 direct API overrides ----

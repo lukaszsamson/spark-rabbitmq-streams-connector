@@ -106,8 +106,12 @@ class BaseRabbitMQMicroBatchStream
     volatile Map<String, Long> lastStoredEndOffsets;
     /** Last end offsets committed by Spark (next offsets). */
     volatile Map<String, Long> lastCommittedEndOffsets;
-    /** Timestamp (epoch millis) of the last trigger that produced a non-empty batch. */
-    volatile long lastTriggerMillis = System.currentTimeMillis();
+    /**
+     * Timestamp (epoch millis) of the last trigger decision for ReadMinRows.
+     * Initialized lazily on first ReadMinRows evaluation to avoid counting query
+     * planning time against maxTriggerDelay.
+     */
+    volatile long lastTriggerMillis = -1L;
     /** Recent per-stream tail probe results used by latestOffset planning. */
     final ConcurrentHashMap<String, CachedTailProbe> latestTailProbeCache = new ConcurrentHashMap<>();
     /** Last driver-side accumulator totals already applied to the running estimate. */
@@ -939,6 +943,10 @@ class BaseRabbitMQMicroBatchStream
         boolean processBatch;
         boolean dueToDelayExpiry;
         synchronized (mutableStateLock) {
+            if (lastTriggerMillis < 0L) {
+                // First ReadMinRows evaluation starts the delay window.
+                lastTriggerMillis = nowMillis;
+            }
             if (totalAvailable >= minRows) {
                 lastTriggerMillis = nowMillis;
                 processBatch = true;
@@ -969,6 +977,14 @@ class BaseRabbitMQMicroBatchStream
         LOG.debug("Delaying batch: {} records available < minOffsetsPerTrigger={}, " +
                 "delay not expired", totalAvailable, minRows);
         return startOffsets;
+    }
+
+    /**
+     * Query tail offsets for reporting/metrics paths.
+     * Subclasses can use this to refresh lag metrics when Spark does not call latestOffset().
+     */
+    final Map<String, Long> queryTailOffsetsForReporting() {
+        return queryTailOffsets();
     }
 
     // Spark 3.5 compat: ReadLimit.maxBytes() does not exist in 3.5. Not called on 4.x paths.
