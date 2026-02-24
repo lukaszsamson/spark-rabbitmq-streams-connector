@@ -274,15 +274,18 @@ final class EnvironmentPool {
      */
     void closeAll() {
         pool.forEach((key, entry) -> {
-            entry.refCount.set(0);
-            ScheduledFuture<?> eviction = entry.evictionTask;
-            if (eviction != null) {
-                eviction.cancel(false);
-            }
-            try {
-                entry.environment.close();
-            } catch (Exception e) {
-                LOG.debug("Error closing environment during pool shutdown", e);
+            synchronized (entry) {
+                entry.refCount.set(0);
+                ScheduledFuture<?> eviction = entry.evictionTask;
+                if (eviction != null) {
+                    eviction.cancel(false);
+                    entry.evictionTask = null;
+                }
+                try {
+                    entry.environment.close();
+                } catch (Exception e) {
+                    LOG.debug("Error closing environment during pool shutdown", e);
+                }
             }
         });
         pool.clear();

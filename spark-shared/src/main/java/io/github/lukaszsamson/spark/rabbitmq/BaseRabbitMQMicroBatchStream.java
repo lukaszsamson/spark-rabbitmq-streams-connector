@@ -64,6 +64,7 @@ class BaseRabbitMQMicroBatchStream
     static final long TAIL_PROBE_DRAIN_WAIT_MS = 40L;
     static final long TAIL_PROBE_IDLE_GRACE_MS = 200L;
     static final long TAIL_PROBE_MAX_EXTRA_WAIT_MS = 750L;
+    static final long TAIL_PROBE_MAX_TOTAL_WAIT_MS = 600L;
     static final long MIN_TIMESTAMP_START_PROBE_TIMEOUT_MS = 250L;
     private static final String DERIVED_CONSUMER_NAME_PREFIX = "spark-rmq-";
     private static final int DERIVED_CONSUMER_NAME_HASH_HEX_LENGTH = 16;
@@ -74,6 +75,7 @@ class BaseRabbitMQMicroBatchStream
     final String effectiveConsumerName;
     final String messageSizeTrackerScope;
     final ExecutorService brokerCommitExecutor;
+    final ExecutorService tailQueryExecutor;
     final LongAccumulator messageSizeBytesAccumulator;
     final LongAccumulator messageSizeRecordsAccumulator;
 
@@ -132,6 +134,8 @@ class BaseRabbitMQMicroBatchStream
                 checkpointLocation, this.effectiveConsumerName);
         this.brokerCommitExecutor = Executors.newFixedThreadPool(
                 resolveBrokerExecutorParallelism(options));
+        this.tailQueryExecutor = Executors.newFixedThreadPool(
+                resolveTailQueryExecutorParallelism(options));
         LongAccumulator[] accumulators = createMessageSizeAccumulators(this.messageSizeTrackerScope);
         this.messageSizeBytesAccumulator = accumulators[0];
         this.messageSizeRecordsAccumulator = accumulators[1];
@@ -143,6 +147,15 @@ class BaseRabbitMQMicroBatchStream
     }
 
     static int resolveBrokerExecutorParallelism(ConnectorOptions options) {
+        if (options.isStreamMode()) {
+            return 1;
+        }
+        return Math.max(1, Math.min(
+                Runtime.getRuntime().availableProcessors(),
+                StoredOffsetLookup.MAX_CONCURRENT_LOOKUPS));
+    }
+
+    static int resolveTailQueryExecutorParallelism(ConnectorOptions options) {
         if (options.isStreamMode()) {
             return 1;
         }
@@ -284,6 +297,7 @@ class BaseRabbitMQMicroBatchStream
         }
 
         brokerCommitExecutor.shutdownNow();
+        tailQueryExecutor.shutdownNow();
         latestTailProbeCache.clear();
         MessageSizeTracker.clear(messageSizeTrackerScope);
         if (environment != null) {
@@ -1116,7 +1130,7 @@ class BaseRabbitMQMicroBatchStream
         Map<String, CompletableFuture<Long>> futures = new LinkedHashMap<>();
         for (String stream : streams) {
             futures.put(stream, CompletableFuture.supplyAsync(
-                    () -> tailResolver.applyAsLong(stream), brokerCommitExecutor));
+                    () -> tailResolver.applyAsLong(stream), tailQueryExecutor));
         }
 
         try {
@@ -1227,9 +1241,14 @@ class BaseRabbitMQMicroBatchStream
             }
 
             long maxSeen = Math.max(first, maxObservedOffset.get());
-            long extraWaitMs = Math.min(
+            long requestedExtraWaitMs = Math.min(
                     TAIL_PROBE_MAX_EXTRA_WAIT_MS,
                     Math.max(TAIL_PROBE_DRAIN_WAIT_MS, firstWaitMs * 3));
+            long maxAllowedExtraWaitMs = Math.max(0L, TAIL_PROBE_MAX_TOTAL_WAIT_MS - firstWaitMs);
+            long extraWaitMs = Math.min(requestedExtraWaitMs, maxAllowedExtraWaitMs);
+            if (extraWaitMs <= 0L) {
+                return maxSeen;
+            }
             long idleGraceMs = Math.min(
                     extraWaitMs,
                     Math.max(TAIL_PROBE_DRAIN_WAIT_MS, TAIL_PROBE_IDLE_GRACE_MS));
@@ -1313,7 +1332,7 @@ class BaseRabbitMQMicroBatchStream
                     .messageHandler((context, message) -> observedOffsets.offer(context.offset()))
                     .flow()
                     .initialCredits(1)
-                    .strategy(ConsumerFlowStrategy.creditWhenHalfMessagesProcessed(1))
+                    .strategy(ConsumerFlowStrategy.creditOnChunkArrival(1))
                     .builder()
                     .build();
 

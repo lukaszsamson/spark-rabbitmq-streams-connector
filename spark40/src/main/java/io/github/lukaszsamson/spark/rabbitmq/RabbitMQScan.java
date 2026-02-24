@@ -23,6 +23,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Logical representation of a RabbitMQ stream scan.
@@ -35,6 +36,20 @@ final class RabbitMQScan implements Scan {
 
     private static final Logger LOG = LoggerFactory.getLogger(RabbitMQScan.class);
     private static final long MIN_TIMESTAMP_PROBE_TIMEOUT_MS = 250L;
+    private static final int RANGE_RESOLVER_EXECUTOR_PARALLELISM = Math.max(
+            1,
+            Math.min(Runtime.getRuntime().availableProcessors(),
+                    StoredOffsetLookup.MAX_CONCURRENT_LOOKUPS));
+    private static final AtomicInteger RANGE_RESOLVER_THREAD_COUNTER = new AtomicInteger(0);
+    private static final ExecutorService RANGE_RESOLVER_EXECUTOR =
+            Executors.newFixedThreadPool(RANGE_RESOLVER_EXECUTOR_PARALLELISM, r -> {
+                Thread t = new Thread(
+                        r,
+                        "rabbitmq-scan-range-resolver-"
+                                + RANGE_RESOLVER_THREAD_COUNTER.incrementAndGet());
+                t.setDaemon(true);
+                return t;
+            });
 
     private final ConnectorOptions options;
     private final StructType schema;
@@ -127,12 +142,16 @@ final class RabbitMQScan implements Scan {
      *         streams with zero messages are excluded
      */
     private Map<String, long[]> resolveOffsetRanges(List<String> streams) {
-        try (Environment env = EnvironmentBuilderHelper.buildEnvironment(options)) {
+        EnvironmentPool pool = EnvironmentPool.getInstance();
+        Environment env = pool.acquire(options);
+        try {
             Map<String, long[]> ranges = resolveOffsetRanges(env, streams);
             if (ranges.isEmpty()) {
                 LOG.info("All streams are empty; batch will produce zero rows");
             }
             return ranges;
+        } finally {
+            pool.release(options);
         }
     }
 
@@ -149,26 +168,17 @@ final class RabbitMQScan implements Scan {
             return ranges;
         }
 
-        ExecutorService executor = Executors.newFixedThreadPool(parallelism, r -> {
-            Thread t = new Thread(r, "rabbitmq-scan-range-resolver");
-            t.setDaemon(true);
-            return t;
-        });
-        try {
-            Map<String, Future<long[]>> futures = new LinkedHashMap<>();
-            for (String stream : streams) {
-                futures.put(stream, executor.submit(() -> resolveStreamOffsetRange(env, stream)));
-            }
-            for (Map.Entry<String, Future<long[]>> entry : futures.entrySet()) {
-                long[] range = awaitResolvedRange(entry.getKey(), entry.getValue());
-                if (range != null) {
-                    ranges.put(entry.getKey(), range);
-                }
-            }
-            return ranges;
-        } finally {
-            executor.shutdownNow();
+        Map<String, Future<long[]>> futures = new LinkedHashMap<>();
+        for (String stream : streams) {
+            futures.put(stream, RANGE_RESOLVER_EXECUTOR.submit(() -> resolveStreamOffsetRange(env, stream)));
         }
+        for (Map.Entry<String, Future<long[]>> entry : futures.entrySet()) {
+            long[] range = awaitResolvedRange(entry.getKey(), entry.getValue());
+            if (range != null) {
+                ranges.put(entry.getKey(), range);
+            }
+        }
+        return ranges;
     }
 
     private long[] awaitResolvedRange(String stream, Future<long[]> future) {
@@ -297,7 +307,7 @@ final class RabbitMQScan implements Scan {
                     .messageHandler((context, message) -> observedOffsets.offer(context.offset()))
                     .flow()
                     .initialCredits(1)
-                    .strategy(ConsumerFlowStrategy.creditWhenHalfMessagesProcessed(1))
+                    .strategy(ConsumerFlowStrategy.creditOnChunkArrival(1))
                     .builder()
                     .build();
 
@@ -366,7 +376,7 @@ final class RabbitMQScan implements Scan {
                     .messageHandler((context, message) -> observedOffsets.offer(context.offset()))
                     .flow()
                     .initialCredits(1)
-                    .strategy(ConsumerFlowStrategy.creditWhenHalfMessagesProcessed(1))
+                    .strategy(ConsumerFlowStrategy.creditOnChunkArrival(1))
                     .builder()
                     .build();
 
@@ -438,7 +448,7 @@ final class RabbitMQScan implements Scan {
                     .messageHandler((context, message) -> observedOffsets.offer(context.offset()))
                     .flow()
                     .initialCredits(1)
-                    .strategy(ConsumerFlowStrategy.creditWhenHalfMessagesProcessed(1))
+                    .strategy(ConsumerFlowStrategy.creditOnChunkArrival(1))
                     .builder()
                     .build();
 

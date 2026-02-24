@@ -1613,6 +1613,21 @@ class RabbitMQMicroBatchStreamTest {
                 stream.stop();
             }
         }
+
+        @Test
+        void tailQueryExecutorIsSeparateFromBrokerCommitExecutor() throws Exception {
+            RabbitMQMicroBatchStream stream = createStream(minimalOptions());
+            try {
+                Object commitExecutor = getPrivateField(stream, "brokerCommitExecutor");
+                Object tailExecutor = getPrivateField(stream, "tailQueryExecutor");
+                assertThat(commitExecutor).isInstanceOf(ThreadPoolExecutor.class);
+                assertThat(tailExecutor).isInstanceOf(ThreadPoolExecutor.class);
+                assertThat(tailExecutor).isNotSameAs(commitExecutor);
+                assertThat(((ThreadPoolExecutor) tailExecutor).getCorePoolSize()).isEqualTo(1);
+            } finally {
+                stream.stop();
+            }
+        }
     }
 
     @Nested
