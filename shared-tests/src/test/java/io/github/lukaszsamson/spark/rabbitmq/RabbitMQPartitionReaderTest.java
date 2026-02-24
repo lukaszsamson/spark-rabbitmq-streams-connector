@@ -1283,6 +1283,34 @@ class RabbitMQPartitionReaderTest {
         }
 
         @Test
+        void resolveSacActivationOffsetUsesLastObservedOffsetWhenReaderMadeProgress() throws Exception {
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 0, 100, minimalOptions());
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
+
+            setPrivateField(reader, "lastEmittedOffset", -1L);
+            setPrivateField(reader, "lastObservedOffset", 15L);
+
+            OffsetSpecification resolved = resolveSingleActiveConsumerActivationOffset(
+                    reader, OffsetSpecification.offset(0));
+            assertThat(resolved).isEqualTo(OffsetSpecification.offset(16));
+        }
+
+        @Test
+        void resolveSacActivationOffsetFallsBackToConfiguredOffsetWithoutProgress() throws Exception {
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 0, 100, minimalOptions());
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
+
+            setPrivateField(reader, "lastEmittedOffset", -1L);
+            setPrivateField(reader, "lastObservedOffset", -1L);
+
+            OffsetSpecification configured = OffsetSpecification.offset(7);
+            OffsetSpecification resolved = resolveSingleActiveConsumerActivationOffset(reader, configured);
+            assertThat(resolved).isEqualTo(configured);
+        }
+
+        @Test
         void resolveSingleActiveConsumerNameUsesBaseNameForSingleStream() throws Exception {
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
@@ -1485,6 +1513,15 @@ class RabbitMQPartitionReaderTest {
                 "resolveSubscriptionOffsetSpec", OffsetSpecification.class, OffsetSpecification.class);
         method.setAccessible(true);
         return (OffsetSpecification) method.invoke(reader, subscriptionOffsetSpec, configuredOffsetSpec);
+    }
+
+    private static OffsetSpecification resolveSingleActiveConsumerActivationOffset(
+            RabbitMQPartitionReader reader,
+            OffsetSpecification configuredOffsetSpec) throws Exception {
+        Method method = findMethod(RabbitMQPartitionReader.class,
+                "resolveSingleActiveConsumerActivationOffset", OffsetSpecification.class);
+        method.setAccessible(true);
+        return (OffsetSpecification) method.invoke(reader, configuredOffsetSpec);
     }
 
     private static boolean isPlannedRangeNoLongerReachableDueToDataLoss(

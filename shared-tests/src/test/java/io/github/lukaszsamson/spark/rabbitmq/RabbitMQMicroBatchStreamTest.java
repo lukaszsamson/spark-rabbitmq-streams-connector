@@ -409,6 +409,27 @@ class RabbitMQMicroBatchStreamTest {
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessageContaining("has no partition streams");
         }
+
+        @Test
+        void discoverStreamsDropsRemovedPartitionsWhenFailOnDataLossFalse() {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("superstream", "super");
+            opts.put("failOnDataLoss", "false");
+            ConnectorOptions options = new ConnectorOptions(opts);
+            var schema = RabbitMQStreamTable.buildSourceSchema(options.getMetadataFields());
+
+            BaseRabbitMQMicroBatchStream stream = new SequencedDiscoveryMicroBatchStream(
+                    options,
+                    schema,
+                    "/tmp/checkpoint",
+                    java.util.List.of(
+                            java.util.List.of("s1", "s2"),
+                            java.util.List.of("s1")));
+
+            assertThat(stream.discoverStreams()).containsExactly("s1", "s2");
+            assertThat(stream.discoverStreams()).containsExactly("s1");
+        }
     }
 
     // ======================================================================
@@ -1234,6 +1255,27 @@ class RabbitMQMicroBatchStreamTest {
     class SplitPlanning {
 
         @Test
+        void splitPlanningWithSingleActiveConsumerThrows() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("singleActiveConsumer", "true");
+            opts.put("consumerName", "sac-reader");
+            opts.put("minPartitions", "2");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            setPrivateField(stream, "environment", new FirstOffsetEnvironment(0L));
+
+            RabbitMQStreamOffset start = new RabbitMQStreamOffset(Map.of("test-stream", 0L));
+            RabbitMQStreamOffset end = new RabbitMQStreamOffset(Map.of("test-stream", 100L));
+
+            assertThatThrownBy(() -> stream.planInputPartitions(start, end))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("singleActiveConsumer")
+                    .hasMessageContaining("split");
+        }
+
+        @Test
         void minPartitionsSplitAllocationExactness() {
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
@@ -1897,6 +1939,30 @@ class RabbitMQMicroBatchStreamTest {
         @Override
         synchronized java.util.List<String> discoverStreams() {
             return forcedStreams;
+        }
+    }
+
+    private static final class SequencedDiscoveryMicroBatchStream extends BaseRabbitMQMicroBatchStream {
+        private final java.util.List<java.util.List<String>> discoveries;
+        private int index = 0;
+
+        private SequencedDiscoveryMicroBatchStream(
+                ConnectorOptions options,
+                org.apache.spark.sql.types.StructType schema,
+                String checkpointLocation,
+                java.util.List<java.util.List<String>> discoveries) {
+            super(options, schema, checkpointLocation);
+            this.discoveries = discoveries;
+        }
+
+        @Override
+        java.util.List<String> discoverSuperStreamPartitions() {
+            if (discoveries.isEmpty()) {
+                return java.util.List.of();
+            }
+            int current = Math.min(index, discoveries.size() - 1);
+            index++;
+            return discoveries.get(current);
         }
     }
 

@@ -13,6 +13,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Unit tests for {@link RabbitMQBatch} split planning and partitioning
@@ -152,6 +153,23 @@ class RabbitMQBatchTest {
                 prev = rp.getEndOffset();
             }
             assertThat(prev).isEqualTo(1000);
+        }
+
+        @Test
+        void singleActiveConsumerWithMinPartitionsSplitThrows() {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("singleActiveConsumer", "true");
+            opts.put("consumerName", "sac-reader");
+            opts.put("minPartitions", "4");
+            RabbitMQBatch batch = new RabbitMQBatch(
+                    new ConnectorOptions(opts), SCHEMA, Map.of("s1", new long[]{0, 1000}));
+
+            assertThatThrownBy(batch::planInputPartitions)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("singleActiveConsumer")
+                    .hasMessageContaining("split");
         }
 
         @Test
@@ -311,6 +329,23 @@ class RabbitMQBatchTest {
                 prev = rp.getEndOffset();
             }
             assertThat(prev).isEqualTo(1000);
+        }
+
+        @Test
+        void singleActiveConsumerWithMaxRecordsSplitThrows() {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("singleActiveConsumer", "true");
+            opts.put("consumerName", "sac-reader");
+            opts.put("maxRecordsPerPartition", "300");
+            RabbitMQBatch batch = new RabbitMQBatch(
+                    new ConnectorOptions(opts), SCHEMA, Map.of("s1", new long[]{0, 1000}));
+
+            assertThatThrownBy(batch::planInputPartitions)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("singleActiveConsumer")
+                    .hasMessageContaining("split");
         }
 
         @Test

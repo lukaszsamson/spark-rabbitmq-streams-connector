@@ -416,7 +416,9 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
                     // SAC with noTrackingStrategy needs an explicit update listener
                     // to provide the activation offset.
                     .consumerUpdateListener(context ->
-                            context.isActive() ? offsetSpec : OffsetSpecification.none());
+                            context.isActive()
+                                    ? resolveSingleActiveConsumerActivationOffset(offsetSpec)
+                                    : OffsetSpecification.none());
         }
 
         // State listener for RECOVERING/CLOSED transitions
@@ -537,6 +539,11 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
             return OffsetSpecification.offset(lastObservedOffset + 1);
         }
         return subscriptionOffsetSpec != null ? subscriptionOffsetSpec : configuredOffsetSpec;
+    }
+
+    OffsetSpecification resolveSingleActiveConsumerActivationOffset(
+            OffsetSpecification configuredOffsetSpec) {
+        return resolveSubscriptionOffsetSpec(null, configuredOffsetSpec);
     }
 
     boolean shouldSkipByTimestamp(long chunkTimestampMillis) {

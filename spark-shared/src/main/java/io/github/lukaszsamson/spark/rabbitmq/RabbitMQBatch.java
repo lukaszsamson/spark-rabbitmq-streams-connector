@@ -81,6 +81,7 @@ final class RabbitMQBatch implements Batch {
     }
 
     private InputPartition[] planWithSplitMap(Map<String, Integer> splitsPerStream) {
+        validateSingleActiveConsumerSplitCompatibility(splitsPerStream);
         List<InputPartition> partitions = new ArrayList<>();
         for (Map.Entry<String, long[]> entry : offsetRanges.entrySet()) {
             String stream = entry.getKey();
@@ -128,6 +129,7 @@ final class RabbitMQBatch implements Batch {
 
         // Calculate deterministic split counts per stream.
         Map<String, Integer> splitsPerStream = allocateSplits(minPartitions, minimumSplitsPerStream);
+        validateSingleActiveConsumerSplitCompatibility(splitsPerStream);
 
         for (Map.Entry<String, long[]> entry : offsetRanges.entrySet()) {
             String stream = entry.getKey();
@@ -208,6 +210,27 @@ final class RabbitMQBatch implements Batch {
             partitions.add(new RabbitMQInputPartition(stream, currentStart, splitEnd, options,
                     useConfiguredStartingOffset, location));
             currentStart = splitEnd;
+        }
+    }
+
+    private void validateSingleActiveConsumerSplitCompatibility(Map<String, Integer> splitsPerStream) {
+        if (!options.isSingleActiveConsumer()) {
+            return;
+        }
+        for (Map.Entry<String, long[]> entry : offsetRanges.entrySet()) {
+            String stream = entry.getKey();
+            long offsetSpan = Math.max(0L, entry.getValue()[1] - entry.getValue()[0]);
+            int requestedSplits = Math.max(1, splitsPerStream.getOrDefault(stream, 1));
+            int effectiveSplits = (offsetSpan <= 1L) ? 1 : requestedSplits;
+            if (effectiveSplits > 1) {
+                throw new IllegalArgumentException(
+                        "'" + ConnectorOptions.SINGLE_ACTIVE_CONSUMER + "=true' is incompatible "
+                                + "with split planning for stream '" + stream + "' ("
+                                + effectiveSplits + " planned partitions). Disable single "
+                                + "active consumer or remove split settings ('"
+                                + ConnectorOptions.MIN_PARTITIONS + "'/'"
+                                + ConnectorOptions.MAX_RECORDS_PER_PARTITION + "').");
+            }
         }
     }
 }

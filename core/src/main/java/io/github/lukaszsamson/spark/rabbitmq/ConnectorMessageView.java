@@ -2,6 +2,8 @@ package io.github.lukaszsamson.spark.rabbitmq;
 
 import java.io.Serializable;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
@@ -23,11 +25,16 @@ public final class ConnectorMessageView implements Serializable {
                                 Map<String, String> messageAnnotations,
                                 Map<String, String> properties) {
         this.body = body == null ? null : Arrays.copyOf(body, body.length);
-        this.applicationProperties = applicationProperties == null
-                ? Map.of() : Map.copyOf(applicationProperties);
-        this.messageAnnotations = messageAnnotations == null
-                ? Map.of() : Map.copyOf(messageAnnotations);
-        this.properties = properties == null ? Map.of() : Map.copyOf(properties);
+        this.applicationProperties = immutableCopyAllowingNullValues(applicationProperties);
+        this.messageAnnotations = immutableCopyAllowingNullValues(messageAnnotations);
+        this.properties = immutableCopyAllowingNullValues(properties);
+    }
+
+    private static Map<String, String> immutableCopyAllowingNullValues(Map<String, String> source) {
+        if (source == null || source.isEmpty()) {
+            return Map.of();
+        }
+        return Collections.unmodifiableMap(new LinkedHashMap<>(source));
     }
 
     public byte[] getBody() {

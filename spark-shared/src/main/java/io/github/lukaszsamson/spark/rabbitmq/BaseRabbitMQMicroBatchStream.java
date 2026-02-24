@@ -367,6 +367,7 @@ class BaseRabbitMQMicroBatchStream
                 planWithSplitting(partitions, validRanges, splitsPerStream, minPartitions);
             } else if (totalPartitions > validRanges.size()) {
                 // maxRecordsPerPartition caused splitting
+                validateSingleActiveConsumerSplitCompatibility(validRanges, splitsPerStream);
                 for (Map.Entry<String, long[]> entry : validRanges.entrySet()) {
                     String stream = entry.getKey();
                     long rangeStart = entry.getValue()[0];
@@ -430,6 +431,8 @@ class BaseRabbitMQMicroBatchStream
                 streamIndex++;
             }
         }
+
+        validateSingleActiveConsumerSplitCompatibility(ranges, splitsPerStream);
 
         // Create split partitions
         for (Map.Entry<String, long[]> entry : ranges.entrySet()) {
@@ -513,6 +516,29 @@ class BaseRabbitMQMicroBatchStream
                     messageSizeBytesAccumulator,
                     messageSizeRecordsAccumulator));
             currentStart = splitEnd;
+        }
+    }
+
+    private void validateSingleActiveConsumerSplitCompatibility(
+            Map<String, long[]> ranges,
+            Map<String, Integer> splitsPerStream) {
+        if (!options.isSingleActiveConsumer()) {
+            return;
+        }
+        for (Map.Entry<String, long[]> entry : ranges.entrySet()) {
+            String stream = entry.getKey();
+            long offsetSpan = Math.max(0L, entry.getValue()[1] - entry.getValue()[0]);
+            int requestedSplits = Math.max(1, splitsPerStream.getOrDefault(stream, 1));
+            int effectiveSplits = (offsetSpan <= 1L) ? 1 : requestedSplits;
+            if (effectiveSplits > 1) {
+                throw new IllegalArgumentException(
+                        "'" + ConnectorOptions.SINGLE_ACTIVE_CONSUMER + "=true' is incompatible "
+                                + "with split planning for stream '" + stream + "' ("
+                                + effectiveSplits + " planned partitions). Disable single "
+                                + "active consumer or remove split settings ('"
+                                + ConnectorOptions.MIN_PARTITIONS + "'/'"
+                                + ConnectorOptions.MAX_RECORDS_PER_PARTITION + "').");
+            }
         }
     }
 
@@ -968,6 +994,11 @@ class BaseRabbitMQMicroBatchStream
 
     // ---- Internal helpers ----
 
+    List<String> discoverSuperStreamPartitions() {
+        return SuperStreamPartitionDiscovery.discoverPartitions(
+                options, options.getSuperStream());
+    }
+
     synchronized List<String> discoverStreams() {
         if (options.isStreamMode()) {
             if (streams == null) {
@@ -978,8 +1009,7 @@ class BaseRabbitMQMicroBatchStream
 
         List<String> previous = streams;
         try {
-            List<String> discovered = SuperStreamPartitionDiscovery.discoverPartitions(
-                    options, options.getSuperStream());
+            List<String> discovered = discoverSuperStreamPartitions();
             if (discovered.isEmpty()) {
                 if (options.isFailOnDataLoss()) {
                     throw new IllegalStateException(
@@ -998,17 +1028,6 @@ class BaseRabbitMQMicroBatchStream
                         options.getSuperStream());
                 streams = List.of();
                 return streams;
-            }
-
-            if (previous != null && !options.isFailOnDataLoss()) {
-                LinkedHashSet<String> merged = new LinkedHashSet<>(previous);
-                merged.addAll(discovered);
-                if (merged.size() != discovered.size()) {
-                    LOG.warn("Superstream '{}' discovery dropped {} cached partition streams; "
-                                    + "preserving cached topology because failOnDataLoss=false",
-                            options.getSuperStream(), merged.size() - discovered.size());
-                    discovered = new ArrayList<>(merged);
-                }
             }
 
             if (previous == null) {
