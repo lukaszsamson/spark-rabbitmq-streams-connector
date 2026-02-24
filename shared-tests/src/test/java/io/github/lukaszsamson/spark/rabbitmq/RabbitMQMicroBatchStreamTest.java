@@ -1570,6 +1570,21 @@ class RabbitMQMicroBatchStreamTest {
         }
 
         @Test
+        void derivedConsumerNameIncludesLegacyAndStrongHashSegments() throws Exception {
+            ConnectorOptions opts = minimalOptions();
+            String checkpointPath = "/tmp/checkpoint/path";
+            String derived = (String) invokeStatic(
+                    "deriveConsumerName",
+                    new Class<?>[]{ConnectorOptions.class, String.class},
+                    opts, checkpointPath);
+            String legacy = (String) invokeStatic(
+                    "deriveLegacyConsumerName",
+                    new Class<?>[]{String.class},
+                    checkpointPath);
+            assertThat(derived).startsWith(legacy + "-");
+        }
+
+        @Test
         void usesConfiguredConsumerNameWhenProvided() throws Exception {
             Map<String, String> optsMap = new LinkedHashMap<>();
             optsMap.put("endpoints", "localhost:5552");

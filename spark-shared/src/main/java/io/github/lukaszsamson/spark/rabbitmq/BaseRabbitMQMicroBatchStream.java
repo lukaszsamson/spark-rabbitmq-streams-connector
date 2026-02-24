@@ -18,6 +18,8 @@ import scala.Option;
 
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -63,6 +65,8 @@ class BaseRabbitMQMicroBatchStream
     static final long TAIL_PROBE_IDLE_GRACE_MS = 200L;
     static final long TAIL_PROBE_MAX_EXTRA_WAIT_MS = 750L;
     static final long MIN_TIMESTAMP_START_PROBE_TIMEOUT_MS = 250L;
+    private static final String DERIVED_CONSUMER_NAME_PREFIX = "spark-rmq-";
+    private static final int DERIVED_CONSUMER_NAME_HASH_HEX_LENGTH = 16;
 
     final ConnectorOptions options;
     final StructType schema;
@@ -187,13 +191,7 @@ class BaseRabbitMQMicroBatchStream
                 if (!stored.isEmpty()) {
                     LOG.info("Recovered stored offsets from broker for consumer '{}': {}",
                             consumerName, stored);
-                    // Fill in any missing streams with starting offset resolution
-                    Map<String, Long> merged = new LinkedHashMap<>(stored);
-                    for (String stream : streams) {
-                        merged.putIfAbsent(stream, resolveStartingOffset(stream));
-                    }
-                    this.initialOffsets = new LinkedHashMap<>(merged);
-                    return new RabbitMQStreamOffset(merged);
+                    return mergeStoredOffsetsWithStartingOffsets(stored, streams);
                 }
                 LOG.info("No stored offsets found for consumer '{}', falling back to startingOffsets",
                         consumerName);
@@ -221,6 +219,17 @@ class BaseRabbitMQMicroBatchStream
         this.initialOffsets = new LinkedHashMap<>(offsets);
         LOG.info("Initial offsets from startingOffsets={}: {}", options.getStartingOffsets(), offsets);
         return new RabbitMQStreamOffset(offsets);
+    }
+
+    private RabbitMQStreamOffset mergeStoredOffsetsWithStartingOffsets(
+            Map<String, Long> storedOffsets, List<String> streams) {
+        // Fill in any missing streams with starting offset resolution.
+        Map<String, Long> merged = new LinkedHashMap<>(storedOffsets);
+        for (String stream : streams) {
+            merged.putIfAbsent(stream, resolveStartingOffset(stream));
+        }
+        this.initialOffsets = new LinkedHashMap<>(merged);
+        return new RabbitMQStreamOffset(merged);
     }
 
     @Override
@@ -1395,7 +1404,30 @@ class BaseRabbitMQMicroBatchStream
         if (checkpointLocation == null || checkpointLocation.isBlank()) {
             return null;
         }
-        return "spark-rmq-" + Integer.toUnsignedString(checkpointLocation.hashCode(), 16);
+        String legacyHash = Integer.toUnsignedString(checkpointLocation.hashCode(), 16);
+        String strongHash = sha256Hex(checkpointLocation);
+        return DERIVED_CONSUMER_NAME_PREFIX
+                + legacyHash
+                + "-"
+                + strongHash.substring(0, DERIVED_CONSUMER_NAME_HASH_HEX_LENGTH);
+    }
+
+    static String deriveLegacyConsumerName(String checkpointLocation) {
+        if (checkpointLocation == null || checkpointLocation.isBlank()) {
+            return null;
+        }
+        return DERIVED_CONSUMER_NAME_PREFIX
+                + Integer.toUnsignedString(checkpointLocation.hashCode(), 16);
+    }
+
+    private static String sha256Hex(String value) {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256")
+                    .digest(value.getBytes(StandardCharsets.UTF_8));
+            return HexFormat.of().formatHex(digest);
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 is unavailable", e);
+        }
     }
 
     private static LongAccumulator[] createMessageSizeAccumulators(String scope) {
