@@ -147,12 +147,16 @@ final class RabbitMQScan implements Scan {
      *         streams with zero messages are excluded
      */
     private Map<String, long[]> resolveOffsetRanges(List<String> streams) {
-        try (Environment env = EnvironmentBuilderHelper.buildEnvironment(options)) {
+        EnvironmentPool pool = EnvironmentPool.getInstance();
+        Environment env = pool.acquire(options);
+        try {
             Map<String, long[]> ranges = resolveOffsetRanges(env, streams);
             if (ranges.isEmpty()) {
                 LOG.info("All streams are empty; batch will produce zero rows");
             }
             return ranges;
+        } finally {
+            pool.release(options);
         }
     }
 

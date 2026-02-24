@@ -21,6 +21,7 @@ import com.rabbitmq.stream.codec.QpidProtonCodec;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.*;
+import java.util.concurrent.ThreadPoolExecutor;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -836,7 +837,10 @@ class RabbitMQMicroBatchStreamTest {
         void latestOffsetQueriesMultipleStreamsConcurrently() throws Exception {
             Assumptions.assumeTrue(Runtime.getRuntime().availableProcessors() > 1);
 
-            ConnectorOptions opts = minimalOptions();
+            Map<String, String> optsMap = new LinkedHashMap<>();
+            optsMap.put("endpoints", "localhost:5552");
+            optsMap.put("superstream", "super");
+            ConnectorOptions opts = new ConnectorOptions(optsMap);
             var schema = RabbitMQStreamTable.buildSourceSchema(opts.getMetadataFields());
             BaseRabbitMQMicroBatchStream stream = new ForcedStreamsMicroBatchStream(
                     opts, schema, "/tmp/checkpoint", java.util.List.of("s1", "s2", "s3"));
@@ -1554,6 +1558,18 @@ class RabbitMQMicroBatchStreamTest {
             // Should not throw when called multiple times without initialization
             stream.stop();
             stream.stop();
+        }
+
+        @Test
+        void streamModeUsesSingleThreadBrokerExecutor() throws Exception {
+            RabbitMQMicroBatchStream stream = createStream(minimalOptions());
+            try {
+                Object executor = getPrivateField(stream, "brokerCommitExecutor");
+                assertThat(executor).isInstanceOf(ThreadPoolExecutor.class);
+                assertThat(((ThreadPoolExecutor) executor).getCorePoolSize()).isEqualTo(1);
+            } finally {
+                stream.stop();
+            }
         }
     }
 

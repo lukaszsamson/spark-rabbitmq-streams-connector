@@ -131,9 +131,7 @@ class BaseRabbitMQMicroBatchStream
         this.messageSizeTrackerScope = deriveMessageSizeTrackerScope(
                 checkpointLocation, this.effectiveConsumerName);
         this.brokerCommitExecutor = Executors.newFixedThreadPool(
-                Math.max(1, Math.min(
-                        Runtime.getRuntime().availableProcessors(),
-                        StoredOffsetLookup.MAX_CONCURRENT_LOOKUPS)));
+                resolveBrokerExecutorParallelism(options));
         LongAccumulator[] accumulators = createMessageSizeAccumulators(this.messageSizeTrackerScope);
         this.messageSizeBytesAccumulator = accumulators[0];
         this.messageSizeRecordsAccumulator = accumulators[1];
@@ -142,6 +140,15 @@ class BaseRabbitMQMicroBatchStream
             LOG.info("consumerName not set; derived stable name '{}' from checkpoint location",
                     this.effectiveConsumerName);
         }
+    }
+
+    static int resolveBrokerExecutorParallelism(ConnectorOptions options) {
+        if (options.isStreamMode()) {
+            return 1;
+        }
+        return Math.max(1, Math.min(
+                Runtime.getRuntime().availableProcessors(),
+                StoredOffsetLookup.MAX_CONCURRENT_LOOKUPS));
     }
 
     // ---- SparkDataStream lifecycle ----
