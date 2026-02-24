@@ -22,6 +22,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Logical representation of a RabbitMQ stream scan.
@@ -35,6 +36,20 @@ final class RabbitMQScan implements Scan {
     private static final Logger LOG = LoggerFactory.getLogger(RabbitMQScan.class);
     private static final long TAIL_PROBE_TIMEOUT_MS = 1_500L;
     private static final long MIN_TIMESTAMP_PROBE_TIMEOUT_MS = 250L;
+    private static final int TAIL_PROBE_EXECUTOR_PARALLELISM = Math.max(
+            1,
+            Math.min(Runtime.getRuntime().availableProcessors(),
+                    StoredOffsetLookup.MAX_CONCURRENT_LOOKUPS));
+    private static final AtomicInteger TAIL_PROBE_THREAD_COUNTER = new AtomicInteger(0);
+    // Shared pool to avoid per-stream short-lived executor churn during range planning.
+    private static final ExecutorService TAIL_PROBE_TIMEOUT_EXECUTOR =
+            Executors.newFixedThreadPool(TAIL_PROBE_EXECUTOR_PARALLELISM, r -> {
+                Thread t = new Thread(
+                        r,
+                        "rabbitmq-scan-tail-probe-" + TAIL_PROBE_THREAD_COUNTER.incrementAndGet());
+                t.setDaemon(true);
+                return t;
+            });
 
     private final ConnectorOptions options;
     private final StructType schema;
@@ -430,12 +445,8 @@ final class RabbitMQScan implements Scan {
 
     private long probeTailOffsetFromLastMessageWithTimeout(
             Environment env, String stream, long timeoutMs) {
-        ExecutorService executor = Executors.newSingleThreadExecutor(r -> {
-            Thread t = new Thread(r, "rabbitmq-scan-tail-probe");
-            t.setDaemon(true);
-            return t;
-        });
-        Future<Long> future = executor.submit(() -> probeTailOffsetFromLastMessage(env, stream));
+        Future<Long> future = TAIL_PROBE_TIMEOUT_EXECUTOR.submit(
+                () -> probeTailOffsetFromLastMessage(env, stream));
         try {
             return future.get(timeoutMs, TimeUnit.MILLISECONDS);
         } catch (TimeoutException e) {
@@ -449,8 +460,6 @@ final class RabbitMQScan implements Scan {
         } catch (ExecutionException e) {
             LOG.debug("Tail probe failed for stream '{}': {}", stream, e.getMessage());
             return 0;
-        } finally {
-            executor.shutdownNow();
         }
     }
 

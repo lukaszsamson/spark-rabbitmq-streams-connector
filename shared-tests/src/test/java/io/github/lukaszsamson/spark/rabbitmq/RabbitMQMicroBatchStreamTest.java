@@ -831,6 +831,33 @@ class RabbitMQMicroBatchStreamTest {
 
             assertThat(env.queryStatsCalls).isEqualTo(queryStatsBeforeSecondLatest + 1);
         }
+
+        @Test
+        void latestOffsetQueriesMultipleStreamsConcurrently() throws Exception {
+            Assumptions.assumeTrue(Runtime.getRuntime().availableProcessors() > 1);
+
+            ConnectorOptions opts = minimalOptions();
+            var schema = RabbitMQStreamTable.buildSourceSchema(opts.getMetadataFields());
+            BaseRabbitMQMicroBatchStream stream = new ForcedStreamsMicroBatchStream(
+                    opts, schema, "/tmp/checkpoint", java.util.List.of("s1", "s2", "s3"));
+            DelayedStatsProbeEnvironment env =
+                    new DelayedStatsProbeEnvironment(120L, java.util.List.of(9L));
+            setPrivateField(stream, "environment", env);
+
+            try {
+                RabbitMQStreamOffset latest = (RabbitMQStreamOffset) stream.latestOffset(
+                        new RabbitMQStreamOffset(Map.of("s1", 0L, "s2", 0L, "s3", 0L)),
+                        ReadLimit.allAvailable());
+
+                assertThat(latest.getStreamOffsets())
+                        .containsEntry("s1", 10L)
+                        .containsEntry("s2", 10L)
+                        .containsEntry("s3", 10L);
+                assertThat(env.maxConcurrentStatsQueries()).isGreaterThan(1);
+            } finally {
+                stream.stop();
+            }
+        }
     }
 
     @Nested
@@ -1750,6 +1777,95 @@ class RabbitMQMicroBatchStreamTest {
 
         @Override
         public void close() {
+        }
+    }
+
+    private static final class DelayedStatsProbeEnvironment implements com.rabbitmq.stream.Environment {
+        private final long delayMs;
+        private final java.util.List<Long> probeOffsets;
+        private final java.util.concurrent.atomic.AtomicInteger inFlightStatsQueries =
+                new java.util.concurrent.atomic.AtomicInteger();
+        private final java.util.concurrent.atomic.AtomicInteger maxConcurrentStatsQueries =
+                new java.util.concurrent.atomic.AtomicInteger();
+
+        private DelayedStatsProbeEnvironment(long delayMs, java.util.List<Long> probeOffsets) {
+            this.delayMs = delayMs;
+            this.probeOffsets = probeOffsets;
+        }
+
+        int maxConcurrentStatsQueries() {
+            return maxConcurrentStatsQueries.get();
+        }
+
+        @Override
+        public com.rabbitmq.stream.StreamCreator streamCreator() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void deleteStream(String stream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void deleteSuperStream(String superStream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public com.rabbitmq.stream.StreamStats queryStreamStats(String stream) {
+            int inFlight = inFlightStatsQueries.incrementAndGet();
+            maxConcurrentStatsQueries.accumulateAndGet(inFlight, Math::max);
+            try {
+                Thread.sleep(delayMs);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            } finally {
+                inFlightStatsQueries.decrementAndGet();
+            }
+            return new FixedStreamStats(6L);
+        }
+
+        @Override
+        public void storeOffset(String reference, String stream, long offset) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public boolean streamExists(String stream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public com.rabbitmq.stream.ProducerBuilder producerBuilder() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public com.rabbitmq.stream.ConsumerBuilder consumerBuilder() {
+            return new FixedOffsetProbeConsumerBuilder(probeOffsets);
+        }
+
+        @Override
+        public void close() {
+        }
+    }
+
+    private static final class ForcedStreamsMicroBatchStream extends BaseRabbitMQMicroBatchStream {
+        private final java.util.List<String> forcedStreams;
+
+        private ForcedStreamsMicroBatchStream(
+                ConnectorOptions options,
+                org.apache.spark.sql.types.StructType schema,
+                String checkpointLocation,
+                java.util.List<String> forcedStreams) {
+            super(options, schema, checkpointLocation);
+            this.forcedStreams = forcedStreams;
+        }
+
+        @Override
+        synchronized java.util.List<String> discoverStreams() {
+            return forcedStreams;
         }
     }
 

@@ -12,8 +12,8 @@ import java.io.IOException;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
@@ -37,6 +37,8 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
     private static final long CLOSED_CHECK_INTERVAL_MS = 100L;
     private static final long MIN_TAIL_PROBE_CACHE_WINDOW_MS = 25L;
     private static final long MAX_TAIL_PROBE_CACHE_WINDOW_MS = 250L;
+    private static final long MIN_STATS_TAIL_CACHE_WINDOW_MS = 25L;
+    private static final long MAX_STATS_TAIL_CACHE_WINDOW_MS = 250L;
     final String stream;
     final long startOffset;
     final long endOffset;
@@ -63,6 +65,8 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
     volatile boolean finished = false;
     long lastTailProbeNanos = -1L;
     long lastTailProbeOffset = -1L;
+    long lastStatsTailNanos = -1L;
+    long lastStatsTailOffset = -1L;
 
     // Task-level metric counters
     long recordsRead = 0;
@@ -91,7 +95,7 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
         this.messageSizeRecordsAccumulator = partition.getMessageSizeRecordsAccumulator();
         this.converter = new MessageToRowConverter(options.getMetadataFields());
         this.postFilter = createPostFilter(options);
-        this.queue = new LinkedBlockingQueue<>(options.getQueueCapacity());
+        this.queue = new ArrayBlockingQueue<>(options.getQueueCapacity());
     }
 
     @Override
@@ -585,12 +589,7 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
             return true;
         }
         try {
-            Environment env = environment;
-            if (env == null) {
-                return false;
-            }
-            StreamStats stats = env.queryStreamStats(stream);
-            long statsTail = resolveTailOffsetInclusive(stats);
+            long statsTail = queryStreamTailOffsetFromStatsWithCache();
             long probedTail = probeLastMessageOffset();
             long tail = Math.max(statsTail, probedTail);
             if (tail < 0) {
@@ -635,12 +634,7 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
 
     boolean isStreamTailBelowPlannedEnd() {
         try {
-            Environment env = environment;
-            if (env == null) {
-                return false;
-            }
-            StreamStats stats = env.queryStreamStats(stream);
-            long statsTail = resolveTailOffsetInclusive(stats);
+            long statsTail = queryStreamTailOffsetFromStatsWithCache();
             long probedTail = probeLastMessageOffset();
             long tail = Math.max(statsTail, probedTail);
             return tail < endOffset - 1;
@@ -709,6 +703,35 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
         long pollTimeoutMs = Math.max(1L, options.getPollTimeoutMs());
         return Math.max(MIN_TAIL_PROBE_CACHE_WINDOW_MS,
                 Math.min(MAX_TAIL_PROBE_CACHE_WINDOW_MS, pollTimeoutMs));
+    }
+
+    long tailStatsCacheWindowMs() {
+        long pollTimeoutMs = Math.max(1L, options.getPollTimeoutMs());
+        return Math.max(MIN_STATS_TAIL_CACHE_WINDOW_MS,
+                Math.min(MAX_STATS_TAIL_CACHE_WINDOW_MS, pollTimeoutMs));
+    }
+
+    long queryStreamTailOffsetFromStatsWithCache() {
+        long nowNanos = System.nanoTime();
+        if (lastStatsTailNanos > 0) {
+            long elapsedMs = TimeUnit.NANOSECONDS.toMillis(nowNanos - lastStatsTailNanos);
+            if (elapsedMs < tailStatsCacheWindowMs()) {
+                return lastStatsTailOffset;
+            }
+        }
+
+        Environment env = environment;
+        if (env == null) {
+            lastStatsTailOffset = -1L;
+            lastStatsTailNanos = nowNanos;
+            return -1L;
+        }
+
+        StreamStats stats = env.queryStreamStats(stream);
+        long resolvedTail = resolveTailOffsetInclusive(stats);
+        lastStatsTailOffset = resolvedTail;
+        lastStatsTailNanos = System.nanoTime();
+        return resolvedTail;
     }
 
     static MessagePostFilter createPostFilter(ConnectorOptions options) {

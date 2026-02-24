@@ -16,6 +16,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Looks up stored consumer offsets from the RabbitMQ broker.
@@ -38,8 +39,25 @@ final class StoredOffsetLookup {
     /** Maximum concurrent tracking consumers per lookup batch. */
     static final int MAX_CONCURRENT_LOOKUPS = 20;
     static final long LOOKUP_FUTURE_TIMEOUT_MS = 30_000L;
+    private static final AtomicInteger LOOKUP_THREAD_COUNTER = new AtomicInteger(0);
+    private static final ExecutorService SHARED_LOOKUP_EXECUTOR = createSharedLookupExecutor();
 
     private StoredOffsetLookup() {}
+
+    private static ExecutorService createSharedLookupExecutor() {
+        ExecutorService executor = Executors.newFixedThreadPool(
+                MAX_CONCURRENT_LOOKUPS,
+                runnable -> {
+                    Thread thread = new Thread(
+                            runnable,
+                            "rabbitmq-stored-offset-lookup-" + LOOKUP_THREAD_COUNTER.incrementAndGet());
+                    thread.setDaemon(true);
+                    return thread;
+                });
+        Runtime.getRuntime().addShutdownHook(new Thread(
+                executor::shutdownNow, "rabbitmq-stored-offset-lookup-shutdown"));
+        return executor;
+    }
 
     /**
      * Result of a stored offset lookup, distinguishing between successful
@@ -86,11 +104,37 @@ final class StoredOffsetLookup {
      */
     static LookupResult lookupWithDetails(Environment env, String consumerName,
                                             List<String> streams) {
-        return lookupWithDetails(env, consumerName, streams, LOOKUP_FUTURE_TIMEOUT_MS);
+        return lookupWithDetails(
+                env,
+                consumerName,
+                streams,
+                LOOKUP_FUTURE_TIMEOUT_MS,
+                SHARED_LOOKUP_EXECUTOR);
     }
 
     static LookupResult lookupWithDetails(Environment env, String consumerName,
                                             List<String> streams, long futureTimeoutMs) {
+        return lookupWithDetails(
+                env,
+                consumerName,
+                streams,
+                futureTimeoutMs,
+                SHARED_LOOKUP_EXECUTOR);
+    }
+
+    static LookupResult lookupWithDetails(Environment env, String consumerName,
+                                          List<String> streams, ExecutorService executor) {
+        return lookupWithDetails(
+                env,
+                consumerName,
+                streams,
+                LOOKUP_FUTURE_TIMEOUT_MS,
+                executor);
+    }
+
+    static LookupResult lookupWithDetails(Environment env, String consumerName,
+                                            List<String> streams, long futureTimeoutMs,
+                                            ExecutorService executor) {
         Map<String, Long> offsets = new LinkedHashMap<>();
         List<String> failed = new java.util.ArrayList<>();
 
@@ -98,16 +142,14 @@ final class StoredOffsetLookup {
             return new LookupResult(offsets, failed);
         }
 
-        // Bounded thread pool for concurrent lookups — avoids exceeding
-        // the broker's tracking consumer limit (~50 per connection)
-        int poolSize = Math.min(streams.size(), MAX_CONCURRENT_LOOKUPS);
         long effectiveTimeoutMs = Math.max(1L, futureTimeoutMs);
-        ExecutorService executor = Executors.newFixedThreadPool(poolSize);
+        ExecutorService effectiveExecutor =
+                executor != null ? executor : SHARED_LOOKUP_EXECUTOR;
+        Map<String, Future<Long>> futures = new LinkedHashMap<>();
         try {
             // Submit all lookups concurrently
-            Map<String, Future<Long>> futures = new LinkedHashMap<>();
             for (String stream : streams) {
-                futures.put(stream, executor.submit(
+                futures.put(stream, effectiveExecutor.submit(
                         () -> lookupStream(env, consumerName, stream)));
             }
 
@@ -153,7 +195,9 @@ final class StoredOffsetLookup {
                 }
             }
         } finally {
-            executor.shutdownNow();
+            for (Future<Long> future : futures.values()) {
+                future.cancel(true);
+            }
         }
         return new LookupResult(offsets, failed);
     }

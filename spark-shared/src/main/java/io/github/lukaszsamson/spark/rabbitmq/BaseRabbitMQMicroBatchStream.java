@@ -26,6 +26,7 @@ import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.ToLongFunction;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 
@@ -1048,27 +1049,67 @@ class BaseRabbitMQMicroBatchStream
     private Map<String, Long> queryTailOffsets() {
         List<String> streams = discoverStreams();
         Environment env = getEnvironment();
-        Map<String, Long> tailOffsets = new LinkedHashMap<>();
         if (!latestTailProbeCache.isEmpty()) {
             Set<String> activeStreams = new HashSet<>(streams);
             latestTailProbeCache.keySet().removeIf(stream -> !activeStreams.contains(stream));
         }
-
-        for (String stream : streams) {
-            long tail = queryStreamTailOffsetForLatest(env, stream);
-            tailOffsets.put(stream, tail);
-        }
-        return tailOffsets;
+        return queryTailOffsetsInParallel(
+                streams,
+                stream -> queryStreamTailOffsetForLatest(env, stream));
     }
 
     private Map<String, Long> queryTailOffsetsForAvailableNow() {
         List<String> streams = discoverStreams();
         Environment env = getEnvironment();
+        return queryTailOffsetsInParallel(
+                streams,
+                stream -> queryStreamTailOffsetForAvailableNow(env, stream));
+    }
+
+    private Map<String, Long> queryTailOffsetsInParallel(
+            List<String> streams, ToLongFunction<String> tailResolver) {
         Map<String, Long> tailOffsets = new LinkedHashMap<>();
-        for (String stream : streams) {
-            tailOffsets.put(stream, queryStreamTailOffsetForAvailableNow(env, stream));
+        if (streams.isEmpty()) {
+            return tailOffsets;
         }
-        return tailOffsets;
+        if (streams.size() == 1) {
+            String stream = streams.get(0);
+            tailOffsets.put(stream, tailResolver.applyAsLong(stream));
+            return tailOffsets;
+        }
+
+        Map<String, CompletableFuture<Long>> futures = new LinkedHashMap<>();
+        for (String stream : streams) {
+            futures.put(stream, CompletableFuture.supplyAsync(
+                    () -> tailResolver.applyAsLong(stream), brokerCommitExecutor));
+        }
+
+        try {
+            for (String stream : streams) {
+                tailOffsets.put(stream, futures.get(stream).join());
+            }
+            return tailOffsets;
+        } catch (CompletionException e) {
+            futures.values().forEach(future -> future.cancel(true));
+            throw unwrapCompletionException(e);
+        } catch (CancellationException e) {
+            throw new IllegalStateException("Tail offset query was cancelled", e);
+        }
+    }
+
+    private RuntimeException unwrapCompletionException(Throwable throwable) {
+        Throwable cause = throwable;
+        while ((cause instanceof CompletionException || cause instanceof ExecutionException)
+                && cause.getCause() != null) {
+            cause = cause.getCause();
+        }
+        if (cause instanceof RuntimeException runtimeException) {
+            return runtimeException;
+        }
+        if (cause instanceof Error error) {
+            throw error;
+        }
+        return new IllegalStateException("Tail offset query failed", cause);
     }
 
     /**

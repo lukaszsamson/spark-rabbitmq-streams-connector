@@ -1114,6 +1114,61 @@ class RabbitMQPartitionReaderTest {
         }
 
         @Test
+        void hasStreamTailReachedPlannedEndReusesRecentStatsQuery() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("pollTimeoutMs", "5");
+            opts.put("maxWaitMs", "20");
+
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 0, 100, new ConnectorOptions(opts));
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
+
+            com.rabbitmq.stream.Environment env = mock(com.rabbitmq.stream.Environment.class);
+            com.rabbitmq.stream.StreamStats stats = mock(com.rabbitmq.stream.StreamStats.class);
+            when(env.queryStreamStats("test-stream")).thenReturn(stats);
+            when(stats.committedOffset()).thenReturn(5L);
+
+            setPrivateField(reader, "environment", env);
+            setPrivateField(reader, "lastTailProbeNanos", System.nanoTime());
+            setPrivateField(reader, "lastTailProbeOffset", -1L);
+
+            assertThat(reader.hasStreamTailReachedPlannedEnd()).isFalse();
+            assertThat(reader.hasStreamTailReachedPlannedEnd()).isFalse();
+
+            verify(env, times(1)).queryStreamStats("test-stream");
+        }
+
+        @Test
+        void hasStreamTailReachedPlannedEndRefreshesStatsAfterCacheExpiry() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("pollTimeoutMs", "5");
+            opts.put("maxWaitMs", "20");
+
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 0, 100, new ConnectorOptions(opts));
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
+
+            com.rabbitmq.stream.Environment env = mock(com.rabbitmq.stream.Environment.class);
+            com.rabbitmq.stream.StreamStats stats = mock(com.rabbitmq.stream.StreamStats.class);
+            when(env.queryStreamStats("test-stream")).thenReturn(stats);
+            when(stats.committedOffset()).thenReturn(5L);
+
+            setPrivateField(reader, "environment", env);
+            setPrivateField(reader, "lastTailProbeNanos", System.nanoTime());
+            setPrivateField(reader, "lastTailProbeOffset", -1L);
+
+            assertThat(reader.hasStreamTailReachedPlannedEnd()).isFalse();
+            Thread.sleep(reader.tailStatsCacheWindowMs() + 25L);
+            assertThat(reader.hasStreamTailReachedPlannedEnd()).isFalse();
+
+            verify(env, times(2)).queryStreamStats("test-stream");
+        }
+
+        @Test
         void probeLastMessageOffsetReturnsMinusOneWhenEnvironmentIsCleared() throws Exception {
             RabbitMQInputPartition partition = new RabbitMQInputPartition(
                     "test-stream", 0, 100, minimalOptions());
