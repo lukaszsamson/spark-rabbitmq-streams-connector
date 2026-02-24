@@ -715,29 +715,30 @@ class BaseRabbitMQMicroBatchStream
         }
         tailOffsets = safeTail;
 
-        // Normalize stale starts before applying read limits. Without this, rate-limited
-        // planning can advance from a stale retained offset in tiny steps (e.g. +100/trigger),
-        // producing repeated empty batches when failOnDataLoss=false.
-        Map<String, Long> normalizedStart = new LinkedHashMap<>();
-        Map<String, Long> normalizedTail = new LinkedHashMap<>();
-        for (Map.Entry<String, Long> entry : tailOffsets.entrySet()) {
-            String stream = entry.getKey();
-            long startOff = effectiveStartMap.getOrDefault(stream, 0L);
-            long endOff = entry.getValue();
-            long validatedStart = validateStartOffset(stream, startOff, endOff);
-            if (validatedStart < 0L) {
-                continue;
+        if (!options.isFailOnDataLoss() && availableNowSnapshot == null) {
+            // Normalize stale starts before applying read limits. Without this, rate-limited
+            // planning can advance from a stale retained offset in tiny steps (e.g. +100/trigger),
+            // producing repeated empty batches when failOnDataLoss=false.
+            Map<String, Long> normalizedStart = new LinkedHashMap<>();
+            Map<String, Long> normalizedTail = new LinkedHashMap<>();
+            for (Map.Entry<String, Long> entry : tailOffsets.entrySet()) {
+                String stream = entry.getKey();
+                long startOff = effectiveStartMap.getOrDefault(stream, 0L);
+                long endOff = entry.getValue();
+                long validatedStart = validateStartOffset(stream, startOff, endOff);
+                if (validatedStart < 0L) {
+                    continue;
+                }
+                normalizedStart.put(stream, validatedStart);
+                normalizedTail.put(stream, Math.max(endOff, validatedStart));
             }
-            normalizedStart.put(stream, validatedStart);
-            normalizedTail.put(stream, Math.max(endOff, validatedStart));
+            if (normalizedTail.isEmpty()) {
+                LOG.debug("No readable streams after start-offset normalization");
+                return startOffset != null ? startOffset : new RabbitMQStreamOffset(Map.of());
+            }
+            effectiveStartMap = normalizedStart;
+            tailOffsets = normalizedTail;
         }
-        if (normalizedTail.isEmpty()) {
-            LOG.debug("No readable streams after start-offset normalization");
-            return startOffset != null ? startOffset : new RabbitMQStreamOffset(Map.of());
-        }
-
-        effectiveStartMap = normalizedStart;
-        tailOffsets = normalizedTail;
         cachedTailOffset = new RabbitMQStreamOffset(tailOffsets);
 
         // Check if any stream has new data
