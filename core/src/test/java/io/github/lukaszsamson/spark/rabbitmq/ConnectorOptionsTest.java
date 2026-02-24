@@ -486,7 +486,7 @@ class ConnectorOptionsTest {
             assertThat(opts.getPollTimeoutMs()).isEqualTo(30_000L);
             assertThat(opts.getMaxWaitMs()).isEqualTo(300_000L);
             assertThat(opts.getCallbackEnqueueTimeoutMs()).isEqualTo(5_000L);
-            assertThat(opts.getInitialCredits()).isEqualTo(1);
+            assertThat(opts.getInitialCredits()).isEqualTo(10);
             assertThat(opts.getQueueCapacity()).isEqualTo(10_000);
             assertThat(opts.getEstimatedMessageSizeBytes()).isEqualTo(1024);
         }

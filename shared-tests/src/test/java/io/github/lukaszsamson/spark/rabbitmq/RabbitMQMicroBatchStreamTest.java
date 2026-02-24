@@ -397,6 +397,40 @@ class RabbitMQMicroBatchStreamTest {
         }
 
         @Test
+        void initialOffsetLatestIgnoresRecoveredStoredOffsetBeforeFirstAvailable() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("startingOffsets", "latest");
+            opts.put("consumerName", "fresh-consumer");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            setPrivateField(stream, "environment", new StoredOffsetWithStatsEnvironment(
+                    Map.of("test-stream", 0L),
+                    Map.of("test-stream", 100L)));
+
+            RabbitMQStreamOffset offset = (RabbitMQStreamOffset) stream.initialOffset();
+            assertThat(offset.getStreamOffsets()).containsEntry("test-stream", 101L);
+        }
+
+        @Test
+        void initialOffsetLatestKeepsRecoveredStoredOffsetAtOrAfterFirstAvailable() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("startingOffsets", "latest");
+            opts.put("consumerName", "existing-consumer");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            setPrivateField(stream, "environment", new StoredOffsetWithStatsEnvironment(
+                    Map.of("test-stream", 120L),
+                    Map.of("test-stream", 100L)));
+
+            RabbitMQStreamOffset offset = (RabbitMQStreamOffset) stream.initialOffset();
+            assertThat(offset.getStreamOffsets()).containsEntry("test-stream", 121L);
+        }
+
+        @Test
         void discoverStreamsSuperStreamEmptyPartitionsThrows() throws Exception {
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
@@ -2936,6 +2970,62 @@ class RabbitMQMicroBatchStreamTest {
                 throw new RuntimeException("synthetic caught store failure");
             }
             super.storeOffset(reference, stream, offset);
+        }
+    }
+
+    private static final class StoredOffsetWithStatsEnvironment implements Environment {
+        private final Map<String, Long> offsets;
+        private final Map<String, Long> firstOffsets;
+
+        private StoredOffsetWithStatsEnvironment(
+                Map<String, Long> offsets, Map<String, Long> firstOffsets) {
+            this.offsets = offsets;
+            this.firstOffsets = firstOffsets;
+        }
+
+        @Override
+        public StreamCreator streamCreator() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void deleteStream(String stream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void deleteSuperStream(String superStream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public StreamStats queryStreamStats(String stream) {
+            long first = firstOffsets.getOrDefault(stream, 0L);
+            return new FixedStreamStats(first);
+        }
+
+        @Override
+        public void storeOffset(String reference, String stream, long offset) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public boolean streamExists(String stream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public ProducerBuilder producerBuilder() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public ConsumerBuilder consumerBuilder() {
+            return new StoredOffsetConsumerBuilder(offsets);
+        }
+
+        @Override
+        public void close() {
         }
     }
 

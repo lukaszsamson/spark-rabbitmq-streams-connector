@@ -195,7 +195,7 @@ class BaseRabbitMQMicroBatchStream
                         StoredOffsetLookup.lookupWithDetails(
                                 getEnvironment(), consumerName, streams);
 
-                Map<String, Long> stored = result.getOffsets();
+                Map<String, Long> stored = sanitizeRecoveredStoredOffsets(result.getOffsets());
 
                 if (result.hasFailures()) {
                     if (consumerNameExplicit) {
@@ -254,6 +254,35 @@ class BaseRabbitMQMicroBatchStream
         }
         this.initialOffsets = new LinkedHashMap<>(merged);
         return new RabbitMQStreamOffset(merged);
+    }
+
+    private Map<String, Long> sanitizeRecoveredStoredOffsets(Map<String, Long> storedOffsets) {
+        if (storedOffsets == null || storedOffsets.isEmpty()) {
+            return Map.of();
+        }
+        if (options.getStartingOffsets() != StartingOffsetsMode.LATEST) {
+            return storedOffsets;
+        }
+
+        Map<String, Long> sanitized = new LinkedHashMap<>();
+        for (Map.Entry<String, Long> entry : storedOffsets.entrySet()) {
+            String stream = entry.getKey();
+            long recoveredNextOffset = entry.getValue();
+            try {
+                long firstAvailable = resolveFirstAvailable(stream);
+                if (recoveredNextOffset < firstAvailable) {
+                    LOG.warn("Ignoring recovered stored offset {} for stream '{}' because it is "
+                                    + "before first available {}. Falling back to startingOffsets=latest.",
+                            recoveredNextOffset, stream, firstAvailable);
+                    continue;
+                }
+            } catch (Exception e) {
+                LOG.debug("Failed to validate recovered stored offset for stream '{}': {}",
+                        stream, e.getMessage());
+            }
+            sanitized.put(stream, recoveredNextOffset);
+        }
+        return sanitized;
     }
 
     @Override

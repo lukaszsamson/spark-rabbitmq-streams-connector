@@ -125,7 +125,7 @@ public final class ConnectorOptions implements Serializable {
     public static final long DEFAULT_POLL_TIMEOUT_MS = 30_000L;
     public static final long DEFAULT_MAX_WAIT_MS = 300_000L;
     public static final long DEFAULT_CALLBACK_ENQUEUE_TIMEOUT_MS = 5_000L;
-    public static final int DEFAULT_INITIAL_CREDITS = 1;
+    public static final int DEFAULT_INITIAL_CREDITS = 10;
     public static final int DEFAULT_QUEUE_CAPACITY = 10_000;
     public static final int DEFAULT_ESTIMATED_MESSAGE_SIZE_BYTES = 1024;
     public static final long DEFAULT_ENQUEUE_TIMEOUT_MS = 10_000L;
