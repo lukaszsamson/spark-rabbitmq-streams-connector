@@ -34,6 +34,11 @@ final class RabbitMQPartitionReader extends BaseRabbitMQPartitionReader
 
     @Override
     public RecordStatus nextWithTimeout(Long timeout) throws IOException {
+        if (finished || closeCalled.get()) {
+            finished = true;
+            return RecordStatus.newStatusWithoutArrivalTime(false);
+        }
+
         // Lazy initialization: create consumer on first call
         if (consumer == null) {
             try {
@@ -54,6 +59,11 @@ final class RabbitMQPartitionReader extends BaseRabbitMQPartitionReader
         long pollTimeoutMs = options.getPollTimeoutMs();
 
         while (true) {
+            if (finished || closeCalled.get()) {
+                finished = true;
+                return RecordStatus.newStatusWithoutArrivalTime(false);
+            }
+
             // Check for consumer errors
             Throwable error = consumerError.get();
             if (error != null) {
@@ -77,6 +87,10 @@ final class RabbitMQPartitionReader extends BaseRabbitMQPartitionReader
             }
 
             if (qm == null) {
+                if (finished || closeCalled.get()) {
+                    finished = true;
+                    return RecordStatus.newStatusWithoutArrivalTime(false);
+                }
                 if (consumerClosed.get()) {
                     throw new IOException(
                             "Consumer for stream '" + stream + "' closed while waiting for data");
