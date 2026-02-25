@@ -137,7 +137,7 @@ public class RabbitMQStreamTable implements Table, SupportsRead, SupportsWrite {
         List<StructField> fields = new ArrayList<>();
 
         // Fixed columns (always present)
-        fields.add(new StructField("value", DataTypes.BinaryType, false, Metadata.empty()));
+        fields.add(new StructField("value", DataTypes.BinaryType, true, Metadata.empty()));
         fields.add(new StructField("stream", DataTypes.StringType, false, Metadata.empty()));
         fields.add(new StructField("offset", DataTypes.LongType, false, Metadata.empty()));
         fields.add(new StructField("chunk_timestamp", DataTypes.TimestampType, false, Metadata.empty()));

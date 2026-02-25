@@ -190,6 +190,30 @@ class RabbitMQPartitionReaderTest {
         }
 
         @Test
+        void nextDoesNotFailTimeoutWhenSingleActiveConsumerIsKnownInactive() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("singleActiveConsumer", "true");
+            opts.put("consumerName", "consumer-a");
+            opts.put("pollTimeoutMs", "5");
+            opts.put("maxWaitMs", "5");
+
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 0, 10, new ConnectorOptions(opts));
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
+
+            setPrivateField(reader, "consumer", new NoopConsumer());
+            setPrivateField(reader, "queue", new LinkedBlockingQueue<>());
+            setPrivateField(reader, "singleActiveConsumerStateKnown",
+                    new java.util.concurrent.atomic.AtomicBoolean(true));
+            setPrivateField(reader, "singleActiveConsumerActive",
+                    new java.util.concurrent.atomic.AtomicBoolean(false));
+
+            assertThat(reader.next()).isFalse();
+        }
+
+        @Test
         void nextFailsFastWhenConsumerAlreadyClosed() throws Exception {
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");

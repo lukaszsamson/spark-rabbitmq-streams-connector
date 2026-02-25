@@ -136,7 +136,7 @@ class RabbitMQStreamTableProviderTest {
             StructType schema = table.schema();
 
             assertThat(schema.apply("value").dataType()).isEqualTo(DataTypes.BinaryType);
-            assertThat(schema.apply("value").nullable()).isFalse();
+            assertThat(schema.apply("value").nullable()).isTrue();
             assertThat(schema.apply("stream").dataType()).isEqualTo(DataTypes.StringType);
             assertThat(schema.apply("stream").nullable()).isFalse();
             assertThat(schema.apply("offset").dataType()).isEqualTo(DataTypes.LongType);

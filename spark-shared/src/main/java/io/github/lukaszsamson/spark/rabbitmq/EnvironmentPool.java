@@ -108,12 +108,19 @@ final class EnvironmentPool {
     }
 
     private static final class PooledEntry {
-        final Environment environment;
+        final CompletableFuture<Environment> environmentFuture = new CompletableFuture<>();
+        volatile Environment environment;
         final AtomicInteger refCount = new AtomicInteger(1);
         volatile ScheduledFuture<?> evictionTask;
 
+        PooledEntry() {
+            this.refCount.set(0);
+        }
+
         PooledEntry(Environment environment) {
-            this.environment = Objects.requireNonNull(environment);
+            Environment validated = Objects.requireNonNull(environment);
+            this.environment = validated;
+            this.environmentFuture.complete(validated);
         }
     }
 
@@ -149,19 +156,33 @@ final class EnvironmentPool {
                 continue;
             }
 
-            // Create outside map atomic operations to avoid blocking CHM bin locks.
-            Environment createdEnvironment = EnvironmentBuilderHelper.buildEnvironment(options);
-            PooledEntry createdEntry = new PooledEntry(createdEnvironment);
-            PooledEntry raced = pool.putIfAbsent(key, createdEntry);
-            if (raced == null) {
-                LOG.info("Created new pooled environment for key {}", key.endpoints());
-                return createdEnvironment;
+            // Reserve a shared in-flight slot so concurrent acquires for the same key
+            // wait on one connection attempt instead of creating a thundering herd.
+            PooledEntry pendingEntry = new PooledEntry();
+            PooledEntry raced = pool.putIfAbsent(key, pendingEntry);
+            if (raced != null) {
+                Environment acquired = tryAcquireExistingEntry(key, raced);
+                if (acquired != null) {
+                    return acquired;
+                }
+                continue;
             }
 
-            closeUnusedEnvironment(key, createdEnvironment);
-            Environment acquired = tryAcquireExistingEntry(key, raced);
-            if (acquired != null) {
-                return acquired;
+            try {
+                Environment createdEnvironment = EnvironmentBuilderHelper.buildEnvironment(options);
+                pendingEntry.environment = createdEnvironment;
+                pendingEntry.environmentFuture.complete(createdEnvironment);
+                LOG.info("Created new pooled environment for key {}", key.endpoints());
+
+                Environment acquired = tryAcquireExistingEntry(key, pendingEntry);
+                if (acquired != null) {
+                    return acquired;
+                }
+                closeUnusedEnvironment(key, createdEnvironment);
+            } catch (Throwable t) {
+                pendingEntry.environmentFuture.completeExceptionally(t);
+                pool.remove(key, pendingEntry);
+                throw propagateAcquireFailure(t, key);
             }
         }
     }
@@ -184,8 +205,50 @@ final class EnvironmentPool {
             }
             LOG.debug("Reusing pooled environment for key {}, refCount={}",
                     key.endpoints(), current + 1);
-            return entry.environment;
         }
+
+        try {
+            return awaitEnvironment(entry, key);
+        } catch (RuntimeException e) {
+            rollbackFailedAcquire(key, entry);
+            throw e;
+        }
+    }
+
+    private Environment awaitEnvironment(PooledEntry entry, EnvironmentKey key) {
+        try {
+            Environment environment = entry.environmentFuture.get();
+            entry.environment = environment;
+            return environment;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException(
+                    "Interrupted while acquiring environment for key " + key.endpoints(), e);
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause() != null ? e.getCause() : e;
+            throw propagateAcquireFailure(cause, key);
+        }
+    }
+
+    private void rollbackFailedAcquire(EnvironmentKey key, PooledEntry entry) {
+        synchronized (entry) {
+            int remaining = entry.refCount.decrementAndGet();
+            if (remaining < 0) {
+                entry.refCount.set(0);
+                remaining = 0;
+            }
+            if (remaining == 0 && entry.environmentFuture.isCompletedExceptionally()) {
+                pool.remove(key, entry);
+            }
+        }
+    }
+
+    private RuntimeException propagateAcquireFailure(Throwable failure, EnvironmentKey key) {
+        if (failure instanceof RuntimeException runtimeException) {
+            return runtimeException;
+        }
+        return new IllegalStateException(
+                "Failed to acquire environment for key " + key.endpoints(), failure);
     }
 
     private void closeUnusedEnvironment(EnvironmentKey key, Environment environment) {
@@ -254,7 +317,10 @@ final class EnvironmentPool {
         }
         LOG.info("Evicting idle environment for key {}", key.endpoints());
         try {
-            entry.environment.close();
+            Environment environment = entry.environment;
+            if (environment != null) {
+                environment.close();
+            }
         } catch (Exception e) {
             LOG.warn("Error closing evicted environment for key {}", key.endpoints(), e);
         }

@@ -9,6 +9,7 @@ import org.apache.spark.sql.catalyst.util.GenericArrayData;
 import org.apache.spark.unsafe.types.UTF8String;
 
 import java.io.Serializable;
+import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -59,7 +60,7 @@ public final class MessageToRowConverter implements Serializable {
         int idx = 0;
 
         // Fixed fields
-        values[idx++] = message.getBodyAsBinary();
+        values[idx++] = safeBodyAsBinary(message);
         values[idx++] = UTF8String.fromString(stream);
         values[idx++] = offset;
         values[idx++] = millisToMicros(chunkTimestampMillis);
@@ -95,6 +96,26 @@ public final class MessageToRowConverter implements Serializable {
         }
 
         return new GenericInternalRow(values);
+    }
+
+    static byte[] safeBodyAsBinary(Message message) {
+        try {
+            return message.getBodyAsBinary();
+        } catch (IllegalStateException bodyTypeMismatch) {
+            Object body;
+            try {
+                body = message.getBody();
+            } catch (RuntimeException ignored) {
+                return null;
+            }
+            if (body == null) {
+                return null;
+            }
+            if (body instanceof byte[] bytes) {
+                return bytes;
+            }
+            return String.valueOf(body).getBytes(StandardCharsets.UTF_8);
+        }
     }
 
     // ---- Property struct conversion ----

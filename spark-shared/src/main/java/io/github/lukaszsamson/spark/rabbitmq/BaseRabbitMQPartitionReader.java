@@ -54,6 +54,8 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
     final AtomicReference<Throwable> consumerError = new AtomicReference<>();
     final AtomicBoolean consumerClosed = new AtomicBoolean(false);
     final AtomicBoolean closeCalled = new AtomicBoolean(false);
+    final AtomicBoolean singleActiveConsumerStateKnown = new AtomicBoolean(false);
+    final AtomicBoolean singleActiveConsumerActive = new AtomicBoolean(true);
 
     boolean pooledEnvironment = false;
     volatile Environment environment;
@@ -191,6 +193,15 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
                 }
                 totalWaitMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - waitStartNanos);
                 if (totalWaitMs >= maxWaitMs) {
+                    if (options.isSingleActiveConsumer()
+                            && singleActiveConsumerStateKnown.get()
+                            && !singleActiveConsumerActive.get()) {
+                        LOG.debug("Single active consumer is inactive for stream '{}'; " +
+                                        "completing split without timeout failure",
+                                stream);
+                        finished = true;
+                        return false;
+                    }
                     if (brokerFilterConfigured && hasStreamTailReachedPlannedEnd()) {
                         LOG.warn("Reached maxWaitMs={} while reading filtered stream '{}'; " +
                                         "tail indicates planned end reached at lastObservedOffset={} for endOffset={}",
@@ -401,10 +412,13 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
                     .singleActiveConsumer()
                     // SAC with noTrackingStrategy needs an explicit update listener
                     // to provide the activation offset.
-                    .consumerUpdateListener(context ->
-                            context.isActive()
-                                    ? resolveSingleActiveConsumerActivationOffset(offsetSpec)
-                                    : OffsetSpecification.none());
+                    .consumerUpdateListener(context -> {
+                        singleActiveConsumerStateKnown.set(true);
+                        singleActiveConsumerActive.set(context.isActive());
+                        return context.isActive()
+                                ? resolveSingleActiveConsumerActivationOffset(offsetSpec)
+                                : OffsetSpecification.none();
+                    });
         }
 
         // State listener for RECOVERING/CLOSED transitions

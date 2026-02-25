@@ -75,6 +75,39 @@ class MessageToRowConverterTest {
 
             assertThat(row.getLong(3)).isEqualTo(1234L * 1000L);
         }
+
+        @Test
+        void nonBinaryBodyFallsBackToUtf8Bytes() {
+            var converter = new MessageToRowConverter(EnumSet.noneOf(MetadataField.class));
+            Message msg = mock(Message.class);
+            when(msg.getBodyAsBinary()).thenThrow(new IllegalStateException("not data"));
+            when(msg.getBody()).thenReturn(Map.of("k", "v"));
+
+            InternalRow row = converter.convert(msg, "s", 0, CHUNK_TS_MILLIS);
+            assertThat(new String(row.getBinary(0), java.nio.charset.StandardCharsets.UTF_8))
+                    .isEqualTo("{k=v}");
+        }
+
+        @Test
+        void missingBodyProducesNullValue() {
+            var converter = new MessageToRowConverter(EnumSet.noneOf(MetadataField.class));
+            Message msg = mock(Message.class);
+            when(msg.getBodyAsBinary()).thenReturn(null);
+
+            InternalRow row = converter.convert(msg, "s", 0, CHUNK_TS_MILLIS);
+            assertThat(row.isNullAt(0)).isTrue();
+        }
+
+        @Test
+        void nonBinaryBodyWithUnavailableBodyObjectProducesNullValue() {
+            var converter = new MessageToRowConverter(EnumSet.noneOf(MetadataField.class));
+            Message msg = mock(Message.class);
+            when(msg.getBodyAsBinary()).thenThrow(new IllegalStateException("not data"));
+            when(msg.getBody()).thenThrow(new IllegalStateException("unsupported body"));
+
+            InternalRow row = converter.convert(msg, "s", 0, CHUNK_TS_MILLIS);
+            assertThat(row.isNullAt(0)).isTrue();
+        }
     }
 
     // ========================================================================
