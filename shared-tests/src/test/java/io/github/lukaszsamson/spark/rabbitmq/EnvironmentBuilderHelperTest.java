@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -263,6 +264,35 @@ class EnvironmentBuilderHelperTest {
 
         Object collector = getFieldValue(builder, "observationCollector");
         assertThat(collector).isSameAs(TestObservationCollectorFactory.COLLECTOR);
+    }
+
+    @Test
+    void observationCollectorClassBridgesCompatibleForeignCollector() throws Exception {
+        ForeignObservationCollectorFactory.reset();
+        ConnectorOptions options = new ConnectorOptions(Map.of(
+                "endpoints", "hostA:5552",
+                "stream", "test-stream",
+                "observationCollectorClass",
+                "io.github.lukaszsamson.spark.rabbitmq.EnvironmentBuilderHelperTest$ForeignObservationCollectorFactory"
+        ));
+
+        StreamEnvironmentBuilder builder = new StreamEnvironmentBuilder();
+        invokeConfigureObservationCollector(builder, options);
+
+        @SuppressWarnings("unchecked")
+        com.rabbitmq.stream.ObservationCollector<Object> collector =
+                (com.rabbitmq.stream.ObservationCollector<Object>) getFieldValue(
+                        builder, "observationCollector");
+
+        collector.prePublish("stream", null);
+        collector.published(null, null);
+        com.rabbitmq.stream.MessageHandler handler = collector.subscribe((ctx, msg) -> {});
+        handler.handle(null, null);
+
+        assertThat(ForeignObservationCollectorFactory.prePublishCount()).isEqualTo(1);
+        assertThat(ForeignObservationCollectorFactory.publishedCount()).isEqualTo(1);
+        assertThat(ForeignObservationCollectorFactory.subscribeCount()).isEqualTo(1);
+        assertThat(ForeignObservationCollectorFactory.handleCount()).isEqualTo(1);
     }
 
     @Test
@@ -694,6 +724,74 @@ class EnvironmentBuilderHelperTest {
         @Override
         public Object create(ConnectorOptions options) {
             return "not-a-codec-factory";
+        }
+    }
+
+    interface ForeignMessage {}
+
+    interface ForeignMessageHandler {
+        void handle(Object context, ForeignMessage message);
+    }
+
+    interface ForeignObservationCollector {
+        Object prePublish(String stream, ForeignMessage message);
+        void published(Object context, ForeignMessage message);
+        ForeignMessageHandler subscribe(ForeignMessageHandler handler);
+    }
+
+    public static final class ForeignObservationCollectorFactory
+            implements ConnectorObservationCollectorFactory {
+        private static final AtomicLong PRE_PUBLISH_COUNT = new AtomicLong(0);
+        private static final AtomicLong PUBLISHED_COUNT = new AtomicLong(0);
+        private static final AtomicLong SUBSCRIBE_COUNT = new AtomicLong(0);
+        private static final AtomicLong HANDLE_COUNT = new AtomicLong(0);
+
+        static void reset() {
+            PRE_PUBLISH_COUNT.set(0);
+            PUBLISHED_COUNT.set(0);
+            SUBSCRIBE_COUNT.set(0);
+            HANDLE_COUNT.set(0);
+        }
+
+        static long prePublishCount() {
+            return PRE_PUBLISH_COUNT.get();
+        }
+
+        static long publishedCount() {
+            return PUBLISHED_COUNT.get();
+        }
+
+        static long subscribeCount() {
+            return SUBSCRIBE_COUNT.get();
+        }
+
+        static long handleCount() {
+            return HANDLE_COUNT.get();
+        }
+
+        @Override
+        public Object create(ConnectorOptions options) {
+            return new ForeignObservationCollector() {
+                @Override
+                public Object prePublish(String stream, ForeignMessage message) {
+                    PRE_PUBLISH_COUNT.incrementAndGet();
+                    return null;
+                }
+
+                @Override
+                public void published(Object context, ForeignMessage message) {
+                    PUBLISHED_COUNT.incrementAndGet();
+                }
+
+                @Override
+                public ForeignMessageHandler subscribe(ForeignMessageHandler handler) {
+                    SUBSCRIBE_COUNT.incrementAndGet();
+                    return (context, message) -> {
+                        HANDLE_COUNT.incrementAndGet();
+                        handler.handle(context, message);
+                    };
+                }
+            };
         }
     }
 

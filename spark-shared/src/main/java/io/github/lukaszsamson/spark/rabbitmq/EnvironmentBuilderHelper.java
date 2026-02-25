@@ -18,6 +18,9 @@ import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.TrustManagerFactory;
 import java.io.FileInputStream;
 import java.io.IOException;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.security.GeneralSecurityException;
@@ -166,12 +169,8 @@ final class EnvironmentBuilderHelper {
                         "Class specified by '" + ConnectorOptions.OBSERVATION_COLLECTOR_CLASS +
                                 "' returned null ObservationCollector");
             }
-            if (!(collectorObject instanceof com.rabbitmq.stream.ObservationCollector<?> collector)) {
-                throw new IllegalArgumentException(
-                        "Class specified by '" + ConnectorOptions.OBSERVATION_COLLECTOR_CLASS +
-                                "' returned unsupported type '" + collectorObject.getClass().getName() +
-                                "', expected com.rabbitmq.stream.ObservationCollector");
-            }
+            com.rabbitmq.stream.ObservationCollector<?> collector =
+                    toObservationCollector(collectorObject);
             builder.observationCollector(collector);
             return;
         }
@@ -193,6 +192,107 @@ final class EnvironmentBuilderHelper {
                 .build());
         LOG.info("Configured RabbitMQ stream Micrometer observation collector from '{}'",
                 ConnectorOptions.OBSERVATION_REGISTRY_PROVIDER_CLASS);
+    }
+
+    private static com.rabbitmq.stream.ObservationCollector<?> toObservationCollector(
+            Object collectorObject) {
+        if (collectorObject instanceof com.rabbitmq.stream.ObservationCollector<?> collector) {
+            return collector;
+        }
+        if (!hasMethod(collectorObject.getClass(), "prePublish", 2)
+                || !hasMethod(collectorObject.getClass(), "published", 2)
+                || !hasMethod(collectorObject.getClass(), "subscribe", 1)) {
+            throw new IllegalArgumentException(
+                    "Class specified by '" + ConnectorOptions.OBSERVATION_COLLECTOR_CLASS +
+                            "' returned unsupported type '" + collectorObject.getClass().getName() +
+                            "', expected com.rabbitmq.stream.ObservationCollector");
+        }
+
+        Object bridged = createInterfaceBridge(
+                com.rabbitmq.stream.ObservationCollector.class,
+                collectorObject);
+        @SuppressWarnings("unchecked")
+        com.rabbitmq.stream.ObservationCollector<?> collector =
+                (com.rabbitmq.stream.ObservationCollector<?>) bridged;
+        return collector;
+    }
+
+    private static boolean hasMethod(Class<?> type, String name, int parameterCount) {
+        for (Method method : type.getMethods()) {
+            if (method.getName().equals(name) && method.getParameterCount() == parameterCount) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static Object createInterfaceBridge(Class<?> targetInterface, Object delegate) {
+        return Proxy.newProxyInstance(
+                targetInterface.getClassLoader(),
+                new Class<?>[] {targetInterface},
+                (proxy, method, args) -> invokeBridgedMethod(delegate, method, args));
+    }
+
+    private static Object invokeBridgedMethod(Object delegate, Method method, Object[] args)
+            throws Throwable {
+        if (method.getDeclaringClass() == Object.class) {
+            return method.invoke(delegate, args);
+        }
+
+        Method delegateMethod = findByNameAndArity(delegate.getClass(), method);
+        if (delegateMethod == null) {
+            throw new IllegalArgumentException(
+                    "Could not bridge method '" + method.getName() + "' for type '" +
+                            delegate.getClass().getName() + "'");
+        }
+
+        Object[] sourceArgs = args == null ? new Object[0] : args;
+        Object[] adaptedArgs = adaptArguments(sourceArgs, delegateMethod.getParameterTypes());
+        try {
+            Object result = delegateMethod.invoke(delegate, adaptedArgs);
+            return adaptValue(result, method.getReturnType());
+        } catch (InvocationTargetException e) {
+            throw e.getCause();
+        }
+    }
+
+    private static Method findByNameAndArity(Class<?> delegateType, Method method) {
+        for (Method candidate : delegateType.getMethods()) {
+            if (candidate.getName().equals(method.getName())
+                    && candidate.getParameterCount() == method.getParameterCount()) {
+                return candidate;
+            }
+        }
+        return null;
+    }
+
+    private static Object[] adaptArguments(Object[] values, Class<?>[] targetTypes) {
+        Object[] adapted = new Object[targetTypes.length];
+        for (int i = 0; i < targetTypes.length; i++) {
+            adapted[i] = adaptValue(values[i], targetTypes[i]);
+        }
+        return adapted;
+    }
+
+    private static Object adaptValue(Object value, Class<?> targetType) {
+        if (value == null) {
+            return null;
+        }
+        if (targetType == Void.TYPE || targetType == Void.class) {
+            return null;
+        }
+        if (targetType.isInstance(value)) {
+            return value;
+        }
+        if (targetType.isPrimitive()) {
+            return value;
+        }
+        if (targetType.isInterface()) {
+            return createInterfaceBridge(targetType, value);
+        }
+        throw new IllegalArgumentException(
+                "Cannot adapt value of type '" + value.getClass().getName() +
+                        "' to '" + targetType.getName() + "'");
     }
 
     private static void configureCompressionCodecFactory(EnvironmentBuilder builder,

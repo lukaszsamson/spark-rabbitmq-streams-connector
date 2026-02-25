@@ -742,7 +742,7 @@ class BaseRabbitMQMicroBatchStream
         // For single-stream mode, a non-null checkpoint start offset missing stream entries
         // cannot make progress: planner intentionally skips such streams to avoid backfill.
         // Keep latestOffset aligned with planner and return the stable start instead.
-        if (start != null && !options.isSuperStreamMode()) {
+        if (start != null && !options.isSuperStreamMode() && !startMap.isEmpty()) {
             LinkedHashMap<String, Long> checkpointStreams = new LinkedHashMap<>();
             LinkedHashMap<String, Long> checkpointTails = new LinkedHashMap<>();
             for (Map.Entry<String, Long> entry : startMap.entrySet()) {
