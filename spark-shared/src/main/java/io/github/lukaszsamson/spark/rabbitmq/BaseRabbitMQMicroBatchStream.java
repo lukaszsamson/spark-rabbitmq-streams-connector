@@ -356,6 +356,7 @@ class BaseRabbitMQMicroBatchStream
 
         RabbitMQStreamOffset startOffset = (RabbitMQStreamOffset) start;
         RabbitMQStreamOffset endOffset = (RabbitMQStreamOffset) end;
+        boolean availableNowActive = availableNowSnapshot != null;
 
         // Collect validated per-stream ranges
         Map<String, long[]> validRanges = new LinkedHashMap<>();
@@ -432,6 +433,10 @@ class BaseRabbitMQMicroBatchStream
 
         LOG.info("Planned {} input partitions for micro-batch [{} → {}]",
                 partitions.size(), start, end);
+        if (availableNowActive) {
+            LOG.debug("availableNow planInputPartitions: start={}, end={}, partitions={}",
+                    startOffset.getStreamOffsets(), endOffset.getStreamOffsets(), partitions.size());
+        }
         return partitions.toArray(new InputPartition[0]);
     }
 
@@ -725,12 +730,40 @@ class BaseRabbitMQMicroBatchStream
         RabbitMQStreamOffset start = startOffset == null
                 ? null
                 : (RabbitMQStreamOffset) startOffset;
+        boolean availableNowActive = availableNowSnapshot != null;
         Map<String, Long> startMap = start == null
                 ? Map.of()
                 : start.getStreamOffsets();
         Map<String, Long> effectiveStartMap = new LinkedHashMap<>(startMap);
         for (String stream : tailOffsets.keySet()) {
             effectiveStartMap.computeIfAbsent(stream, this::resolveStartingOffset);
+        }
+
+        // For single-stream mode, a non-null checkpoint start offset missing stream entries
+        // cannot make progress: planner intentionally skips such streams to avoid backfill.
+        // Keep latestOffset aligned with planner and return the stable start instead.
+        if (start != null && !options.isSuperStreamMode()) {
+            LinkedHashMap<String, Long> checkpointStreams = new LinkedHashMap<>();
+            LinkedHashMap<String, Long> checkpointTails = new LinkedHashMap<>();
+            for (Map.Entry<String, Long> entry : startMap.entrySet()) {
+                String stream = entry.getKey();
+                Long tail = tailOffsets.get(stream);
+                if (tail != null) {
+                    checkpointStreams.put(stream, entry.getValue());
+                    checkpointTails.put(stream, tail);
+                }
+            }
+            if (checkpointTails.isEmpty()) {
+                LOG.warn("Checkpoint start offset {} has no streams matching current topology; "
+                                + "returning stable start to avoid no-progress micro-batches",
+                        startMap.keySet());
+                cachedLatestOffset = start;
+                cachedTailOffset = new RabbitMQStreamOffset(Map.of());
+                cacheLatestOffsetInvocation(startOffset, limit, start, cachedTailOffset);
+                return start;
+            }
+            effectiveStartMap = checkpointStreams;
+            tailOffsets = checkpointTails;
         }
 
         // Ensure tail offsets never go backwards due to failed per-stream queries
@@ -798,6 +831,10 @@ class BaseRabbitMQMicroBatchStream
         RabbitMQStreamOffset latest = new RabbitMQStreamOffset(endOffsets);
         cachedLatestOffset = latest;
         cacheLatestOffsetInvocation(startOffset, limit, latest, cachedTailOffset);
+        if (availableNowActive) {
+            LOG.debug("availableNow latestOffset: start={}, tail={}, end={}, limit={}",
+                    startMap, tailOffsets, endOffsets, readLimitCacheKey(limit));
+        }
         return latest;
     }
 
@@ -1494,7 +1531,12 @@ class BaseRabbitMQMicroBatchStream
     }
 
     private long mergeTailOffsetsForAvailableNow(long statsTail, long probedTail) {
-        return Math.max(statsTail, probedTail);
+        if (probedTail >= 0L) {
+            // Prefer the direct last-message probe for AvailableNow boundaries:
+            // it reflects an observed end-of-stream and avoids phantom +1 tails.
+            return probedTail;
+        }
+        return statsTail;
     }
 
     /**

@@ -831,6 +831,25 @@ class RabbitMQMicroBatchStreamTest {
         }
 
         @Test
+        void latestOffsetWithCheckpointMissingStreamsStaysStableInSingleStreamMode() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("startingOffsets", "offset");
+            opts.put("startingOffset", "100");
+            opts.put("maxRecordsPerTrigger", "500");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            setPrivateField(stream, "availableNowSnapshot", Map.of("test-stream", 1000L));
+
+            RabbitMQStreamOffset resumedStart = new RabbitMQStreamOffset(Map.of());
+            RabbitMQStreamOffset latest = (RabbitMQStreamOffset) stream.latestOffset(
+                    resumedStart, ReadLimit.maxRows(500));
+
+            assertThat(latest).isEqualTo(resumedStart);
+        }
+
+        @Test
         @Tag("spark4x")
         void compositeReadLimitAppliesMostRestrictivePerStream() throws Exception {
             RabbitMQMicroBatchStream stream = createStream(minimalOptions());
@@ -1011,6 +1030,22 @@ class RabbitMQMicroBatchStreamTest {
                     new RabbitMQStreamOffset(Map.of("test-stream", 0L)),
                     ReadLimit.allAvailable());
             assertThat(latest.getStreamOffsets()).containsEntry("test-stream", 15L);
+        }
+
+        @Test
+        void queryTailOffsetsForAvailableNowPrefersProbeWhenStatsOvershoot() throws Exception {
+            RabbitMQMicroBatchStream stream = createStream(minimalOptions());
+            // stats tail => 401, direct last-message probe tail => 400
+            setPrivateField(stream, "environment",
+                    new ProbeCountingEnvironment(400L, java.util.List.of(399L)));
+            setPrivateField(stream, "availableNowSnapshot", null);
+
+            stream.prepareForTriggerAvailableNow();
+
+            RabbitMQStreamOffset latest = (RabbitMQStreamOffset) stream.latestOffset(
+                    new RabbitMQStreamOffset(Map.of("test-stream", 400L)),
+                    ReadLimit.allAvailable());
+            assertThat(latest.getStreamOffsets()).containsEntry("test-stream", 400L);
         }
 
         @Test

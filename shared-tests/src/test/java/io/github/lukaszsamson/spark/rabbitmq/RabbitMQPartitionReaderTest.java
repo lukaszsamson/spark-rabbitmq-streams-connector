@@ -1546,6 +1546,34 @@ class RabbitMQPartitionReaderTest {
         return (OffsetSpecification) method.invoke(reader, configuredOffsetSpec);
     }
 
+    @Nested
+    class FlowCredits {
+
+        @Test
+        void computeEffectiveInitialCreditsScalesToFinitePlannedRange() {
+            int effective = BaseRabbitMQPartitionReader.computeEffectiveInitialCredits(
+                    10, 10_000, 100L, 600L);
+
+            assertThat(effective).isEqualTo(500);
+        }
+
+        @Test
+        void computeEffectiveInitialCreditsKeepsConfiguredForUnboundedRanges() {
+            int effective = BaseRabbitMQPartitionReader.computeEffectiveInitialCredits(
+                    10, 10_000, 100L, Long.MAX_VALUE);
+
+            assertThat(effective).isEqualTo(10);
+        }
+
+        @Test
+        void computeEffectiveInitialCreditsCapsToQueueCapacity() {
+            int effective = BaseRabbitMQPartitionReader.computeEffectiveInitialCredits(
+                    10, 250, 0L, 2_000L);
+
+            assertThat(effective).isEqualTo(250);
+        }
+    }
+
     private static boolean isPlannedRangeNoLongerReachableDueToDataLoss(
             RabbitMQPartitionReader reader) throws Exception {
         Method method = findMethod(RabbitMQPartitionReader.class,

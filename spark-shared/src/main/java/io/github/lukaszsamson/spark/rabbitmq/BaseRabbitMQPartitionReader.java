@@ -382,6 +382,7 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
         }
 
         OffsetSpecification offsetSpec = resolveOffsetSpec();
+        int effectiveInitialCredits = resolveEffectiveInitialCredits();
 
         ConsumerBuilder builder = environment.consumerBuilder()
                 .stream(stream)
@@ -389,9 +390,9 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
                 .noTrackingStrategy()
                 .messageHandler(this::enqueueFromCallback)
                 .flow()
-                .initialCredits(options.getInitialCredits())
+                .initialCredits(effectiveInitialCredits)
                 .strategy(ConsumerFlowStrategy.creditWhenHalfMessagesProcessed(
-                        options.getInitialCredits()))
+                        effectiveInitialCredits))
                 .builder();
         builder.subscriptionListener(context -> context.offsetSpecification(
                 resolveSubscriptionOffsetSpec(context.offsetSpecification(), offsetSpec)));
@@ -456,6 +457,32 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
 
         LOG.info("Opened consumer for stream '{}' with offsets [{}, {})",
                 stream, startOffset, endOffset);
+    }
+
+    int resolveEffectiveInitialCredits() {
+        return computeEffectiveInitialCredits(
+                options.getInitialCredits(), options.getQueueCapacity(), startOffset, endOffset);
+    }
+
+    static int computeEffectiveInitialCredits(
+            int configuredInitialCredits,
+            int queueCapacity,
+            long startOffset,
+            long endOffset) {
+        int configured = Math.max(1, configuredInitialCredits);
+        int capacity = Math.max(1, queueCapacity);
+        if (endOffset <= startOffset || endOffset == Long.MAX_VALUE) {
+            return Math.min(configured, capacity);
+        }
+
+        long plannedRange = endOffset - startOffset;
+        long boundedRange = Math.min((long) capacity, plannedRange);
+        if (boundedRange <= 0L) {
+            return Math.min(configured, capacity);
+        }
+
+        long effective = Math.max(configured, boundedRange);
+        return (int) Math.min(Integer.MAX_VALUE, effective);
     }
 
     void enqueueFromCallback(MessageHandler.Context context, Message message) {
