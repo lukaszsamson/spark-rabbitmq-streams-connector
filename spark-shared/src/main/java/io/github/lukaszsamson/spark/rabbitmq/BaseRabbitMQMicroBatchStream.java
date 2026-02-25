@@ -1086,7 +1086,9 @@ class BaseRabbitMQMicroBatchStream
     synchronized List<String> discoverStreams() {
         if (options.isStreamMode()) {
             if (streams == null) {
-                streams = List.of(options.getStream());
+                String configuredStream = options.getStream();
+                validateConfiguredStreamExists(configuredStream);
+                streams = List.of(configuredStream);
             }
             return streams;
         }
@@ -1143,6 +1145,20 @@ class BaseRabbitMQMicroBatchStream
                             "' has no partition streams");
         }
         return streams;
+    }
+
+    private void validateConfiguredStreamExists(String stream) {
+        try {
+            getEnvironment().queryStreamStats(stream);
+        } catch (NoOffsetException ignored) {
+            // Stream exists but is currently empty.
+        } catch (StreamDoesNotExistException e) {
+            throw new IllegalStateException(
+                    "Configured stream '" + stream + "' does not exist. Verify the stream name is correct.", e);
+        } catch (Exception e) {
+            throw new IllegalStateException(
+                    "Failed to validate configured stream '" + stream + "'", e);
+        }
     }
 
     Environment getEnvironment() {
@@ -1751,12 +1767,23 @@ class BaseRabbitMQMicroBatchStream
     }
 
     private Map<String, Long> loadCommittedOffsetsFromCheckpoint() {
-        Path checkpointPath = toLocalCheckpointPath();
-        if (checkpointPath == null) {
+        Path sourceCheckpointPath = toLocalCheckpointPath();
+        if (sourceCheckpointPath == null) {
             return null;
         }
-        Path commitsDir = checkpointPath.resolve("commits");
-        Path offsetsDir = checkpointPath.resolve("offsets");
+        CheckpointOffsetContext context = resolveCheckpointOffsetContext(sourceCheckpointPath);
+        if (context == null) {
+            return null;
+        }
+        if (context.sourceIndex() == null) {
+            LOG.debug("Skipping stop-time checkpoint offset fallback for '{}' because source index " +
+                            "cannot be derived from checkpoint path",
+                    checkpointLocation);
+            return null;
+        }
+
+        Path commitsDir = context.queryCheckpointPath().resolve("commits");
+        Path offsetsDir = context.queryCheckpointPath().resolve("offsets");
         if (!Files.isDirectory(commitsDir) || !Files.isDirectory(offsetsDir)) {
             return null;
         }
@@ -1782,29 +1809,77 @@ class BaseRabbitMQMicroBatchStream
                 knownStreams.addAll(discovered);
             }
 
-            for (int i = 2; i < lines.size(); i++) {
-                String raw = lines.get(i).trim();
-                if (raw.isEmpty() || "-".equals(raw)) {
-                    continue;
-                }
-                try {
-                    Map<String, Long> parsed = RabbitMQStreamOffset.fromJson(raw).getStreamOffsets();
-                    if (parsed.isEmpty()) {
-                        continue;
-                    }
-                    if (!knownStreams.isEmpty() && Collections.disjoint(knownStreams, parsed.keySet())) {
-                        continue;
-                    }
-                    return new LinkedHashMap<>(parsed);
-                } catch (RuntimeException ignored) {
-                    // Not this source's offset line.
-                }
+            int lineIndex = 2 + context.sourceIndex();
+            if (lineIndex >= lines.size()) {
+                return null;
+            }
+            Map<String, Long> parsed = parseCheckpointOffsetLine(lines.get(lineIndex), knownStreams);
+            if (parsed != null) {
+                return parsed;
             }
         } catch (Exception e) {
             LOG.debug("Unable to load committed offsets from checkpoint '{}': {}",
                     checkpointLocation, e.toString());
         }
         return null;
+    }
+
+    private Map<String, Long> parseCheckpointOffsetLine(
+            String line,
+            Set<String> knownStreams) {
+        String raw = line == null ? "" : line.trim();
+        if (raw.isEmpty() || "-".equals(raw)) {
+            return null;
+        }
+        try {
+            Map<String, Long> parsed = RabbitMQStreamOffset.fromJson(raw).getStreamOffsets();
+            if (parsed.isEmpty()) {
+                return null;
+            }
+            if (!knownStreams.isEmpty() && Collections.disjoint(knownStreams, parsed.keySet())) {
+                return null;
+            }
+            return new LinkedHashMap<>(parsed);
+        } catch (RuntimeException ignored) {
+            return null;
+        }
+    }
+
+    private CheckpointOffsetContext resolveCheckpointOffsetContext(Path sourceCheckpointPath) {
+        Path fileNamePath = sourceCheckpointPath.getFileName();
+        Path parent = sourceCheckpointPath.getParent();
+        if (fileNamePath != null && parent != null) {
+            String fileName = fileNamePath.toString();
+            String parentName = parent.getFileName() != null ? parent.getFileName().toString() : "";
+            Integer sourceIndex = parseNonNegativeInt(fileName);
+            if (sourceIndex != null && "sources".equals(parentName)) {
+                Path queryCheckpointPath = parent.getParent();
+                if (queryCheckpointPath == null) {
+                    return null;
+                }
+                return new CheckpointOffsetContext(queryCheckpointPath, sourceIndex);
+            }
+        }
+        return new CheckpointOffsetContext(sourceCheckpointPath, null);
+    }
+
+    private Integer parseNonNegativeInt(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        for (int i = 0; i < value.length(); i++) {
+            if (!Character.isDigit(value.charAt(i))) {
+                return null;
+            }
+        }
+        try {
+            return Integer.parseInt(value);
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    private record CheckpointOffsetContext(Path queryCheckpointPath, Integer sourceIndex) {
     }
 
     private Path toLocalCheckpointPath() {

@@ -236,7 +236,7 @@ By default, unrecognized columns cause an error. Set `ignoreUnknownColumns=true`
 | `pollTimeoutMs` | long | 30000 | Queue poll timeout per pull |
 | `maxWaitMs` | long | 300000 | Max wait before failing a reader task |
 | `callbackEnqueueTimeoutMs` | long | 5000 | Callback enqueue timeout |
-| `initialCredits` | int | 1 | Initial chunk credits |
+| `initialCredits` | int | 10 | Initial chunk credits |
 | `queueCapacity` | int | 10000 | Internal queue capacity (messages) |
 | `estimatedMessageSizeBytes` | int | 1024 | Initial message size estimate for byte-based limits |
 
@@ -327,7 +327,7 @@ The connector discovers superstream partitions from broker metadata at planning 
 
 ### Backpressure
 
-The connector uses credit-based flow control. Each reader starts with `initialCredits` (default 1) chunk credits and grants additional credits as the internal queue drains. Queue capacity (`queueCapacity`, default 10000) bounds memory usage.
+The connector uses credit-based flow control. Each reader starts with `initialCredits` (default 10) chunk credits and grants additional credits as the internal queue drains. Queue capacity (`queueCapacity`, default 10000) bounds memory usage. For high-throughput historical catch-up, increasing `initialCredits` can improve ingestion rate.
 
 ### `failOnDataLoss`
 

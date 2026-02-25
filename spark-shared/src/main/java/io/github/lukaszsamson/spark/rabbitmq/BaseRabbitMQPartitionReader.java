@@ -191,13 +191,6 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
                 }
                 totalWaitMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - waitStartNanos);
                 if (totalWaitMs >= maxWaitMs) {
-                    if (timestampStart) {
-                        LOG.warn("Reached maxWaitMs={} while reading filtered stream '{}'; " +
-                                        "terminating split early at lastObservedOffset={} for planned endOffset={}",
-                                maxWaitMs, stream, lastObservedOffset, endOffset);
-                        finished = true;
-                        return false;
-                    }
                     if (brokerFilterConfigured && hasStreamTailReachedPlannedEnd()) {
                         LOG.warn("Reached maxWaitMs={} while reading filtered stream '{}'; " +
                                         "tail indicates planned end reached at lastObservedOffset={} for endOffset={}",
@@ -210,14 +203,6 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
                                         "reachable after data loss/recreation; completing split because failOnDataLoss=false",
                                 maxWaitMs, stream, startOffset, endOffset);
                         dataLoss++;
-                        finished = true;
-                        return false;
-                    }
-                    if (brokerFilterConfigured && lastObservedOffset >= startOffset) {
-                        LOG.warn("Reached maxWaitMs={} while reading filtered stream '{}'; " +
-                                        "observed in-range offsets and no additional matching records arrived " +
-                                        "(lastObservedOffset={}, planned endOffset={}). Completing split.",
-                                maxWaitMs, stream, lastObservedOffset, endOffset);
                         finished = true;
                         return false;
                     }
@@ -524,7 +509,13 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
             return consumerName;
         }
         if (options.isSuperStreamMode()) {
-            return consumerName + "-" + stream;
+            String resolved = consumerName + "-" + stream;
+            if (resolved.length() > ConnectorOptions.MAX_BROKER_REFERENCE_LENGTH) {
+                throw new IllegalArgumentException(
+                        "Derived single-active-consumer name must be shorter than 256 characters, got: "
+                                + resolved.length() + " (" + consumerName + "-<stream>)");
+            }
+            return resolved;
         }
         return consumerName;
     }

@@ -387,7 +387,7 @@ class RabbitMQPartitionReaderTest {
         }
 
         @Test
-        void nextTimestampInitialSplitWithoutInRangeDataTerminatesInsteadOfTimingOut() throws Exception {
+        void nextTimestampInitialSplitWithoutTailProofTimesOut() throws Exception {
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
             opts.put("stream", "test-stream");
@@ -403,13 +403,13 @@ class RabbitMQPartitionReaderTest {
             setPrivateField(reader, "consumer", new NoopConsumer());
             setPrivateField(reader, "queue", new LinkedBlockingQueue<>());
 
-            // Regression: initial timestamp-seek split can legitimately have no in-range rows.
-            // It must terminate cleanly instead of failing the whole batch with timeout.
-            assertThat(reader.next()).isFalse();
+            assertThatThrownBy(reader::next)
+                    .isInstanceOf(IOException.class)
+                    .hasMessageContaining("Timed out waiting for messages");
         }
 
         @Test
-        void nextWithBrokerFilterCanTerminateAfterObservedInRangeProgressAndInactivity() throws Exception {
+        void nextWithBrokerFilterWithoutTailProofTimesOut() throws Exception {
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
             opts.put("stream", "test-stream");
@@ -426,9 +426,9 @@ class RabbitMQPartitionReaderTest {
             setPrivateField(reader, "queue", new LinkedBlockingQueue<>());
             setPrivateField(reader, "lastObservedOffset", 34L);
 
-            // Filtered bounded reads can legitimately stop before endOffset if no additional
-            // matching records arrive after in-range progress has been observed.
-            assertThat(reader.next()).isFalse();
+            assertThatThrownBy(reader::next)
+                    .isInstanceOf(IOException.class)
+                    .hasMessageContaining("Timed out waiting for messages");
         }
 
         @Test
@@ -473,7 +473,9 @@ class RabbitMQPartitionReaderTest {
             setPrivateField(reader, "environment", env);
 
             long startNanos = System.nanoTime();
-            assertThat(reader.next()).isFalse();
+            assertThatThrownBy(reader::next)
+                    .isInstanceOf(IOException.class)
+                    .hasMessageContaining("Timed out waiting for messages");
             long elapsedMs = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(
                     System.nanoTime() - startNanos);
 
@@ -944,9 +946,10 @@ class RabbitMQPartitionReaderTest {
             assertThat(reader.next()).isTrue();
             assertThat(reader.get().getLong(2)).isEqualTo(1L);
             long startNanos = System.nanoTime();
-            assertThat(reader.next()).isFalse();
+            assertThatThrownBy(reader::next)
+                    .isInstanceOf(IOException.class)
+                    .hasMessageContaining("Timed out waiting for messages");
             long elapsedMs = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
-            // Regression guard: this path used to block ~300s on default maxWaitMs.
             assertThat(elapsedMs).isLessThan(500L);
         }
 
@@ -1340,6 +1343,25 @@ class RabbitMQPartitionReaderTest {
 
             String resolved = resolveSingleActiveConsumerName(reader);
             assertThat(resolved).isEqualTo("sac-reader-orders-2");
+        }
+
+        @Test
+        void resolveSingleActiveConsumerNameRejectsOverlongDerivedNameForSuperstream() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("superstream", "orders");
+            opts.put("singleActiveConsumer", "true");
+            opts.put("consumerName", "c".repeat(250));
+
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "orders-2", 0, 100, new ConnectorOptions(opts), false);
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
+
+            assertThatThrownBy(() -> resolveSingleActiveConsumerName(reader))
+                    .isInstanceOf(java.lang.reflect.InvocationTargetException.class)
+                    .hasCauseInstanceOf(IllegalArgumentException.class)
+                    .satisfies(error -> assertThat(error.getCause().getMessage())
+                            .contains("shorter than 256"));
         }
 
         @Test

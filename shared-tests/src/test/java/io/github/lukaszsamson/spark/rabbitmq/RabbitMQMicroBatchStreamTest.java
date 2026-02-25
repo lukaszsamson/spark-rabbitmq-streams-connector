@@ -20,6 +20,9 @@ import com.rabbitmq.stream.codec.QpidProtonCodec;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -233,6 +236,7 @@ class RabbitMQMicroBatchStreamTest {
             opts.put("serverSideOffsetTracking", "false");
 
             RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            stream.environment = new FirstOffsetEnvironment(0L);
 
             RabbitMQStreamOffset offset = (RabbitMQStreamOffset) stream.initialOffset();
             assertThat(offset.getStreamOffsets()).containsEntry("test-stream", 42L);
@@ -254,7 +258,7 @@ class RabbitMQMicroBatchStreamTest {
 
             assertThatThrownBy(stream::initialOffset)
                     .isInstanceOf(IllegalStateException.class)
-                    .hasMessageContaining("Failed to query first offset for stream 'test-stream'");
+                    .hasMessageContaining("Failed to validate configured stream 'test-stream'");
         }
 
         @Test
@@ -272,6 +276,22 @@ class RabbitMQMicroBatchStreamTest {
 
             RabbitMQStreamOffset offset = (RabbitMQStreamOffset) stream.initialOffset();
             assertThat(offset.getStreamOffsets()).containsEntry("test-stream", 0L);
+        }
+
+        @Test
+        void initialOffsetMissingConfiguredStreamFailsFastEvenWhenFailOnDataLossFalse() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "missing-stream");
+            opts.put("failOnDataLoss", "false");
+            opts.put("serverSideOffsetTracking", "false");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            setPrivateField(stream, "environment", new MissingStreamEnvironment());
+
+            assertThatThrownBy(stream::initialOffset)
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("does not exist");
         }
 
         @Test
@@ -882,7 +902,7 @@ class RabbitMQMicroBatchStreamTest {
 
             assertThat(first.getStreamOffsets()).containsEntry("test-stream", 15L);
             assertThat(second.getStreamOffsets()).containsEntry("test-stream", 15L);
-            assertThat(env.queryStatsCalls).isEqualTo(1);
+            assertThat(env.queryStatsCalls).isEqualTo(2);
             assertThat(env.probeBuilderCalls).isEqualTo(1);
         }
 
@@ -1006,7 +1026,7 @@ class RabbitMQMicroBatchStreamTest {
             stream.prepareForTriggerAvailableNow();
 
             assertThat(env.probeBuilderCalls).isEqualTo(2);
-            assertThat(env.queryStatsCalls).isEqualTo(2);
+            assertThat(env.queryStatsCalls).isEqualTo(3);
         }
 
         @Test
@@ -1124,6 +1144,38 @@ class RabbitMQMicroBatchStreamTest {
             stream.stop();
 
             assertThat(env.recordedOffsets).containsExactly(Map.entry("test-stream", 9L));
+        }
+
+        @Test
+        void stopCheckpointFallbackUsesSourceIndexLineFromOffsetsLog() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+
+            Path queryCheckpoint = Files.createTempDirectory("rmq-checkpoint-");
+            Files.createDirectories(queryCheckpoint.resolve("commits"));
+            Files.createDirectories(queryCheckpoint.resolve("offsets"));
+            Files.createDirectories(queryCheckpoint.resolve("sources").resolve("1"));
+            Files.writeString(queryCheckpoint.resolve("commits").resolve("0"), "", StandardCharsets.UTF_8);
+            Files.write(
+                    queryCheckpoint.resolve("offsets").resolve("0"),
+                    List.of(
+                            "v1",
+                            "{\"batchWatermarkMs\":0,\"batchTimestampMs\":0,\"conf\":{}}",
+                            "{\"other-stream\":7}",
+                            "{\"test-stream\":11}"),
+                    StandardCharsets.UTF_8);
+
+            RabbitMQMicroBatchStream stream = createStream(
+                    new ConnectorOptions(opts),
+                    queryCheckpoint.resolve("sources").resolve("1").toString());
+            OffsetTrackingEnvironment env = new OffsetTrackingEnvironment();
+            setPrivateField(stream, "environment", env);
+            setPrivateField(stream, "streams", List.of("test-stream"));
+
+            stream.stop();
+
+            assertThat(env.recordedOffsets).containsExactly(Map.entry("test-stream", 10L));
         }
 
         @Test
@@ -1765,8 +1817,13 @@ class RabbitMQMicroBatchStreamTest {
     }
 
     private static RabbitMQMicroBatchStream createStream(ConnectorOptions opts) {
+        return createStream(opts, "/tmp/checkpoint");
+    }
+
+    private static RabbitMQMicroBatchStream createStream(
+            ConnectorOptions opts, String checkpointLocation) {
         var schema = RabbitMQStreamTable.buildSourceSchema(opts.getMetadataFields());
-        return new RabbitMQMicroBatchStream(opts, schema, "/tmp/checkpoint");
+        return new RabbitMQMicroBatchStream(opts, schema, checkpointLocation);
     }
 
     private static void setPrivateField(Object target, String fieldName, Object value)
