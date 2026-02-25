@@ -92,6 +92,14 @@ final class RabbitMQPartitionReader extends BaseRabbitMQPartitionReader
                     return RecordStatus.newStatusWithoutArrivalTime(false);
                 }
                 if (consumerClosed.get()) {
+                    if (!options.isFailOnDataLoss() && isPlannedRangeNoLongerReachableDueToDataLoss()) {
+                        LOG.warn("Consumer for stream '{}' closed and planned range [{}, {}) is no longer " +
+                                        "reachable; completing split because failOnDataLoss=false",
+                                stream, startOffset, endOffset);
+                        dataLoss++;
+                        finished = true;
+                        return RecordStatus.newStatusWithoutArrivalTime(false);
+                    }
                     throw new IOException(
                             "Consumer for stream '" + stream + "' closed while waiting for data");
                 }

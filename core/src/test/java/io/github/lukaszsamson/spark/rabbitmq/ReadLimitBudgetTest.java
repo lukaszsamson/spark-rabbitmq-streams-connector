@@ -216,5 +216,20 @@ class ReadLimitBudgetTest {
             assertThat(total).isEqualTo(2L);
             assertThat(result.values().stream().filter(v -> v == 1L).count()).isEqualTo(2L);
         }
+
+        @Test
+        void neverExceedsBudgetWhenFloorRoundingWouldOverAllocate() {
+            Map<String, Long> pending = new LinkedHashMap<>();
+            pending.put("big", 1000L);
+            pending.put("s1", 1L);
+            pending.put("s2", 1L);
+            pending.put("s3", 1L);
+            pending.put("s4", 1L);
+            pending.put("s5", 1L);
+
+            Map<String, Long> result = ReadLimitBudget.allocateProportionally(pending, 8);
+            long total = result.values().stream().mapToLong(Long::longValue).sum();
+            assertThat(total).isEqualTo(8L);
+        }
     }
 }

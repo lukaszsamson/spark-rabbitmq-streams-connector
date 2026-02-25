@@ -429,6 +429,31 @@ class RealTimeModeTest {
         }
 
         @Test
+        void nextWithTimeoutCompletesGracefullyOnDataLossWhenFailOnDataLossFalse()
+                throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("failOnDataLoss", "false");
+            opts.put("pollTimeoutMs", "10");
+            ConnectorOptions options = new ConnectorOptions(opts);
+
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 0, 100, options);
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(
+                    partition, partition.getOptions());
+
+            setPrivateField(reader, "consumer", new NoopConsumer());
+            setPrivateField(reader, "queue", new LinkedBlockingQueue<>());
+            setPrivateField(reader, "consumerClosed", new java.util.concurrent.atomic.AtomicBoolean(true));
+            setPrivateField(reader, "environment", new MissingStreamEnvironment());
+
+            SupportsRealTimeRead.RecordStatus status = reader.nextWithTimeout(50L);
+            assertThat(status.hasRecord()).isFalse();
+            assertThat((long) getPrivateField(reader, "dataLoss")).isEqualTo(1L);
+        }
+
+        @Test
         void nextWithTimeoutReturnsRecordWhenAvailable() throws Exception {
             RabbitMQInputPartition partition = new RabbitMQInputPartition(
                     "test-stream", 0, Long.MAX_VALUE, minimalOptions());
@@ -681,6 +706,13 @@ class RealTimeModeTest {
         @Override
         public StreamStats queryStreamStats(String stream) {
             throw new NoOffsetException("empty");
+        }
+    }
+
+    private static final class MissingStreamEnvironment extends NoOpEnvironment {
+        @Override
+        public StreamStats queryStreamStats(String stream) {
+            throw new IllegalStateException("STREAM_DOES_NOT_EXIST");
         }
     }
 

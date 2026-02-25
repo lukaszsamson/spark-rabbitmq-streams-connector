@@ -126,10 +126,71 @@ public final class RabbitMQStreamOffset extends Offset {
     }
 
     private static String escapeJson(String s) {
-        return s.replace("\\", "\\\\").replace("\"", "\\\"");
+        StringBuilder out = new StringBuilder(s.length() + 8);
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            switch (c) {
+                case '"' -> out.append("\\\"");
+                case '\\' -> out.append("\\\\");
+                case '\b' -> out.append("\\b");
+                case '\f' -> out.append("\\f");
+                case '\n' -> out.append("\\n");
+                case '\r' -> out.append("\\r");
+                case '\t' -> out.append("\\t");
+                default -> {
+                    if (c < 0x20) {
+                        out.append("\\u");
+                        String hex = Integer.toHexString(c);
+                        for (int j = hex.length(); j < 4; j++) {
+                            out.append('0');
+                        }
+                        out.append(hex);
+                    } else {
+                        out.append(c);
+                    }
+                }
+            }
+        }
+        return out.toString();
     }
 
     private static String unescapeJson(String s) {
-        return s.replace("\\\\", "\\").replace("\\\"", "\"");
+        StringBuilder out = new StringBuilder(s.length());
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c != '\\') {
+                out.append(c);
+                continue;
+            }
+            if (i + 1 >= s.length()) {
+                throw new IllegalArgumentException("Malformed escaped JSON string");
+            }
+            char esc = s.charAt(++i);
+            switch (esc) {
+                case '"' -> out.append('"');
+                case '\\' -> out.append('\\');
+                case '/' -> out.append('/');
+                case 'b' -> out.append('\b');
+                case 'f' -> out.append('\f');
+                case 'n' -> out.append('\n');
+                case 'r' -> out.append('\r');
+                case 't' -> out.append('\t');
+                case 'u' -> {
+                    if (i + 4 >= s.length()) {
+                        throw new IllegalArgumentException("Malformed unicode escape in JSON string");
+                    }
+                    String hex = s.substring(i + 1, i + 5);
+                    try {
+                        out.append((char) Integer.parseInt(hex, 16));
+                    } catch (NumberFormatException e) {
+                        throw new IllegalArgumentException(
+                                "Malformed unicode escape in JSON string", e);
+                    }
+                    i += 4;
+                }
+                default -> throw new IllegalArgumentException("Malformed escaped JSON string");
+            }
+        }
+        return out.toString();
     }
 }

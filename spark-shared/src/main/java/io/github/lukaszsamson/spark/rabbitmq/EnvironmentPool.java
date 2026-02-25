@@ -197,14 +197,14 @@ final class EnvironmentPool {
                 pool.remove(key, entry);
                 return null;
             }
-            entry.refCount.set(current + 1);
+            int updated = entry.refCount.incrementAndGet();
             ScheduledFuture<?> eviction = entry.evictionTask;
             if (eviction != null) {
                 eviction.cancel(false);
                 entry.evictionTask = null;
             }
             LOG.debug("Reusing pooled environment for key {}, refCount={}",
-                    key.endpoints(), current + 1);
+                    key.endpoints(), updated);
         }
 
         try {

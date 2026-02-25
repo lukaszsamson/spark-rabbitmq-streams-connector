@@ -496,11 +496,12 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
         }
 
         long effective = Math.max(configured, boundedRange);
-        return (int) Math.min(Integer.MAX_VALUE, effective);
+        return (int) Math.min(capacity, Math.min(Integer.MAX_VALUE, effective));
     }
 
     void enqueueFromCallback(MessageHandler.Context context, Message message) {
         if (context.offset() >= endOffset) {
+            context.processed();
             return;
         }
         try {

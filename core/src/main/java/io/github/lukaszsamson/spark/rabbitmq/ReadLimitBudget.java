@@ -238,6 +238,29 @@ public final class ReadLimitBudget {
             allocated += floor;
         }
 
+        // Guard against over-allocation from min-per-stream floor rounding.
+        if (allocated > budget) {
+            long toTrim = allocated - budget;
+            List<String> trimOrder = fractional.entrySet().stream()
+                    .sorted(Map.Entry.<String, Double>comparingByValue())
+                    .map(Map.Entry::getKey)
+                    .toList();
+            for (String stream : trimOrder) {
+                if (toTrim <= 0) {
+                    break;
+                }
+                long current = allocation.getOrDefault(stream, 0L);
+                long removable = Math.max(0L, current - 1L);
+                if (removable <= 0) {
+                    continue;
+                }
+                long trim = Math.min(removable, toTrim);
+                allocation.put(stream, current - trim);
+                toTrim -= trim;
+            }
+            allocated = budget - toTrim;
+        }
+
         // Distribute remainder by largest fractional share
         long remaining = budget - allocated;
         if (remaining > 0) {

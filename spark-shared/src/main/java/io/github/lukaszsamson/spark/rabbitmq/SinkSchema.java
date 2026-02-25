@@ -8,6 +8,7 @@ import org.apache.spark.sql.types.StructType;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.Locale;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -75,7 +76,7 @@ public final class SinkSchema {
 
         // Check types of known columns
         for (StructField field : inputSchema.fields()) {
-            String name = field.name().toLowerCase();
+            String name = field.name().toLowerCase(Locale.ROOT);
             DataType expectedType = VALID_COLUMNS.get(name);
             if (expectedType != null) {
                 validateColumnType(name, field.dataType(), expectedType);
@@ -86,7 +87,7 @@ public final class SinkSchema {
         if (!ignoreUnknownColumns) {
             List<String> unknownColumns = new ArrayList<>();
             for (StructField field : inputSchema.fields()) {
-                if (!VALID_COLUMNS.containsKey(field.name().toLowerCase())) {
+                if (!VALID_COLUMNS.containsKey(field.name().toLowerCase(Locale.ROOT))) {
                     unknownColumns.add(field.name());
                 }
             }
@@ -139,10 +140,10 @@ public final class SinkSchema {
     private static void validatePropertiesStruct(StructType actual, StructType expected) {
         Map<String, DataType> expectedFields = new LinkedHashMap<>();
         for (StructField field : expected.fields()) {
-            expectedFields.put(field.name().toLowerCase(), field.dataType());
+            expectedFields.put(field.name().toLowerCase(Locale.ROOT), field.dataType());
         }
         for (StructField field : actual.fields()) {
-            String fieldName = field.name().toLowerCase();
+            String fieldName = field.name().toLowerCase(Locale.ROOT);
             DataType expectedType = expectedFields.get(fieldName);
             if (expectedType == null) {
                 throw new IllegalArgumentException(

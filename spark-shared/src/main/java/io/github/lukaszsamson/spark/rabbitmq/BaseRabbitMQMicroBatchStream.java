@@ -60,6 +60,7 @@ class BaseRabbitMQMicroBatchStream
 
     /** Timeout for broker offset commit (best-effort, Spark checkpoint is source of truth). */
     static final int COMMIT_TIMEOUT_SECONDS = 30;
+    static final long STOP_EXECUTOR_AWAIT_SECONDS = 3L;
     /** Reuse full latestOffset() results briefly to keep per-trigger planning stable. */
     static final long LATEST_OFFSET_RESULT_CACHE_WINDOW_MS = 250L;
     static final long TAIL_PROBE_WAIT_MS = 250L;
@@ -330,6 +331,8 @@ class BaseRabbitMQMicroBatchStream
 
         brokerCommitExecutor.shutdownNow();
         tailQueryExecutor.shutdownNow();
+        awaitExecutorTermination("brokerCommitExecutor", brokerCommitExecutor);
+        awaitExecutorTermination("tailQueryExecutor", tailQueryExecutor);
         MessageSizeTracker.clear(messageSizeTrackerScope);
         if (environment != null) {
             try {
@@ -338,6 +341,17 @@ class BaseRabbitMQMicroBatchStream
                 LOG.warn("Error closing environment", e);
             }
             environment = null;
+        }
+    }
+
+    private void awaitExecutorTermination(String name, ExecutorService executor) {
+        try {
+            if (!executor.awaitTermination(STOP_EXECUTOR_AWAIT_SECONDS, TimeUnit.SECONDS)) {
+                LOG.debug("{} did not terminate within {} seconds", name, STOP_EXECUTOR_AWAIT_SECONDS);
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            LOG.debug("Interrupted while awaiting {} termination", name);
         }
     }
 

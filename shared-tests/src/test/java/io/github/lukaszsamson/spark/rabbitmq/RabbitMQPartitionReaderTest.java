@@ -1596,6 +1596,14 @@ class RabbitMQPartitionReaderTest {
 
             assertThat(effective).isEqualTo(250);
         }
+
+        @Test
+        void computeEffectiveInitialCreditsCapsConfiguredToQueueCapacityForFiniteRange() {
+            int effective = BaseRabbitMQPartitionReader.computeEffectiveInitialCredits(
+                    10_000, 250, 0L, 100L);
+
+            assertThat(effective).isEqualTo(250);
+        }
     }
 
     private static boolean isPlannedRangeNoLongerReachableDueToDataLoss(

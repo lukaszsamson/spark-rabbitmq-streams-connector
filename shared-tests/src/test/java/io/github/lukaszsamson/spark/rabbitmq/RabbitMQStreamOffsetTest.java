@@ -101,6 +101,21 @@ class RabbitMQStreamOffsetTest {
         }
 
         @Test
+        void roundTripStreamNameContainingControlCharacters() {
+            String stream = "line1\nline2\t\r\b\f";
+            RabbitMQStreamOffset original = new RabbitMQStreamOffset(Map.of(stream, 9L));
+            RabbitMQStreamOffset parsed = RabbitMQStreamOffset.fromJson(original.json());
+            assertThat(parsed).isEqualTo(original);
+        }
+
+        @Test
+        void parseUnicodeEscapedStreamName() {
+            RabbitMQStreamOffset parsed =
+                    RabbitMQStreamOffset.fromJson("{\"name\\u000Awith\\u0009escape\":1}");
+            assertThat(parsed.getStreamOffsets()).containsEntry("name\nwith\tescape", 1L);
+        }
+
+        @Test
         void roundTripEmptyOffset() {
             RabbitMQStreamOffset original = new RabbitMQStreamOffset(Map.of());
             RabbitMQStreamOffset parsed = RabbitMQStreamOffset.fromJson(original.json());
