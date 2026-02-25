@@ -40,6 +40,10 @@ final class RabbitMQMicroBatchStream extends BaseRabbitMQMicroBatchStream
             throw new IllegalArgumentException(
                     "minPartitions is not supported in real-time mode");
         }
+        if (options.getMaxRecordsPerPartition() != null) {
+            throw new IllegalArgumentException(
+                    "maxRecordsPerPartition is not supported in real-time mode");
+        }
         if (options.getMaxRecordsPerTrigger() != null || options.getMaxBytesPerTrigger() != null) {
             throw new IllegalArgumentException(
                     "maxRecordsPerTrigger and maxBytesPerTrigger are not supported in real-time mode");
@@ -47,6 +51,11 @@ final class RabbitMQMicroBatchStream extends BaseRabbitMQMicroBatchStream
         if (options.getMinOffsetsPerTrigger() != null) {
             throw new IllegalArgumentException(
                     "minOffsetsPerTrigger is not compatible with real-time mode");
+        }
+        if (options.getMaxWaitMs() != ConnectorOptions.DEFAULT_MAX_WAIT_MS) {
+            throw new IllegalArgumentException(
+                    "maxWaitMs is not supported in real-time mode; use pollTimeoutMs and " +
+                            "Spark real-time timeout controls instead");
         }
         this.realTimeMode = true;
         LOG.info("Real-time mode activated");

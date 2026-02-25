@@ -91,6 +91,32 @@ class RealTimeModeTest {
                     .isInstanceOf(IllegalArgumentException.class)
                     .hasMessageContaining("real-time mode");
         }
+
+        @Test
+        void prepareForRealTimeModeRejectsMaxRecordsPerPartition() {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("maxRecordsPerPartition", "100");
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+
+            assertThatThrownBy(stream::prepareForRealTimeMode)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("maxRecordsPerPartition");
+        }
+
+        @Test
+        void prepareForRealTimeModeRejectsCustomMaxWaitMs() {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("maxWaitMs", "1000");
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+
+            assertThatThrownBy(stream::prepareForRealTimeMode)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("maxWaitMs");
+        }
     }
 
     // ======================================================================

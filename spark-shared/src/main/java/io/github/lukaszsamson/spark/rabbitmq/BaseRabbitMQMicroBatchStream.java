@@ -5,6 +5,12 @@ import com.rabbitmq.stream.Environment;
 import com.rabbitmq.stream.NoOffsetException;
 import com.rabbitmq.stream.StreamDoesNotExistException;
 import com.rabbitmq.stream.StreamStats;
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FSDataInputStream;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.LocatedFileStatus;
+import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.RemoteIterator;
 import org.apache.spark.SparkContext;
 import org.apache.spark.sql.connector.read.InputPartition;
 import org.apache.spark.sql.connector.read.PartitionReaderFactory;
@@ -17,13 +23,11 @@ import org.slf4j.LoggerFactory;
 import scala.Option;
 
 import java.net.URI;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-import java.nio.file.DirectoryStream;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -1763,7 +1767,7 @@ class BaseRabbitMQMicroBatchStream
     }
 
     private Map<String, Long> loadCommittedOffsetsFromCheckpoint() {
-        Path sourceCheckpointPath = toLocalCheckpointPath();
+        Path sourceCheckpointPath = toCheckpointPath();
         if (sourceCheckpointPath == null) {
             return null;
         }
@@ -1778,23 +1782,24 @@ class BaseRabbitMQMicroBatchStream
             return null;
         }
 
-        Path commitsDir = context.queryCheckpointPath().resolve("commits");
-        Path offsetsDir = context.queryCheckpointPath().resolve("offsets");
-        if (!Files.isDirectory(commitsDir) || !Files.isDirectory(offsetsDir)) {
-            return null;
-        }
-
         try {
-            long latestCommittedBatch = latestBatchId(commitsDir);
+            FileSystem fs = context.queryCheckpointPath().getFileSystem(hadoopConfiguration());
+            Path commitsDir = new Path(context.queryCheckpointPath(), "commits");
+            Path offsetsDir = new Path(context.queryCheckpointPath(), "offsets");
+            if (!isDirectory(fs, commitsDir) || !isDirectory(fs, offsetsDir)) {
+                return null;
+            }
+
+            long latestCommittedBatch = latestBatchId(fs, commitsDir);
             if (latestCommittedBatch < 0) {
                 return null;
             }
-            Path offsetFile = offsetsDir.resolve(Long.toString(latestCommittedBatch));
-            if (!Files.isRegularFile(offsetFile)) {
+            Path offsetFile = new Path(offsetsDir, Long.toString(latestCommittedBatch));
+            if (!isFile(fs, offsetFile)) {
                 return null;
             }
 
-            List<String> lines = Files.readAllLines(offsetFile, StandardCharsets.UTF_8);
+            List<String> lines = readAllLines(fs, offsetFile);
             if (lines.size() < 3) {
                 return null;
             }
@@ -1842,11 +1847,10 @@ class BaseRabbitMQMicroBatchStream
     }
 
     private CheckpointOffsetContext resolveCheckpointOffsetContext(Path sourceCheckpointPath) {
-        Path fileNamePath = sourceCheckpointPath.getFileName();
+        String fileName = sourceCheckpointPath.getName();
         Path parent = sourceCheckpointPath.getParent();
-        if (fileNamePath != null && parent != null) {
-            String fileName = fileNamePath.toString();
-            String parentName = parent.getFileName() != null ? parent.getFileName().toString() : "";
+        if (fileName != null && !fileName.isEmpty() && parent != null) {
+            String parentName = parent.getName();
             Integer sourceIndex = parseNonNegativeInt(fileName);
             if (sourceIndex != null && "sources".equals(parentName)) {
                 Path queryCheckpointPath = parent.getParent();
@@ -1878,36 +1882,54 @@ class BaseRabbitMQMicroBatchStream
     private record CheckpointOffsetContext(Path queryCheckpointPath, Integer sourceIndex) {
     }
 
-    private Path toLocalCheckpointPath() {
+    private Path toCheckpointPath() {
         if (checkpointLocation == null || checkpointLocation.isBlank()) {
             return null;
         }
         try {
-            URI uri = URI.create(checkpointLocation);
-            if (uri.getScheme() != null) {
-                if (!"file".equalsIgnoreCase(uri.getScheme())) {
-                    return null;
-                }
-                return Paths.get(uri);
-            }
-        } catch (Exception ignored) {
-            // Fall through to plain path parsing below.
-        }
-        try {
-            return Paths.get(checkpointLocation);
-        } catch (Exception e) {
+            return new Path(checkpointLocation);
+        } catch (IllegalArgumentException e) {
             return null;
         }
     }
 
-    private long latestBatchId(Path logDir) throws java.io.IOException {
+    private Configuration hadoopConfiguration() {
+        Option<SparkSession> activeSession = SparkSession.getActiveSession();
+        if (activeSession != null && activeSession.isDefined()) {
+            return activeSession.get().sparkContext().hadoopConfiguration();
+        }
+        return new Configuration();
+    }
+
+    private boolean isDirectory(FileSystem fs, Path path) throws java.io.IOException {
+        return fs.exists(path) && fs.getFileStatus(path).isDirectory();
+    }
+
+    private boolean isFile(FileSystem fs, Path path) throws java.io.IOException {
+        return fs.exists(path) && fs.getFileStatus(path).isFile();
+    }
+
+    private List<String> readAllLines(FileSystem fs, Path file) throws java.io.IOException {
+        List<String> lines = new ArrayList<>();
+        try (FSDataInputStream in = fs.open(file);
+             BufferedReader reader =
+                     new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                lines.add(line);
+            }
+        }
+        return lines;
+    }
+
+    private long latestBatchId(FileSystem fs, Path logDir) throws java.io.IOException {
         long latest = -1L;
-        try (DirectoryStream<Path> files = Files.newDirectoryStream(logDir)) {
-            for (Path file : files) {
-                long id = parseBatchId(file.getFileName().toString());
-                if (id > latest) {
-                    latest = id;
-                }
+        RemoteIterator<LocatedFileStatus> files = fs.listFiles(logDir, false);
+        while (files.hasNext()) {
+            LocatedFileStatus file = files.next();
+            long id = parseBatchId(file.getPath().getName());
+            if (id > latest) {
+                latest = id;
             }
         }
         return latest;

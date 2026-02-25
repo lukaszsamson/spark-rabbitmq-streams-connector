@@ -65,6 +65,12 @@ final class RabbitMQScan implements Scan {
                 t.setDaemon(true);
                 return t;
             });
+    static {
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            TAIL_PROBE_TIMEOUT_EXECUTOR.shutdownNow();
+            RANGE_RESOLVER_EXECUTOR.shutdownNow();
+        }, "rabbitmq-scan-executors-shutdown"));
+    }
 
     private final ConnectorOptions options;
     private final StructType schema;
