@@ -12,6 +12,9 @@ import org.junit.jupiter.api.Test;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -132,6 +135,26 @@ class StoredOffsetLookupTest {
             long elapsedMs = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(
                     System.nanoTime() - startNanos);
             assertThat(elapsedMs).isLessThan(1000L);
+        }
+
+        @Test
+        void lookupTimeoutUsesSharedDeadlineAcrossStreams() {
+            Environment env = new FixedBehaviorEnvironment(Map.of(
+                    "s1", LookupBehavior.delayedStoredOffset(1L, 80L),
+                    "s2", LookupBehavior.delayedStoredOffset(2L, 80L)
+            ));
+            ExecutorService single = Executors.newSingleThreadExecutor();
+            try {
+                long startNanos = System.nanoTime();
+                assertThatThrownBy(() -> StoredOffsetLookup.lookupWithDetails(
+                        env, "c", List.of("s1", "s2"), 120L, single))
+                        .isInstanceOf(IllegalStateException.class)
+                        .hasMessageContaining("Timed out waiting for stored offset lookup");
+                long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
+                assertThat(elapsedMs).isLessThan(300L);
+            } finally {
+                single.shutdownNow();
+            }
         }
 
         @Test

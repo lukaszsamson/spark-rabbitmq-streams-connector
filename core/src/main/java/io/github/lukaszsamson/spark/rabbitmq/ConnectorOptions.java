@@ -1040,7 +1040,7 @@ public final class ConnectorOptions implements Serializable {
             String val = pair.substring(colonIdx + 1).trim();
             // Remove quotes from key
             if (key.startsWith("\"") && key.endsWith("\"")) {
-                key = key.substring(1, key.length() - 1);
+                key = unescapeJsonString(key.substring(1, key.length() - 1));
             }
             try {
                 result.put(key, Long.parseLong(val));
@@ -1082,6 +1082,46 @@ public final class ConnectorOptions implements Serializable {
             backslashCount++;
         }
         return (backslashCount & 1) == 1;
+    }
+
+    private static String unescapeJsonString(String s) {
+        StringBuilder out = new StringBuilder(s.length());
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c != '\\') {
+                out.append(c);
+                continue;
+            }
+            if (i + 1 >= s.length()) {
+                throw new IllegalArgumentException("Malformed escaped JSON key");
+            }
+            char esc = s.charAt(++i);
+            switch (esc) {
+                case '"' -> out.append('"');
+                case '\\' -> out.append('\\');
+                case '/' -> out.append('/');
+                case 'b' -> out.append('\b');
+                case 'f' -> out.append('\f');
+                case 'n' -> out.append('\n');
+                case 'r' -> out.append('\r');
+                case 't' -> out.append('\t');
+                case 'u' -> {
+                    if (i + 4 >= s.length()) {
+                        throw new IllegalArgumentException("Malformed unicode escape in JSON key");
+                    }
+                    String hex = s.substring(i + 1, i + 5);
+                    try {
+                        out.append((char) Integer.parseInt(hex, 16));
+                    } catch (NumberFormatException e) {
+                        throw new IllegalArgumentException(
+                                "Malformed unicode escape in JSON key", e);
+                    }
+                    i += 4;
+                }
+                default -> throw new IllegalArgumentException("Malformed escaped JSON key");
+            }
+        }
+        return out.toString();
     }
 
     private static List<String> parseCommaSeparated(String value) {

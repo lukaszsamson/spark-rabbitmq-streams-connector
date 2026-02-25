@@ -28,6 +28,7 @@ import java.security.KeyStore;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.LinkedHashSet;
 import java.util.List;
 
 /**
@@ -252,7 +253,8 @@ final class EnvironmentBuilderHelper {
             Object result = delegateMethod.invoke(delegate, adaptedArgs);
             return adaptValue(result, method.getReturnType());
         } catch (InvocationTargetException e) {
-            throw e.getCause();
+            Throwable cause = e.getCause();
+            throw cause != null ? cause : e;
         }
     }
 
@@ -498,7 +500,7 @@ final class EnvironmentBuilderHelper {
             SslContextBuilder sslBuilder = SslContextBuilder.forClient();
 
             if (hasTruststore) {
-                KeyStore trustStore = loadJks(
+                KeyStore trustStore = loadKeyStore(
                         options.getTlsTruststore(), options.getTlsTruststorePassword());
                 TrustManagerFactory tmf = TrustManagerFactory.getInstance(
                         TrustManagerFactory.getDefaultAlgorithm());
@@ -507,7 +509,8 @@ final class EnvironmentBuilderHelper {
             }
 
             if (hasKeystore) {
-                KeyStore keyStore = loadJks(options.getTlsKeystore(), options.getTlsKeystorePassword());
+                KeyStore keyStore = loadKeyStore(
+                        options.getTlsKeystore(), options.getTlsKeystorePassword());
                 KeyManagerFactory kmf = KeyManagerFactory.getInstance(
                         KeyManagerFactory.getDefaultAlgorithm());
                 kmf.init(keyStore, passwordChars(options.getTlsKeystorePassword()));
@@ -516,17 +519,43 @@ final class EnvironmentBuilderHelper {
 
             return sslBuilder.build();
         } catch (GeneralSecurityException | IOException e) {
-            throw new IllegalArgumentException("Failed to initialize TLS JKS configuration", e);
+            throw new IllegalArgumentException("Failed to initialize TLS keystore/truststore", e);
         }
     }
 
-    private static KeyStore loadJks(String path, String password)
+    private static KeyStore loadKeyStore(String path, String password)
             throws GeneralSecurityException, IOException {
-        KeyStore keyStore = KeyStore.getInstance("JKS");
-        try (FileInputStream in = new FileInputStream(path)) {
-            keyStore.load(in, passwordChars(password));
+        String lowerPath = path == null ? "" : path.toLowerCase(java.util.Locale.ROOT);
+        List<String> candidateTypes = new ArrayList<>();
+        if (lowerPath.endsWith(".jks")) {
+            candidateTypes.add("JKS");
+        } else if (lowerPath.endsWith(".p12") || lowerPath.endsWith(".pfx")) {
+            candidateTypes.add("PKCS12");
         }
-        return keyStore;
+        candidateTypes.add(KeyStore.getDefaultType());
+        candidateTypes.add("JKS");
+        candidateTypes.add("PKCS12");
+
+        GeneralSecurityException lastSecurityError = null;
+        IOException lastIoError = null;
+        for (String type : new LinkedHashSet<>(candidateTypes)) {
+            try (FileInputStream in = new FileInputStream(path)) {
+                KeyStore keyStore = KeyStore.getInstance(type);
+                keyStore.load(in, passwordChars(password));
+                return keyStore;
+            } catch (GeneralSecurityException e) {
+                lastSecurityError = e;
+            } catch (IOException e) {
+                lastIoError = e;
+            }
+        }
+        if (lastSecurityError != null) {
+            throw lastSecurityError;
+        }
+        if (lastIoError != null) {
+            throw lastIoError;
+        }
+        throw new GeneralSecurityException("Unable to load keystore: " + path);
     }
 
     private static char[] passwordChars(String password) {

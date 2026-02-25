@@ -143,6 +143,7 @@ final class StoredOffsetLookup {
         }
 
         long effectiveTimeoutMs = Math.max(1L, futureTimeoutMs);
+        long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(effectiveTimeoutMs);
         ExecutorService effectiveExecutor =
                 executor != null ? executor : SHARED_LOOKUP_EXECUTOR;
         Map<String, Future<Long>> futures = new LinkedHashMap<>();
@@ -162,7 +163,11 @@ final class StoredOffsetLookup {
                 }
                 String stream = entry.getKey();
                 try {
-                    Long nextOffset = entry.getValue().get(effectiveTimeoutMs, TimeUnit.MILLISECONDS);
+                    long remainingNanos = deadlineNanos - System.nanoTime();
+                    if (remainingNanos <= 0) {
+                        throw new TimeoutException("global lookup deadline exceeded");
+                    }
+                    Long nextOffset = entry.getValue().get(remainingNanos, TimeUnit.NANOSECONDS);
                     if (nextOffset != null) {
                         offsets.put(stream, nextOffset);
                     }
