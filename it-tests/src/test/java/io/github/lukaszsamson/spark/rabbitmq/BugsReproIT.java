@@ -221,6 +221,74 @@ class BugsReproIT extends AbstractRabbitMQIT {
     }
 
     @Test
+    void availableNowWithRetentionTruncationAndReadLimitSkipsToFirstAvailable() throws Exception {
+        deleteStream(stream);
+        createStreamWithRetention(stream, 2_000, 500);
+
+        for (int i = 0; i < 40; i++) {
+            publishMessages(stream, 100, "avnow-ret-warm-" + i + "-");
+            Thread.sleep(40L);
+        }
+
+        long firstAvailable = waitForTruncation(stream, 45_000L);
+        Assumptions.assumeTrue(firstAvailable > 700L,
+                "Retention truncation did not produce a stale-offset gap large enough for repro");
+
+        Path outputDir = Files.createTempDirectory("spark-g36-3-out-");
+        Path checkpointDir = Files.createTempDirectory("spark-g36-3-cp-");
+
+        StreamingQuery query = spark.readStream()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("startingOffsets", "offset")
+                .option("startingOffset", "0")
+                .option("failOnDataLoss", "false")
+                .option("maxRecordsPerTrigger", "10")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "io.github.lukaszsamson.spark.rabbitmq.TestAddressResolver")
+                .load()
+                .writeStream()
+                .format("parquet")
+                .option("path", outputDir.toString())
+                .option("checkpointLocation", checkpointDir.toString())
+                .trigger(Trigger.AvailableNow())
+                .start();
+
+        // Keep publishing while the query is running to mimic a live stream under retention churn.
+        publishMessagesAsync(stream, 300, "avnow-ret-live-", 500L);
+
+        boolean terminated = query.awaitTermination(120_000L);
+        var error = query.exception();
+        var progress = query.recentProgress();
+
+        assertThat(terminated).as("availableNow run should terminate").isTrue();
+        assertThat(query.isActive()).isFalse();
+        assertThat(error.isDefined())
+                .as("availableNow run should not fail")
+                .isFalse();
+        assertThat(progress.length)
+                .as("query should not spin through many empty micro-batches on stale offsets")
+                .isLessThan(60);
+
+        long count = readParquetCount(outputDir);
+        if (count > 0L) {
+            var rows = spark.read().schema(MINIMAL_OUTPUT_SCHEMA)
+                    .parquet(outputDir.toString())
+                    .select("offset")
+                    .collectAsList();
+            long minReadOffset = rows.stream()
+                    .mapToLong(row -> ((Number) row.get(0)).longValue())
+                    .min()
+                    .orElse(-1L);
+            assertThat(minReadOffset)
+                    .as("consumption should begin at or after first available offset")
+                    .isGreaterThanOrEqualTo(firstAvailable);
+        }
+    }
+
+    @Test
     void availableNowWithCheckpointTerminatesAndSecondRunDoesNotDuplicate() throws Exception {
         for (int i = 0; i < 8; i++) {
             publishMessages(stream, 50, "avnow-" + i + "-");

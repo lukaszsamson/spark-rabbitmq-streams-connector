@@ -984,7 +984,7 @@ class RabbitMQMicroBatchStreamTest {
         }
 
         @Test
-        void latestOffsetProbesWhenStatsTailStallsAtStartOffset() throws Exception {
+        void latestOffsetStaysAtStartWhenStatsTailStallsAtStartOffset() throws Exception {
             RabbitMQMicroBatchStream stream = createStream(minimalOptions());
             ProbeCountingEnvironment env = new ProbeCountingEnvironment(10L, java.util.List.of(14L));
             setPrivateField(stream, "environment", env);
@@ -993,8 +993,8 @@ class RabbitMQMicroBatchStreamTest {
             RabbitMQStreamOffset latest =
                     (RabbitMQStreamOffset) stream.latestOffset(start, ReadLimit.allAvailable());
 
-            assertThat(latest.getStreamOffsets()).containsEntry("test-stream", 15L);
-            assertThat(env.probeBuilderCalls).isEqualTo(1);
+            assertThat(latest.getStreamOffsets()).containsEntry("test-stream", 11L);
+            assertThat(env.probeBuilderCalls).isEqualTo(0);
         }
 
         @Test
@@ -1123,7 +1123,7 @@ class RabbitMQMicroBatchStreamTest {
         }
 
         @Test
-        void queryTailOffsetsForAvailableNowFallsBackToProbeWhenCommittedOffsetUnavailable()
+        void queryTailOffsetsForAvailableNowFallsBackToCommittedChunkWhenCommittedOffsetUnavailable()
                 throws Exception {
             RabbitMQMicroBatchStream stream = createStream(minimalOptions());
             ProbeCountingEnvironment env = new ProbeCountingEnvironment(
@@ -1136,8 +1136,8 @@ class RabbitMQMicroBatchStreamTest {
             RabbitMQStreamOffset latest = (RabbitMQStreamOffset) stream.latestOffset(
                     new RabbitMQStreamOffset(Map.of("test-stream", 0L)),
                     ReadLimit.allAvailable());
-            assertThat(latest.getStreamOffsets()).containsEntry("test-stream", 50L);
-            assertThat(env.probeBuilderCalls).isEqualTo(1);
+            assertThat(latest.getStreamOffsets()).containsEntry("test-stream", 1L);
+            assertThat(env.probeBuilderCalls).isEqualTo(0);
         }
 
         @Test
@@ -1158,6 +1158,28 @@ class RabbitMQMicroBatchStreamTest {
                     start, ReadLimit.allAvailable());
 
             assertThat(latest.getStreamOffsets()).containsEntry("test-stream", 100L);
+        }
+
+        @Test
+        void availableNowAppliesReadLimitFromValidatedStartAfterRetentionTruncation() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("failOnDataLoss", "false");
+            opts.put("startingOffsets", "offset");
+            opts.put("startingOffset", "0");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            // Simulate a live stream where retention has advanced firstAvailable beyond stale start.
+            setPrivateField(stream, "environment", new FirstOffsetEnvironment(100L));
+            setPrivateField(stream, "availableNowSnapshot", Map.of("test-stream", 150L));
+
+            RabbitMQStreamOffset start = new RabbitMQStreamOffset(Map.of("test-stream", 0L));
+            RabbitMQStreamOffset latest = (RabbitMQStreamOffset) stream.latestOffset(
+                    start, ReadLimit.maxRows(10));
+
+            // Must advance from validated start (100), not stale checkpoint start (0).
+            assertThat(latest.getStreamOffsets()).containsEntry("test-stream", 110L);
         }
 
         @Test

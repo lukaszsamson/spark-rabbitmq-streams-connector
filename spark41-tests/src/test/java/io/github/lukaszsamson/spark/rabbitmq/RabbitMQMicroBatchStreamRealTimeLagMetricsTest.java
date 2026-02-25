@@ -7,6 +7,9 @@ import org.apache.spark.sql.connector.read.streaming.PartitionOffset;
 import org.apache.spark.sql.types.StructType;
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -53,9 +56,10 @@ class RabbitMQMicroBatchStreamRealTimeLagMetricsTest {
     }
 
     @Test
-    void stopDoesNotPersistRealTimeCachedLatestWithoutCommit() {
+    void stopDoesNotPersistRealTimeCachedLatestWithoutCommit() throws IOException {
+        Path checkpoint = Files.createTempDirectory("rt-stop-offset-test-");
         RabbitMQMicroBatchStream stream = new RabbitMQMicroBatchStream(
-                minimalOptions(), new StructType(), "/tmp/rt-stop-offset-test");
+                minimalOptions(), new StructType(), checkpoint.toString());
         stream.prepareForRealTimeMode();
 
         Environment env = mock(Environment.class);

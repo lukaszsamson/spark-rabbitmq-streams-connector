@@ -65,7 +65,7 @@ class RealTimeModeTest {
 
             stream.prepareForRealTimeMode();
             assertThat(getPrivateField(stream, "realTimeMode")).isEqualTo(true);
-            assertThat(stream.shouldPersistCachedLatestOffsetsOnStop()).isTrue();
+            assertThat(stream.shouldPersistCachedLatestOffsetsOnStop()).isFalse();
         }
 
         @Test

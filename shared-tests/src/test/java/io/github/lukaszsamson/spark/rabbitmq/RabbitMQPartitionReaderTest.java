@@ -742,9 +742,7 @@ class RabbitMQPartitionReaderTest {
             setPrivateField(reader, "consumer", new NoopConsumer());
             setPrivateField(reader, "queue", new InterruptingQueue<>());
 
-            assertThatThrownBy(reader::next)
-                    .isInstanceOf(IOException.class)
-                    .hasMessageContaining("Interrupted");
+            assertThat(reader.next()).isFalse();
             assertThat(Thread.currentThread().isInterrupted()).isTrue();
             Thread.interrupted();
         }
@@ -1593,6 +1591,14 @@ class RabbitMQPartitionReaderTest {
         void computeEffectiveInitialCreditsCapsToQueueCapacity() {
             int effective = BaseRabbitMQPartitionReader.computeEffectiveInitialCredits(
                     10, 250, 0L, 2_000L);
+
+            assertThat(effective).isEqualTo(250);
+        }
+
+        @Test
+        void computeEffectiveInitialCreditsCapsConfiguredToQueueCapacityForFiniteRange() {
+            int effective = BaseRabbitMQPartitionReader.computeEffectiveInitialCredits(
+                    10_000, 250, 0L, 100L);
 
             assertThat(effective).isEqualTo(250);
         }

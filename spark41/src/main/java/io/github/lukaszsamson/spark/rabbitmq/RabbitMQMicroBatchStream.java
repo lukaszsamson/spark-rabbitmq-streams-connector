@@ -190,8 +190,4 @@ final class RabbitMQMicroBatchStream extends BaseRabbitMQMicroBatchStream
         return tailOffsets;
     }
 
-    @Override
-    boolean shouldPersistCachedLatestOffsetsOnStop() {
-        return realTimeMode;
-    }
 }
