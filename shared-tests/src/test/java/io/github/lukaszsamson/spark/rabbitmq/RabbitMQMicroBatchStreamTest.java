@@ -992,11 +992,11 @@ class RabbitMQMicroBatchStreamTest {
             RabbitMQStreamOffset start = new RabbitMQStreamOffset(Map.of("test-stream", 0L));
             RabbitMQStreamOffset latest =
                     (RabbitMQStreamOffset) stream.latestOffset(start, ReadLimit.allAvailable());
-            assertThat(latest.getStreamOffsets()).containsEntry("test-stream", 5L);
+            assertThat(latest.getStreamOffsets()).containsEntry("test-stream", 9L);
 
             RabbitMQStreamOffset latestAgain =
                     (RabbitMQStreamOffset) stream.latestOffset(start, ReadLimit.allAvailable());
-            assertThat(latestAgain.getStreamOffsets()).containsEntry("test-stream", 5L);
+            assertThat(latestAgain.getStreamOffsets()).containsEntry("test-stream", 9L);
         }
 
         @Test
@@ -1015,7 +1015,7 @@ class RabbitMQMicroBatchStreamTest {
             RabbitMQStreamOffset start = new RabbitMQStreamOffset(Map.of("test-stream", 0L));
             RabbitMQStreamOffset latest =
                     (RabbitMQStreamOffset) stream.latestOffset(start, ReadLimit.allAvailable());
-            assertThat(latest.getStreamOffsets()).containsEntry("test-stream", 5L);
+            assertThat(latest.getStreamOffsets()).containsEntry("test-stream", 9L);
         }
 
         @Test
@@ -1048,6 +1048,26 @@ class RabbitMQMicroBatchStreamTest {
             assertThat(latest.getStreamOffsets()).containsEntry("test-stream", 401L);
             assertThat(((ProbeCountingEnvironment) getPrivateField(stream, "environment")).probeBuilderCalls)
                     .isEqualTo(0);
+        }
+
+        @Test
+        void availableNowNormalizesStaleStartOffsetsWhenFailOnDataLossFalse() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("failOnDataLoss", "false");
+            opts.put("startingOffsets", "offset");
+            opts.put("startingOffset", "0");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            setPrivateField(stream, "environment", new FirstOffsetEnvironment(100L));
+            setPrivateField(stream, "availableNowSnapshot", Map.of("test-stream", 5L));
+
+            RabbitMQStreamOffset start = new RabbitMQStreamOffset(Map.of("test-stream", 0L));
+            RabbitMQStreamOffset latest = (RabbitMQStreamOffset) stream.latestOffset(
+                    start, ReadLimit.allAvailable());
+
+            assertThat(latest.getStreamOffsets()).containsEntry("test-stream", 100L);
         }
 
         @Test

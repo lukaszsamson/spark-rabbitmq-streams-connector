@@ -18,6 +18,7 @@ import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.TrustManagerFactory;
 import java.io.FileInputStream;
 import java.io.IOException;
+import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
@@ -231,13 +232,17 @@ final class EnvironmentBuilderHelper {
         return Proxy.newProxyInstance(
                 targetInterface.getClassLoader(),
                 new Class<?>[] {targetInterface},
-                (proxy, method, args) -> invokeBridgedMethod(delegate, method, args));
+                (proxy, method, args) -> invokeBridgedMethod(proxy, delegate, method, args));
     }
 
-    private static Object invokeBridgedMethod(Object delegate, Method method, Object[] args)
+    private static Object invokeBridgedMethod(
+            Object proxy, Object delegate, Method method, Object[] args)
             throws Throwable {
         if (method.getDeclaringClass() == Object.class) {
             return method.invoke(delegate, args);
+        }
+        if (method.isDefault()) {
+            return InvocationHandler.invokeDefault(proxy, method, args);
         }
 
         Method delegateMethod = findByNameAndArity(delegate.getClass(), method);

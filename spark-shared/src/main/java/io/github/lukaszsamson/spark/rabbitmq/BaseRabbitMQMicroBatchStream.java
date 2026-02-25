@@ -789,10 +789,12 @@ class BaseRabbitMQMicroBatchStream
         }
         tailOffsets = safeTail;
 
-        if (!options.isFailOnDataLoss() && availableNowSnapshot == null) {
+        if (!options.isFailOnDataLoss()) {
             // Normalize stale starts before applying read limits. Without this, rate-limited
             // planning can advance from a stale retained offset in tiny steps (e.g. +100/trigger),
             // producing repeated empty batches when failOnDataLoss=false.
+            // In AvailableNow mode the normalized start may exceed the snapshotted tail;
+            // clamp the tail to the validated start so the stream finishes cleanly.
             Map<String, Long> normalizedStart = new LinkedHashMap<>();
             Map<String, Long> normalizedTail = new LinkedHashMap<>();
             for (Map.Entry<String, Long> entry : tailOffsets.entrySet()) {

@@ -10,7 +10,7 @@ final class MessageSizeEstimator {
     private MessageSizeEstimator() {}
 
     static long payloadBytes(Message message) {
-        byte[] body = message.getBodyAsBinary();
+        byte[] body = MessageToRowConverter.safeBodyAsBinary(message);
         return body == null ? 0L : body.length;
     }
 

@@ -143,7 +143,7 @@ class EnvironmentBuilderHelperTest {
         assertThatThrownBy(() -> invokeBuildSslContext(options))
                 .hasCauseInstanceOf(IllegalArgumentException.class)
                 .cause()
-                .hasMessageContaining("Failed to initialize TLS JKS configuration");
+                .hasMessageContaining("Failed to initialize TLS keystore/truststore");
     }
 
     @Test
@@ -288,6 +288,7 @@ class EnvironmentBuilderHelperTest {
         collector.published(null, null);
         com.rabbitmq.stream.MessageHandler handler = collector.subscribe((ctx, msg) -> {});
         handler.handle(null, null);
+        assertThat(collector.isNoop()).isFalse();
 
         assertThat(ForeignObservationCollectorFactory.prePublishCount()).isEqualTo(1);
         assertThat(ForeignObservationCollectorFactory.publishedCount()).isEqualTo(1);

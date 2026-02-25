@@ -66,6 +66,14 @@ class MessageSizeEstimatorTest {
         assertThat(MessageSizeEstimator.estimatedWireBytes(message)).isEqualTo(expected);
     }
 
+    @Test
+    void payloadBytesReturnsZeroForNonBinaryBody() {
+        Message message = mock(Message.class);
+        when(message.getBodyAsBinary()).thenThrow(new IllegalStateException("non-binary body"));
+
+        assertThat(MessageSizeEstimator.payloadBytes(message)).isZero();
+    }
+
     private static int utf8Bytes(String value) {
         return value.getBytes(StandardCharsets.UTF_8).length;
     }

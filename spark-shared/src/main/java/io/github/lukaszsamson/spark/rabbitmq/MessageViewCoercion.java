@@ -17,7 +17,7 @@ final class MessageViewCoercion {
 
     static ConnectorMessageView toMessageView(Message message) {
         return new ConnectorMessageView(
-                message.getBodyAsBinary(),
+                MessageToRowConverter.safeBodyAsBinary(message),
                 coerceMapToStrings(message.getApplicationProperties()),
                 coerceMapToStrings(message.getMessageAnnotations()),
                 coercePropertiesToStrings(message.getProperties()));
