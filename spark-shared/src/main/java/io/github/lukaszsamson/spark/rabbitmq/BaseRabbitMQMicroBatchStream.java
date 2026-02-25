@@ -1230,7 +1230,8 @@ class BaseRabbitMQMicroBatchStream
     /**
      * Query tail offsets for all streams from the broker.
      *
-     * @return map of stream → end offset (exclusive, committedChunkId + 1)
+     * @return map of stream → end offset (exclusive), using committedOffset() when available
+     *         and committedChunkId()+1 as a conservative lower-bound fallback.
      */
     private Map<String, Long> queryTailOffsets() {
         List<String> streams = discoverStreams();
@@ -1297,7 +1298,8 @@ class BaseRabbitMQMicroBatchStream
     /**
      * Query the tail offset for a single stream.
      *
-     * @return end offset (exclusive) — committedChunkId + 1 or 0 if empty
+     * @return end offset (exclusive). When committedOffset() is unavailable, falls back to
+     *         committedChunkId()+1 as a conservative lower-bound estimate.
      */
     private long queryStreamTailOffset(Environment env, String stream) {
         StreamStats stats;
@@ -1313,12 +1315,10 @@ class BaseRabbitMQMicroBatchStream
             LOG.warn("Stream '{}' does not exist, skipping (failOnDataLoss=false)", stream);
             return 0;
         } catch (Exception e) {
-            if (options.isFailOnDataLoss()) {
-                throw new IllegalStateException(
-                        "Failed to query stream stats for '" + stream + "'", e);
-            }
-            LOG.warn("Failed to query stream stats for '{}': {}", stream, e.getMessage());
-            return 0;
+            // failOnDataLoss controls retention/topology data loss handling.
+            // Operational failures (auth/TLS/connectivity/protocol) must fail fast.
+            throw new IllegalStateException(
+                    "Failed to query stream stats for '" + stream + "'", e);
         }
 
         return resolveTailOffset(stats);
@@ -1660,11 +1660,13 @@ class BaseRabbitMQMicroBatchStream
         } catch (NoOffsetException e) {
             // Broker does not have a committed offset yet, fall back below.
         } catch (RuntimeException e) {
-            LOG.debug("committedOffset() failed, falling back to committedChunkId(): {}",
+            LOG.warn("committedOffset() failed, falling back to committedChunkId() lower-bound: {}",
                     e.toString());
         }
 
         try {
+            // committedChunkId() may represent only the first offset of the last committed chunk.
+            // Treat this as a conservative lower-bound tail estimate.
             return stats.committedChunkId() + 1;
         } catch (NoOffsetException e) {
             return 0;

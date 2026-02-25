@@ -784,6 +784,26 @@ class RabbitMQMicroBatchStreamTest {
         }
 
         @Test
+        void latestOffsetFailsFastOnStatsErrorsEvenWhenFailOnDataLossFalse() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("failOnDataLoss", "false");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            Environment env = mock(Environment.class);
+            when(env.queryStreamStats("test-stream"))
+                    .thenThrow(new RuntimeException("auth failed"));
+            setPrivateField(stream, "environment", env);
+
+            assertThatThrownBy(() -> stream.latestOffset(
+                    new RabbitMQStreamOffset(Map.of("test-stream", 0L)),
+                    ReadLimit.allAvailable()))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("Failed to validate configured stream 'test-stream'");
+        }
+
+        @Test
         void latestOffsetUnknownReadLimitDefaultsToAllAvailable() throws Exception {
             RabbitMQMicroBatchStream stream = createStream(minimalOptions());
             Map<String, Long> snapshot = Map.of("s1", 20L);

@@ -169,8 +169,9 @@ Type coercion notes:
 - On startup:
   - If a Spark checkpoint exists, use it.
   - Else, if RabbitMQ offset tracking has an entry for the configured consumer name, use it (handle `NoOffsetException`).
-    - For superstreams, create a temporary named consumer per partition stream with `noTrackingStrategy()`, call `storedOffset()`, then close it.
-    - For single streams, create a temporary named consumer with `noTrackingStrategy()`, call `storedOffset()`, then close it.
+    - For superstreams, create a temporary named consumer per partition stream with a **tracking-enabled strategy** (manual tracking), call `storedOffset()`, then close it.
+    - For single streams, create a temporary named consumer with a **tracking-enabled strategy** (manual tracking), call `storedOffset()`, then close it.
+    - RabbitMQ client requires tracking-enabled consumers for `storedOffset()`; `noTrackingStrategy()` must not be used for lookup consumers.
     - If stored offsets cannot be queried:
       - For auth/config/connection errors, fail fast regardless of `consumerName`.
       - For tracking-consumer limits or other non-fatal lookup constraints, fail fast when `consumerName` is explicitly set; otherwise fall back to `startingOffsets` with a warning.
@@ -203,10 +204,11 @@ Type coercion notes:
     - Unknown types: treat as `ReadAllAvailable`.
 - `latestOffset()` uses broker stats:
   - Prefer `StreamStats.committedOffset()` when available (RabbitMQ 4.3+).
-  - Fallback to `StreamStats.committedChunkId()` (approximate) for RabbitMQ 4.0/4.1.
+  - Fallback to `StreamStats.committedChunkId()` (approximate, conservative lower bound) for RabbitMQ 4.0/4.1.
   - Do not create temporary probe consumers in per-trigger planning (`latestOffset`).
     Per-trigger tail resolution must be stats-only (`queryStreamStats`) to avoid broker churn.
   - If `StreamStats` throws `NoOffsetException` (empty stream), return `startOffset` (no new data).
+  - For tail-stat query failures that are not explicit data-loss/topology cases (e.g. auth/TLS/connectivity/protocol), fail fast even when `failOnDataLoss=false`.
   - If no partition has new data beyond `startOffset`, return `startOffset` to skip the trigger.
 - For `endingOffsets=latest`, use the chosen tail approximation; note potential staleness.
 - For batch reads, `endingOffsets=latest` is resolved once during `Scan.toBatch()` and remains fixed for the batch execution.
@@ -216,10 +218,11 @@ Type coercion notes:
 - Subsequent `latestOffset()` calls must not exceed the snapshot even if new data arrives.
 - The query processes all data up to the snapshot and then terminates.
 - Handle empty streams (`NoOffsetException`) by recording no data for that partition.
+- If `failOnDataLoss=false` and start offsets are stale (below retention floor), normalize to first-available even in AvailableNow mode to avoid empty-batch thrashing.
 
 ### Backpressure and flow control
 - Consumer credit is chunk-based; one credit yields a chunk.
-- The reader grants low initial credits (1-2), then adds credits as the queue drains.
+- The reader uses configured initial credits capped by queue capacity (does not auto-inflate credits to planned range size).
 - When close to `endOffset`, stop granting credits and discard any messages beyond the range.
 - Override client defaults to set initial credits to 1 (configurable) and use `creditOnChunkArrival`.
 
@@ -257,6 +260,7 @@ Type coercion notes:
 - When `publishing_id` is present in a sink row, it overrides auto-generated publishing IDs for that row.
 - Derived producer name for streaming writes: `producerName` + `-q` + sanitized `queryId` + `-p` + `partitionId` + `-e` + `epochId`.
 - Streaming dedup publishing IDs start at `0` for each epoch-scoped producer identity.
+- On task retry within the same epoch, already-published rows may be re-sent and broker dedup drops duplicates by producer identity + publishing ID (correctness preserved, additional broker/network cost possible).
 - Batch writes keep task-scoped producer names (`... + -t + taskId`) to avoid attempt collisions.
 - Deduplication constraints:
   - Only one live producer per `producerName`.

@@ -85,6 +85,22 @@ class EnvironmentPoolTest {
         }
 
         @Test
+        void keyToStringDoesNotContainRawSecrets() {
+            Map<String, String> map = minimalMap("localhost:5552", "test-stream");
+            map.put("username", "user1");
+            map.put("password", "super-secret");
+            map.put("tls.truststorePassword", "trust-secret");
+            map.put("tls.keystorePassword", "key-secret");
+
+            var key = EnvironmentPool.EnvironmentKey.from(new ConnectorOptions(map));
+            String rendered = key.toString();
+
+            assertThat(rendered).doesNotContain("super-secret");
+            assertThat(rendered).doesNotContain("trust-secret");
+            assertThat(rendered).doesNotContain("key-secret");
+        }
+
+        @Test
         void sameConnectionDifferentStreamSharesKey() {
             // Streams don't affect the Environment key — only connection params matter
             ConnectorOptions opts1 = opts("localhost:5552", "stream-a");

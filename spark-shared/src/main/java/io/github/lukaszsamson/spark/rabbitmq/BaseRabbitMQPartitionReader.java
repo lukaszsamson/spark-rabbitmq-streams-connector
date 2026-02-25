@@ -485,18 +485,9 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
             long endOffset) {
         int configured = Math.max(1, configuredInitialCredits);
         int capacity = Math.max(1, queueCapacity);
-        if (endOffset <= startOffset || endOffset == Long.MAX_VALUE) {
-            return Math.min(configured, capacity);
-        }
-
-        long plannedRange = endOffset - startOffset;
-        long boundedRange = Math.min((long) capacity, plannedRange);
-        if (boundedRange <= 0L) {
-            return Math.min(configured, capacity);
-        }
-
-        long effective = Math.max(configured, boundedRange);
-        return (int) Math.min(capacity, Math.min(Integer.MAX_VALUE, effective));
+        // Keep initial grants bounded by user config and queue capacity to avoid
+        // over-prefetch spikes that can saturate callback enqueue capacity.
+        return Math.min(configured, capacity);
     }
 
     void enqueueFromCallback(MessageHandler.Context context, Message message) {
@@ -508,8 +499,7 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
             // Enqueue with a bounded timeout. context.processed() is NOT called
             // here — it is deferred to the pull side (next()) so that credits
             // are granted based on consumption rate and provide backpressure.
-            // This can block the client delivery-dispatch thread briefly, but
-            // not Netty's socket I/O event loop.
+            // This can block the client delivery callback thread briefly.
             if (!queue.offer(new QueuedMessage(
                     message, context.offset(), context.timestamp(), context),
                     options.getCallbackEnqueueTimeoutMs(), TimeUnit.MILLISECONDS)) {

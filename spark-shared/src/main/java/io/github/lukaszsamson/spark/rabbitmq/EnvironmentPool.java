@@ -7,6 +7,9 @@ import org.slf4j.LoggerFactory;
 import java.util.Objects;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.nio.charset.StandardCharsets;
 
 /**
  * Executor-side JVM singleton pool of RabbitMQ {@link Environment} instances.
@@ -39,14 +42,14 @@ final class EnvironmentPool {
             String endpoints,
             String uris,
             String username,
-            String password,
+            String passwordFingerprint,
             String vhost,
             boolean tls,
             boolean tlsTrustAll,
             String tlsTruststore,
-            String tlsTruststorePassword,
+            String tlsTruststorePasswordFingerprint,
             String tlsKeystore,
-            String tlsKeystorePassword,
+            String tlsKeystorePasswordFingerprint,
             String addressResolverClass,
             String observationCollectorClass,
             String observationRegistryProviderClass,
@@ -74,14 +77,14 @@ final class EnvironmentPool {
                     options.getEndpoints(),
                     options.getUris(),
                     options.getUsername(),
-                    options.getPassword(),
+                    fingerprintSecret(options.getPassword()),
                     options.getVhost(),
                     options.isTls(),
                     options.isTlsTrustAll(),
                     options.getTlsTruststore(),
-                    options.getTlsTruststorePassword(),
+                    fingerprintSecret(options.getTlsTruststorePassword()),
                     options.getTlsKeystore(),
-                    options.getTlsKeystorePassword(),
+                    fingerprintSecret(options.getTlsKeystorePassword()),
                     options.getAddressResolverClass(),
                     options.getObservationCollectorClass(),
                     options.getObservationRegistryProviderClass(),
@@ -104,6 +107,24 @@ final class EnvironmentPool {
                     options.getNettyBootstrapCustomizer(),
                     options.getCompressionCodecFactoryClass()
             );
+        }
+
+        private static String fingerprintSecret(String secret) {
+            if (secret == null) {
+                return null;
+            }
+            try {
+                MessageDigest digest = MessageDigest.getInstance("SHA-256");
+                byte[] hash = digest.digest(secret.getBytes(StandardCharsets.UTF_8));
+                StringBuilder hex = new StringBuilder(hash.length * 2);
+                for (byte b : hash) {
+                    hex.append(Character.forDigit((b >>> 4) & 0xF, 16));
+                    hex.append(Character.forDigit(b & 0xF, 16));
+                }
+                return hex.toString();
+            } catch (NoSuchAlgorithmException e) {
+                throw new IllegalStateException("SHA-256 not available for EnvironmentKey", e);
+            }
         }
     }
 
