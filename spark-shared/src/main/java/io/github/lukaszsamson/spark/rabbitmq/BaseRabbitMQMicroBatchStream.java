@@ -56,8 +56,6 @@ class BaseRabbitMQMicroBatchStream
 
     /** Timeout for broker offset commit (best-effort, Spark checkpoint is source of truth). */
     static final int COMMIT_TIMEOUT_SECONDS = 30;
-    /** Reuse latest-offset tail probe results briefly to avoid per-trigger consumer churn. */
-    static final long LATEST_TAIL_PROBE_CACHE_WINDOW_MS = 1_000L;
     /** Reuse full latestOffset() results briefly to keep per-trigger planning stable. */
     static final long LATEST_OFFSET_RESULT_CACHE_WINDOW_MS = 250L;
     static final long TAIL_PROBE_WAIT_MS = 250L;
@@ -112,15 +110,12 @@ class BaseRabbitMQMicroBatchStream
      * planning time against maxTriggerDelay.
      */
     volatile long lastTriggerMillis = -1L;
-    /** Recent per-stream tail probe results used by latestOffset planning. */
-    final ConcurrentHashMap<String, CachedTailProbe> latestTailProbeCache = new ConcurrentHashMap<>();
     /** Last driver-side accumulator totals already applied to the running estimate. */
     volatile long lastAccumulatedMessageBytes;
     volatile long lastAccumulatedMessageRecords;
     /** Guards compound read-modify-write updates on mutable admission-control state. */
     final Object mutableStateLock = new Object();
 
-    record CachedTailProbe(long tailExclusive, long expiresAtNanos) {}
     record LatestOffsetInvocationCache(
             String startOffsetJson,
             String readLimitKey,
@@ -331,7 +326,6 @@ class BaseRabbitMQMicroBatchStream
 
         brokerCommitExecutor.shutdownNow();
         tailQueryExecutor.shutdownNow();
-        latestTailProbeCache.clear();
         MessageSizeTracker.clear(messageSizeTrackerScope);
         if (environment != null) {
             try {
@@ -1221,10 +1215,6 @@ class BaseRabbitMQMicroBatchStream
     private Map<String, Long> queryTailOffsets() {
         List<String> streams = discoverStreams();
         Environment env = getEnvironment();
-        if (!latestTailProbeCache.isEmpty()) {
-            Set<String> activeStreams = new HashSet<>(streams);
-            latestTailProbeCache.keySet().removeIf(stream -> !activeStreams.contains(stream));
-        }
         return queryTailOffsetsInParallel(
                 streams,
                 stream -> queryStreamTailOffsetForLatest(env, stream));
@@ -1496,47 +1486,11 @@ class BaseRabbitMQMicroBatchStream
     }
 
     private long queryStreamTailOffsetForLatest(Environment env, String stream) {
-        long statsTail = queryStreamTailOffset(env, stream);
-        long probedTail = probeTailOffsetForLatestWithCache(env, stream);
-        return Math.max(statsTail, probedTail);
-    }
-
-    private long probeTailOffsetForLatestWithCache(Environment env, String stream) {
-        long nowNanos = System.nanoTime();
-        CachedTailProbe cached = latestTailProbeCache.get(stream);
-        if (cached != null && nowNanos < cached.expiresAtNanos()) {
-            return cached.tailExclusive();
-        }
-        long probedTail = probeTailOffsetFromLastMessage(env, stream);
-        latestTailProbeCache.put(
-                stream,
-                new CachedTailProbe(
-                        probedTail,
-                        nowNanos + TimeUnit.MILLISECONDS.toNanos(LATEST_TAIL_PROBE_CACHE_WINDOW_MS)));
-        return probedTail;
+        return queryStreamTailOffset(env, stream);
     }
 
     private long queryStreamTailOffsetForAvailableNow(Environment env, String stream) {
-        long statsTail = queryStreamTailOffset(env, stream);
-        // AvailableNow snapshot must reflect a fresh "now" boundary.
-        // Do not reuse latestOffset tail-probe cache here.
-        long probedTail = probeTailOffsetFromLastMessage(env, stream);
-        long nowNanos = System.nanoTime();
-        latestTailProbeCache.put(
-                stream,
-                new CachedTailProbe(
-                        probedTail,
-                        nowNanos + TimeUnit.MILLISECONDS.toNanos(LATEST_TAIL_PROBE_CACHE_WINDOW_MS)));
-        return mergeTailOffsetsForAvailableNow(statsTail, probedTail);
-    }
-
-    private long mergeTailOffsetsForAvailableNow(long statsTail, long probedTail) {
-        if (probedTail >= 0L) {
-            // Prefer the direct last-message probe for AvailableNow boundaries:
-            // it reflects an observed end-of-stream and avoids phantom +1 tails.
-            return probedTail;
-        }
-        return statsTail;
+        return queryStreamTailOffset(env, stream);
     }
 
     /**

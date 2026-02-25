@@ -204,12 +204,15 @@ Type coercion notes:
 - `latestOffset()` uses broker stats:
   - Prefer `StreamStats.committedOffset()` when available (RabbitMQ 4.3+).
   - Fallback to `StreamStats.committedChunkId()` (approximate) for RabbitMQ 4.0/4.1.
+  - Do not create temporary probe consumers in per-trigger planning (`latestOffset`).
+    Per-trigger tail resolution must be stats-only (`queryStreamStats`) to avoid broker churn.
   - If `StreamStats` throws `NoOffsetException` (empty stream), return `startOffset` (no new data).
   - If no partition has new data beyond `startOffset`, return `startOffset` to skip the trigger.
 - For `endingOffsets=latest`, use the chosen tail approximation; note potential staleness.
 - For batch reads, `endingOffsets=latest` is resolved once during `Scan.toBatch()` and remains fixed for the batch execution.
 ### Trigger.AvailableNow
-- `prepareForTriggerAvailableNow()` snapshots tail offsets for each partition stream using `StreamStats` and fixes them as the query target.
+- `prepareForTriggerAvailableNow()` snapshots tail offsets for each partition stream using `StreamStats` only and fixes them as the query target.
+- Do not create temporary probe consumers during AvailableNow snapshotting.
 - Subsequent `latestOffset()` calls must not exceed the snapshot even if new data arrives.
 - The query processes all data up to the snapshot and then terminates.
 - Handle empty streams (`NoOffsetException`) by recording no data for that partition.
