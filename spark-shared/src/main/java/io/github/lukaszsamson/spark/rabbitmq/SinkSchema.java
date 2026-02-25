@@ -69,9 +69,14 @@ public final class SinkSchema {
      */
     public static void validate(StructType inputSchema, boolean ignoreUnknownColumns) {
         // 'value' column is required
-        if (!hasField(inputSchema, "value")) {
+        StructField valueField = findField(inputSchema, "value");
+        if (valueField == null) {
             throw new IllegalArgumentException(
                     "Sink schema must contain a 'value' column of BinaryType");
+        }
+        if (valueField.nullable()) {
+            throw new IllegalArgumentException(
+                    "Sink column 'value' must be non-nullable BinaryType");
         }
 
         // Check types of known columns
@@ -104,13 +109,13 @@ public final class SinkSchema {
         }
     }
 
-    private static boolean hasField(StructType schema, String name) {
+    private static StructField findField(StructType schema, String name) {
         for (StructField field : schema.fields()) {
             if (field.name().equalsIgnoreCase(name)) {
-                return true;
+                return field;
             }
         }
-        return false;
+        return null;
     }
 
     private static void validateColumnType(String name, DataType actual, DataType expected) {

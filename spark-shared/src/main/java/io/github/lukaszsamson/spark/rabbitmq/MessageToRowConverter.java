@@ -77,7 +77,7 @@ public final class MessageToRowConverter implements Serializable {
         }
         if (includeCreationTime) {
             Properties props = message.getProperties();
-            if (props != null && props.getCreationTime() > 0) {
+            if (props != null && props.getCreationTime() >= 0) {
                 values[idx++] = millisToMicros(props.getCreationTime());
             } else {
                 values[idx++] = null;
@@ -205,7 +205,7 @@ public final class MessageToRowConverter implements Serializable {
     }
 
     private static Object timestampOrNull(long millis) {
-        return millis > 0 ? millisToMicros(millis) : null;
+        return millis >= 0 ? millisToMicros(millis) : null;
     }
 
     private static Object longOrNull(long value) {

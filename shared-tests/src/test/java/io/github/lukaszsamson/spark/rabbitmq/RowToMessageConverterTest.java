@@ -182,6 +182,17 @@ class RowToMessageConverterTest {
             Message msg = converter.convert(row, CODEC.messageBuilder());
             assertThat(msg.getBodyAsBinary()).isEqualTo(new byte[0]);
         }
+
+        @Test
+        void nullBodyFailsFastWithClearError() {
+            var converter = new RowToMessageConverter(valueOnlySchema());
+            InternalRow row = new GenericInternalRow(new Object[]{null});
+
+            assertThatThrownBy(() -> converter.convert(row, CODEC.messageBuilder()))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("value")
+                    .hasMessageContaining("null");
+        }
     }
 
     // ========================================================================

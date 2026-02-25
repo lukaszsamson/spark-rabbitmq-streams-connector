@@ -94,6 +94,10 @@ public final class RowToMessageConverter implements Serializable {
      */
     public Message convert(InternalRow row, MessageBuilder builder) {
         // Required: value
+        if (row.isNullAt(valueIndex)) {
+            throw new IllegalArgumentException(
+                    "Sink column 'value' must not contain null payloads");
+        }
         byte[] body = row.getBinary(valueIndex);
         builder.addData(body);
 

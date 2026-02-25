@@ -166,15 +166,15 @@ class MessageToRowConverterTest {
         }
 
         @Test
-        void zeroTimestampsMapToNull() {
+        void zeroTimestampsMapToEpochStart() {
             var converter = new MessageToRowConverter(EnumSet.of(MetadataField.PROPERTIES));
             Properties props = mock(Properties.class);
             when(props.getCreationTime()).thenReturn(0L);
             when(props.getAbsoluteExpiryTime()).thenReturn(0L);
 
             InternalRow propsRow = MessageToRowConverter.convertProperties(props);
-            assertThat(propsRow.isNullAt(8)).isTrue(); // absolute_expiry_time
-            assertThat(propsRow.isNullAt(9)).isTrue(); // creation_time
+            assertThat(propsRow.getLong(8)).isEqualTo(0L); // absolute_expiry_time
+            assertThat(propsRow.getLong(9)).isEqualTo(0L); // creation_time
         }
 
         @Test
@@ -332,6 +332,18 @@ class MessageToRowConverterTest {
 
             InternalRow row = converter.convert(msg, "s", 0, CHUNK_TS_MILLIS);
             assertThat(row.isNullAt(4)).isTrue();
+        }
+
+        @Test
+        void creationTimeZeroIsPreserved() {
+            var converter = new MessageToRowConverter(EnumSet.of(MetadataField.CREATION_TIME));
+            Message msg = mockMessage(new byte[0]);
+            Properties props = mock(Properties.class);
+            when(props.getCreationTime()).thenReturn(0L);
+            when(msg.getProperties()).thenReturn(props);
+
+            InternalRow row = converter.convert(msg, "s", 0, CHUNK_TS_MILLIS);
+            assertThat(row.getLong(4)).isEqualTo(0L);
         }
 
         @Test
