@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.List;
+import java.util.function.Function;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -25,22 +26,21 @@ class SuperStreamPartitionDiscoveryTest {
     }
 
     @Test
-    void discoversPartitionsViaEnvironmentQueryMethodWhenAvailable() throws Exception {
-        QueryMethodEnvironment environment =
-                new QueryMethodEnvironment(List.of("super-0", "super-1"));
+    void discoversPartitionsViaEnvironmentInternalLocatorClient() throws Exception {
+        InternalLocatorEnvironment environment =
+                new InternalLocatorEnvironment(List.of("super-0", "super-1"));
 
         List<String> partitions = invokeDiscoverViaEnvironment(environment, "super");
 
         assertThat(partitions).containsExactly("super-0", "super-1");
-        assertThat(environment.queryCalls).isEqualTo(1);
+        assertThat(environment.locatorCalls).isEqualTo(1);
     }
 
     @Test
-    void failsFastWhenEnvironmentQueryMethodIsUnavailable() {
+    void failsFastWhenEnvironmentInternalLocatorOperationIsUnavailable() {
         assertThatThrownBy(() -> invokeDiscoverViaEnvironment(new LegacyEnvironment(), "super"))
                 .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("requires RabbitMQ stream client support")
-                .hasMessageContaining("querySuperStreamPartitions")
+                .hasMessageContaining("Failed to query partitions for super stream 'super'")
                 .hasRootCauseInstanceOf(NoSuchMethodException.class);
     }
 
@@ -117,20 +117,34 @@ class SuperStreamPartitionDiscoveryTest {
         public void close() {}
     }
 
-    private static final class QueryMethodEnvironment extends NoopEnvironment {
-        private final List<String> partitions;
-        private int queryCalls;
+    private static final class LegacyEnvironment extends NoopEnvironment {
+    }
 
-        private QueryMethodEnvironment(List<String> partitions) {
+    private static final class InternalLocatorEnvironment extends NoopEnvironment {
+        private final List<String> partitions;
+        private int locatorCalls;
+
+        private InternalLocatorEnvironment(List<String> partitions) {
             this.partitions = partitions;
         }
 
-        public List<String> querySuperStreamPartitions(String superStream) {
-            queryCalls++;
-            return partitions;
+        @SuppressWarnings("unused")
+        Object locatorOperation(Function<Object, Object> operation) {
+            locatorCalls++;
+            return operation.apply(new InternalClient(partitions));
         }
     }
 
-    private static final class LegacyEnvironment extends NoopEnvironment {
+    private static final class InternalClient {
+        private final List<String> partitions;
+
+        private InternalClient(List<String> partitions) {
+            this.partitions = partitions;
+        }
+
+        @SuppressWarnings("unused")
+        public List<String> partitions(String superStream) {
+            return partitions;
+        }
     }
 }

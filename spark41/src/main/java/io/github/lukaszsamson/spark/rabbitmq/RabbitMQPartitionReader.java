@@ -83,7 +83,9 @@ final class RabbitMQPartitionReader extends BaseRabbitMQPartitionReader
                 pollWaitMs += TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - pollStart);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                throw new IOException("Interrupted while reading from stream '" + stream + "'", e);
+                LOG.debug("Interrupted while reading from stream '{}'; finishing split", stream);
+                finished = true;
+                return RecordStatus.newStatusWithoutArrivalTime(false);
             }
 
             if (qm == null) {

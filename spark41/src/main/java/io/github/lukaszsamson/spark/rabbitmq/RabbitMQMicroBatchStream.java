@@ -189,4 +189,9 @@ final class RabbitMQMicroBatchStream extends BaseRabbitMQMicroBatchStream
                 limit.getClass().getName());
         return tailOffsets;
     }
+
+    @Override
+    boolean shouldPersistCachedLatestOffsetsOnStop() {
+        return realTimeMode;
+    }
 }

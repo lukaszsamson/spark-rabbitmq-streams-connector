@@ -17,19 +17,19 @@ class TailOffsetResolutionTest {
     }
 
     @Test
-    void fallsBackToCommittedChunkIdWhenCommittedOffsetUnavailable() {
+    void returnsZeroWhenCommittedOffsetUnavailable() {
         StreamStats stats = new TestStats(10, 42, true, false);
 
-        assertThat(RabbitMQMicroBatchStream.resolveTailOffset(stats)).isEqualTo(11);
-        assertThat(RabbitMQScan.resolveTailOffset(stats)).isEqualTo(11);
+        assertThat(RabbitMQMicroBatchStream.resolveTailOffset(stats)).isZero();
+        assertThat(RabbitMQScan.resolveTailOffset(stats)).isZero();
     }
 
     @Test
-    void fallsBackToCommittedChunkIdWhenCommittedOffsetFailsUnexpectedly() {
+    void returnsZeroWhenCommittedOffsetFailsUnexpectedly() {
         StreamStats stats = new TestStats(10, 42, false, true);
 
-        assertThat(RabbitMQMicroBatchStream.resolveTailOffset(stats)).isEqualTo(11);
-        assertThat(RabbitMQScan.resolveTailOffset(stats)).isEqualTo(11);
+        assertThat(RabbitMQMicroBatchStream.resolveTailOffset(stats)).isZero();
+        assertThat(RabbitMQScan.resolveTailOffset(stats)).isZero();
     }
 
     @Test

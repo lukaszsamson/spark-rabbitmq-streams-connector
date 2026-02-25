@@ -61,9 +61,11 @@ class RealTimeModeTest {
         void prepareForRealTimeModeSetsFlag() throws Exception {
             RabbitMQMicroBatchStream stream = createStream(minimalOptions());
             assertThat(getPrivateField(stream, "realTimeMode")).isEqualTo(false);
+            assertThat(stream.shouldPersistCachedLatestOffsetsOnStop()).isFalse();
 
             stream.prepareForRealTimeMode();
             assertThat(getPrivateField(stream, "realTimeMode")).isEqualTo(true);
+            assertThat(stream.shouldPersistCachedLatestOffsetsOnStop()).isTrue();
         }
 
         @Test

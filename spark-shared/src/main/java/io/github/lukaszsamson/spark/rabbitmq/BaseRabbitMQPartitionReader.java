@@ -163,7 +163,9 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
                 pollWaitMs += TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - pollStart);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                throw new IOException("Interrupted while reading from stream '" + stream + "'", e);
+                LOG.debug("Interrupted while reading from stream '{}'; finishing split", stream);
+                finished = true;
+                return false;
             }
 
             if (qm == null) {
@@ -485,9 +487,18 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
             long endOffset) {
         int configured = Math.max(1, configuredInitialCredits);
         int capacity = Math.max(1, queueCapacity);
-        // Keep initial grants bounded by user config and queue capacity to avoid
-        // over-prefetch spikes that can saturate callback enqueue capacity.
-        return Math.min(configured, capacity);
+        if (endOffset <= startOffset || endOffset == Long.MAX_VALUE) {
+            return Math.min(configured, capacity);
+        }
+
+        long plannedRange = endOffset - startOffset;
+        long boundedRange = Math.min((long) capacity, plannedRange);
+        if (boundedRange <= 0L) {
+            return Math.min(configured, capacity);
+        }
+
+        long effective = Math.max(configured, boundedRange);
+        return (int) Math.min(Integer.MAX_VALUE, effective);
     }
 
     void enqueueFromCallback(MessageHandler.Context context, Message message) {

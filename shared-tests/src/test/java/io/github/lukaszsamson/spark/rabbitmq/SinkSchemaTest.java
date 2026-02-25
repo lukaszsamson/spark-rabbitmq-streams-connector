@@ -77,14 +77,11 @@ class SinkSchemaTest {
     }
 
     @Test
-    void rejectsNullableValueColumn() {
+    void acceptsNullableValueColumn() {
         StructType schema = new StructType(new StructField[]{
                 new StructField("value", DataTypes.BinaryType, true, Metadata.empty()),
         });
-        assertThatThrownBy(() -> SinkSchema.validate(schema, false))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("value")
-                .hasMessageContaining("non-nullable");
+        assertThatNoException().isThrownBy(() -> SinkSchema.validate(schema, false));
     }
 
     // ---- validate: unknown columns ----

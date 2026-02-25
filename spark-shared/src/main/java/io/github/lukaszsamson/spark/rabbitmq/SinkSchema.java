@@ -74,11 +74,6 @@ public final class SinkSchema {
             throw new IllegalArgumentException(
                     "Sink schema must contain a 'value' column of BinaryType");
         }
-        if (valueField.nullable()) {
-            throw new IllegalArgumentException(
-                    "Sink column 'value' must be non-nullable BinaryType");
-        }
-
         // Check types of known columns
         for (StructField field : inputSchema.fields()) {
             String name = field.name().toLowerCase(Locale.ROOT);

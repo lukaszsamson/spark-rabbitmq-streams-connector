@@ -60,6 +60,8 @@ class BaseRabbitMQMicroBatchStream
 
     /** Timeout for broker offset commit (best-effort, Spark checkpoint is source of truth). */
     static final int COMMIT_TIMEOUT_SECONDS = 30;
+    /** Reuse latest-offset tail probe results briefly to avoid per-trigger consumer churn. */
+    static final long LATEST_TAIL_PROBE_CACHE_WINDOW_MS = 1_000L;
     static final long STOP_EXECUTOR_AWAIT_SECONDS = 3L;
     /** Reuse full latestOffset() results briefly to keep per-trigger planning stable. */
     static final long LATEST_OFFSET_RESULT_CACHE_WINDOW_MS = 250L;
@@ -118,9 +120,12 @@ class BaseRabbitMQMicroBatchStream
     /** Last driver-side accumulator totals already applied to the running estimate. */
     volatile long lastAccumulatedMessageBytes;
     volatile long lastAccumulatedMessageRecords;
+    /** Recent per-stream tail probe results used by latestOffset planning. */
+    final ConcurrentHashMap<String, CachedTailProbe> latestTailProbeCache = new ConcurrentHashMap<>();
     /** Guards compound read-modify-write updates on mutable admission-control state. */
     final Object mutableStateLock = new Object();
 
+    record CachedTailProbe(long tailExclusive, long expiresAtNanos) {}
     record LatestOffsetInvocationCache(
             String startOffsetJson,
             String readLimitKey,
@@ -333,6 +338,7 @@ class BaseRabbitMQMicroBatchStream
         tailQueryExecutor.shutdownNow();
         awaitExecutorTermination("brokerCommitExecutor", brokerCommitExecutor);
         awaitExecutorTermination("tailQueryExecutor", tailQueryExecutor);
+        latestTailProbeCache.clear();
         MessageSizeTracker.clear(messageSizeTrackerScope);
         if (environment != null) {
             try {
@@ -754,7 +760,7 @@ class BaseRabbitMQMicroBatchStream
         // For single-stream mode, a non-null checkpoint start offset missing stream entries
         // cannot make progress: planner intentionally skips such streams to avoid backfill.
         // Keep latestOffset aligned with planner and return the stable start instead.
-        if (start != null && !options.isSuperStreamMode() && !startMap.isEmpty()) {
+        if (start != null && !options.isSuperStreamMode()) {
             LinkedHashMap<String, Long> checkpointStreams = new LinkedHashMap<>();
             LinkedHashMap<String, Long> checkpointTails = new LinkedHashMap<>();
             for (Map.Entry<String, Long> entry : startMap.entrySet()) {
@@ -789,12 +795,10 @@ class BaseRabbitMQMicroBatchStream
         }
         tailOffsets = safeTail;
 
-        if (!options.isFailOnDataLoss()) {
+        if (!options.isFailOnDataLoss() && availableNowSnapshot == null) {
             // Normalize stale starts before applying read limits. Without this, rate-limited
             // planning can advance from a stale retained offset in tiny steps (e.g. +100/trigger),
             // producing repeated empty batches when failOnDataLoss=false.
-            // In AvailableNow mode the normalized start may exceed the snapshotted tail;
-            // clamp the tail to the validated start so the stream finishes cleanly.
             Map<String, Long> normalizedStart = new LinkedHashMap<>();
             Map<String, Long> normalizedTail = new LinkedHashMap<>();
             for (Map.Entry<String, Long> entry : tailOffsets.entrySet()) {
@@ -827,6 +831,23 @@ class BaseRabbitMQMicroBatchStream
             }
         }
         if (!hasNewData) {
+            if (!availableNowActive) {
+                Map<String, Long> refreshedTail = refreshStalledTailOffsets(effectiveStartMap, tailOffsets);
+                if (!refreshedTail.equals(tailOffsets)) {
+                    tailOffsets = refreshedTail;
+                    cachedTailOffset = new RabbitMQStreamOffset(tailOffsets);
+                    hasNewData = false;
+                    for (Map.Entry<String, Long> entry : tailOffsets.entrySet()) {
+                        long startOff = effectiveStartMap.getOrDefault(entry.getKey(), 0L);
+                        if (entry.getValue() > startOff) {
+                            hasNewData = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if (!hasNewData) {
             LOG.debug("No new data available, returning stable start offsets");
             if (start != null && effectiveStartMap.equals(startMap)) {
                 cachedLatestOffset = start;
@@ -850,6 +871,52 @@ class BaseRabbitMQMicroBatchStream
                     startMap, tailOffsets, endOffsets, readLimitCacheKey(limit));
         }
         return latest;
+    }
+
+    private Map<String, Long> refreshStalledTailOffsets(
+            Map<String, Long> startOffsets,
+            Map<String, Long> tailOffsets) {
+        LinkedHashMap<String, Long> stalled = new LinkedHashMap<>();
+        for (Map.Entry<String, Long> entry : tailOffsets.entrySet()) {
+            String stream = entry.getKey();
+            long start = startOffsets.getOrDefault(stream, 0L);
+            if (entry.getValue() <= start) {
+                stalled.put(stream, entry.getValue());
+            }
+        }
+        if (stalled.isEmpty()) {
+            return tailOffsets;
+        }
+
+        Environment env = getEnvironment();
+        LinkedHashMap<String, Long> refreshed = new LinkedHashMap<>(tailOffsets);
+        if (stalled.size() == 1) {
+            Map.Entry<String, Long> only = stalled.entrySet().iterator().next();
+            long probeTail = probeTailOffsetFromLastMessage(env, only.getKey());
+            if (probeTail > only.getValue()) {
+                LOG.info("latestOffset stale-tail refresh advanced stream '{}' from {} to {}",
+                        only.getKey(), only.getValue(), probeTail);
+                refreshed.put(only.getKey(), probeTail);
+            }
+            return refreshed;
+        }
+
+        LinkedHashMap<String, CompletableFuture<Long>> futures = new LinkedHashMap<>();
+        for (String stream : stalled.keySet()) {
+            futures.put(stream, CompletableFuture.supplyAsync(
+                    () -> probeTailOffsetFromLastMessage(env, stream), tailQueryExecutor));
+        }
+        for (Map.Entry<String, Long> entry : stalled.entrySet()) {
+            String stream = entry.getKey();
+            long previousTail = entry.getValue();
+            long probeTail = futures.get(stream).join();
+            if (probeTail > previousTail) {
+                LOG.info("latestOffset stale-tail refresh advanced stream '{}' from {} to {}",
+                        stream, previousTail, probeTail);
+                refreshed.put(stream, probeTail);
+            }
+        }
+        return refreshed;
     }
 
     @Override
@@ -1231,11 +1298,15 @@ class BaseRabbitMQMicroBatchStream
      * Query tail offsets for all streams from the broker.
      *
      * @return map of stream → end offset (exclusive), using committedOffset() when available
-     *         and committedChunkId()+1 as a conservative lower-bound fallback.
+     *         and probing the last message offset when committedOffset() is unavailable.
      */
     private Map<String, Long> queryTailOffsets() {
         List<String> streams = discoverStreams();
         Environment env = getEnvironment();
+        if (!latestTailProbeCache.isEmpty()) {
+            Set<String> activeStreams = new HashSet<>(streams);
+            latestTailProbeCache.keySet().removeIf(stream -> !activeStreams.contains(stream));
+        }
         return queryTailOffsetsInParallel(
                 streams,
                 stream -> queryStreamTailOffsetForLatest(env, stream));
@@ -1298,8 +1369,8 @@ class BaseRabbitMQMicroBatchStream
     /**
      * Query the tail offset for a single stream.
      *
-     * @return end offset (exclusive). When committedOffset() is unavailable, falls back to
-     *         committedChunkId()+1 as a conservative lower-bound estimate.
+     * @return end offset (exclusive). Uses committedOffset() when available; otherwise falls
+     *         back to a bounded last-message probe.
      */
     private long queryStreamTailOffset(Environment env, String stream) {
         StreamStats stats;
@@ -1321,7 +1392,12 @@ class BaseRabbitMQMicroBatchStream
                     "Failed to query stream stats for '" + stream + "'", e);
         }
 
-        return resolveTailOffset(stats);
+        long statsTail = resolveTailOffset(stats);
+        if (statsTail > 0) {
+            return statsTail;
+        }
+        long probedTail = probeTailOffsetFromLastMessage(env, stream);
+        return Math.max(statsTail, probedTail);
     }
 
     long probeTailOffsetFromLastMessage(Environment env, String stream) {
@@ -1506,11 +1582,47 @@ class BaseRabbitMQMicroBatchStream
     }
 
     private long queryStreamTailOffsetForLatest(Environment env, String stream) {
-        return queryStreamTailOffset(env, stream);
+        long statsTail = queryStreamTailOffset(env, stream);
+        long probedTail = probeTailOffsetForLatestWithCache(env, stream);
+        return Math.max(statsTail, probedTail);
+    }
+
+    private long probeTailOffsetForLatestWithCache(Environment env, String stream) {
+        long nowNanos = System.nanoTime();
+        CachedTailProbe cached = latestTailProbeCache.get(stream);
+        if (cached != null && nowNanos < cached.expiresAtNanos()) {
+            return cached.tailExclusive();
+        }
+        long probedTail = probeTailOffsetFromLastMessage(env, stream);
+        latestTailProbeCache.put(
+                stream,
+                new CachedTailProbe(
+                        probedTail,
+                        nowNanos + TimeUnit.MILLISECONDS.toNanos(LATEST_TAIL_PROBE_CACHE_WINDOW_MS)));
+        return probedTail;
     }
 
     private long queryStreamTailOffsetForAvailableNow(Environment env, String stream) {
-        return queryStreamTailOffset(env, stream);
+        long statsTail = queryStreamTailOffset(env, stream);
+        // AvailableNow snapshot must reflect a fresh "now" boundary.
+        // Do not reuse latestOffset tail-probe cache here.
+        long probedTail = probeTailOffsetFromLastMessage(env, stream);
+        long nowNanos = System.nanoTime();
+        latestTailProbeCache.put(
+                stream,
+                new CachedTailProbe(
+                        probedTail,
+                        nowNanos + TimeUnit.MILLISECONDS.toNanos(LATEST_TAIL_PROBE_CACHE_WINDOW_MS)));
+        return mergeTailOffsetsForAvailableNow(statsTail, probedTail);
+    }
+
+    private long mergeTailOffsetsForAvailableNow(long statsTail, long probedTail) {
+        if (probedTail >= 0L) {
+            // Prefer the direct last-message probe for AvailableNow boundaries:
+            // it reflects an observed end-of-stream and avoids phantom +1 tails.
+            return probedTail;
+        }
+        return statsTail;
     }
 
     /**
@@ -1549,6 +1661,44 @@ class BaseRabbitMQMicroBatchStream
         }
         Long initialOffset = initial.get(stream);
         return initialOffset != null && initialOffset == startOffset;
+    }
+
+    private long resolveMissingStartOffset(String stream, String location) {
+        Map<String, Long> initial = this.initialOffsets;
+        if (initial != null) {
+            Long initialOffset = initial.get(stream);
+            if (initialOffset != null) {
+                LOG.warn("Missing start offset for stream '{}' at {}; using initialOffset={}",
+                        stream, location, initialOffset);
+                return initialOffset;
+            }
+        }
+
+        Map<String, Long> fromCheckpoint = loadCommittedOffsetsFromCheckpoint();
+        if (fromCheckpoint != null) {
+            Long committedOffset = fromCheckpoint.get(stream);
+            if (committedOffset != null) {
+                LOG.warn("Missing start offset for stream '{}' at {}; using checkpoint offset={}",
+                        stream, location, committedOffset);
+                return committedOffset;
+            }
+        }
+
+        long resolved = resolveStartingOffset(stream);
+        synchronized (mutableStateLock) {
+            Map<String, Long> currentInitial = this.initialOffsets;
+            if (currentInitial == null) {
+                currentInitial = new LinkedHashMap<>();
+                this.initialOffsets = currentInitial;
+            } else if (!(currentInitial instanceof LinkedHashMap)) {
+                currentInitial = new LinkedHashMap<>(currentInitial);
+                this.initialOffsets = currentInitial;
+            }
+            currentInitial.putIfAbsent(stream, resolved);
+        }
+        LOG.warn("Missing start offset for stream '{}' at {}; resolved from startingOffsets={} => {}",
+                stream, location, options.getStartingOffsets(), resolved);
+        return resolved;
     }
 
     static String deriveConsumerName(ConnectorOptions options, String checkpointLocation) {
@@ -1660,13 +1810,11 @@ class BaseRabbitMQMicroBatchStream
         } catch (NoOffsetException e) {
             // Broker does not have a committed offset yet, fall back below.
         } catch (RuntimeException e) {
-            LOG.warn("committedOffset() failed, falling back to committedChunkId() lower-bound: {}",
+            LOG.debug("committedOffset() failed, falling back to committedChunkId(): {}",
                     e.toString());
         }
 
         try {
-            // committedChunkId() may represent only the first offset of the last committed chunk.
-            // Treat this as a conservative lower-bound tail estimate.
             return stats.committedChunkId() + 1;
         } catch (NoOffsetException e) {
             return 0;
@@ -1781,7 +1929,19 @@ class BaseRabbitMQMicroBatchStream
         if (fromCheckpoint != null && !fromCheckpoint.isEmpty()) {
             return fromCheckpoint;
         }
+        RabbitMQStreamOffset latest = cachedLatestOffset;
+        if (shouldPersistCachedLatestOffsetsOnStop()
+                && latest != null
+                && !latest.getStreamOffsets().isEmpty()) {
+            LOG.debug("Falling back to cached latest offsets for stop-time broker persistence: {}",
+                    latest.getStreamOffsets());
+            return new LinkedHashMap<>(latest.getStreamOffsets());
+        }
         return null;
+    }
+
+    boolean shouldPersistCachedLatestOffsetsOnStop() {
+        return false;
     }
 
     private Map<String, Long> loadCommittedOffsetsFromCheckpoint() {

@@ -1,7 +1,9 @@
 package io.github.lukaszsamson.spark.rabbitmq;
 
 import com.rabbitmq.stream.Environment;
+import java.lang.reflect.Method;
 import java.util.List;
+import java.util.function.Function;
 
 /**
  * Discovers partition streams for a RabbitMQ superstream.
@@ -39,16 +41,24 @@ final class SuperStreamPartitionDiscovery {
     private static List<String> discoverPartitionsViaEnvironment(Environment environment,
                                                                  String superStream) {
         try {
-            var queryMethod = environment.getClass()
-                    .getMethod("querySuperStreamPartitions", String.class);
-            Object result = queryMethod.invoke(environment, superStream);
+            Method locatorOperation = environment.getClass()
+                    .getDeclaredMethod("locatorOperation", Function.class);
+            locatorOperation.setAccessible(true);
+
+            Function<Object, Object> partitionsOperation = client -> {
+                try {
+                    Method partitionsMethod = client.getClass()
+                            .getMethod("partitions", String.class);
+                    return partitionsMethod.invoke(client, superStream);
+                } catch (ReflectiveOperationException e) {
+                    throw new IllegalStateException(
+                            "Failed to query partitions for super stream '" + superStream + "'",
+                            e);
+                }
+            };
+
+            Object result = locatorOperation.invoke(environment, partitionsOperation);
             return copyPartitions(result);
-        } catch (NoSuchMethodException e) {
-            throw new IllegalStateException(
-                    "Superstream partition discovery requires RabbitMQ stream client support " +
-                            "for Environment.querySuperStreamPartitions(String). " +
-                            "Internal client API fallback is intentionally disabled.",
-                    e);
         } catch (RuntimeException e) {
             throw e;
         } catch (ReflectiveOperationException e) {

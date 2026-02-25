@@ -615,6 +615,26 @@ class RabbitMQMicroBatchStreamTest {
             assertThat(next).hasSize(1);
             assertThat(((RabbitMQInputPartition) next[0]).isUseConfiguredStartingOffset()).isFalse();
         }
+
+        @Test
+        void singleStreamMissingStartInCheckpointUsesInitialOffsetsInsteadOfSkipping() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("startingOffsets", "latest");
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            setPrivateField(stream, "initialOffsets", Map.of("test-stream", 100L));
+
+            InputPartition[] partitions = stream.planInputPartitions(
+                    new RabbitMQStreamOffset(Map.of()),
+                    new RabbitMQStreamOffset(Map.of("test-stream", 130L)));
+
+            assertThat(partitions).hasSize(1);
+            RabbitMQInputPartition p = (RabbitMQInputPartition) partitions[0];
+            assertThat(p.getStream()).isEqualTo("test-stream");
+            assertThat(p.getStartOffset()).isEqualTo(100L);
+            assertThat(p.getEndOffset()).isEqualTo(130L);
+        }
     }
 
     // ======================================================================
@@ -870,6 +890,24 @@ class RabbitMQMicroBatchStreamTest {
         }
 
         @Test
+        void latestOffsetMissingStartUsesInitialOffsetsInsteadOfReResolvingLatest() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("startingOffsets", "latest");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            setPrivateField(stream, "availableNowSnapshot", Map.of("test-stream", 130L));
+            setPrivateField(stream, "initialOffsets", new LinkedHashMap<>(Map.of("test-stream", 100L)));
+
+            RabbitMQStreamOffset start = new RabbitMQStreamOffset(Map.of());
+            RabbitMQStreamOffset latest = (RabbitMQStreamOffset) stream.latestOffset(
+                    start, ReadLimit.maxRows(20));
+
+            assertThat(latest.getStreamOffsets()).containsEntry("test-stream", 120L);
+        }
+
+        @Test
         @Tag("spark4x")
         void compositeReadLimitAppliesMostRestrictivePerStream() throws Exception {
             RabbitMQMicroBatchStream stream = createStream(minimalOptions());
@@ -943,6 +981,20 @@ class RabbitMQMicroBatchStreamTest {
             assertThat(second.getStreamOffsets()).containsEntry("test-stream", 11L);
             assertThat(env.queryStatsCalls).isEqualTo(2);
             assertThat(env.probeBuilderCalls).isEqualTo(0);
+        }
+
+        @Test
+        void latestOffsetProbesWhenStatsTailStallsAtStartOffset() throws Exception {
+            RabbitMQMicroBatchStream stream = createStream(minimalOptions());
+            ProbeCountingEnvironment env = new ProbeCountingEnvironment(10L, java.util.List.of(14L));
+            setPrivateField(stream, "environment", env);
+
+            RabbitMQStreamOffset start = new RabbitMQStreamOffset(Map.of("test-stream", 11L));
+            RabbitMQStreamOffset latest =
+                    (RabbitMQStreamOffset) stream.latestOffset(start, ReadLimit.allAvailable());
+
+            assertThat(latest.getStreamOffsets()).containsEntry("test-stream", 15L);
+            assertThat(env.probeBuilderCalls).isEqualTo(1);
         }
 
         @Test
@@ -1068,6 +1120,24 @@ class RabbitMQMicroBatchStreamTest {
             assertThat(latest.getStreamOffsets()).containsEntry("test-stream", 401L);
             assertThat(((ProbeCountingEnvironment) getPrivateField(stream, "environment")).probeBuilderCalls)
                     .isEqualTo(0);
+        }
+
+        @Test
+        void queryTailOffsetsForAvailableNowFallsBackToProbeWhenCommittedOffsetUnavailable()
+                throws Exception {
+            RabbitMQMicroBatchStream stream = createStream(minimalOptions());
+            ProbeCountingEnvironment env = new ProbeCountingEnvironment(
+                    0L, java.util.List.of(49L), true);
+            setPrivateField(stream, "environment", env);
+            setPrivateField(stream, "availableNowSnapshot", null);
+
+            stream.prepareForTriggerAvailableNow();
+
+            RabbitMQStreamOffset latest = (RabbitMQStreamOffset) stream.latestOffset(
+                    new RabbitMQStreamOffset(Map.of("test-stream", 0L)),
+                    ReadLimit.allAvailable());
+            assertThat(latest.getStreamOffsets()).containsEntry("test-stream", 50L);
+            assertThat(env.probeBuilderCalls).isEqualTo(1);
         }
 
         @Test
@@ -2013,12 +2083,21 @@ class RabbitMQMicroBatchStreamTest {
     private static final class ProbeCountingEnvironment implements com.rabbitmq.stream.Environment {
         private final long committedOffset;
         private final java.util.List<Long> probeOffsets;
+        private final boolean committedOffsetUnavailable;
         private int queryStatsCalls = 0;
         private int probeBuilderCalls = 0;
 
         private ProbeCountingEnvironment(long committedOffset, java.util.List<Long> probeOffsets) {
+            this(committedOffset, probeOffsets, false);
+        }
+
+        private ProbeCountingEnvironment(
+                long committedOffset,
+                java.util.List<Long> probeOffsets,
+                boolean committedOffsetUnavailable) {
             this.committedOffset = committedOffset;
             this.probeOffsets = probeOffsets;
+            this.committedOffsetUnavailable = committedOffsetUnavailable;
         }
 
         @Override
@@ -2039,6 +2118,9 @@ class RabbitMQMicroBatchStreamTest {
         @Override
         public com.rabbitmq.stream.StreamStats queryStreamStats(String stream) {
             queryStatsCalls++;
+            if (committedOffsetUnavailable) {
+                return new NoCommittedOffsetStreamStats();
+            }
             return new FixedStreamStats(committedOffset);
         }
 
@@ -2065,6 +2147,23 @@ class RabbitMQMicroBatchStreamTest {
 
         @Override
         public void close() {
+        }
+    }
+
+    private static final class NoCommittedOffsetStreamStats implements com.rabbitmq.stream.StreamStats {
+        @Override
+        public long firstOffset() {
+            return 0L;
+        }
+
+        @Override
+        public long committedChunkId() {
+            return 0L;
+        }
+
+        @Override
+        public long committedOffset() {
+            throw new NoOffsetException("committedOffset unavailable");
         }
     }
 
