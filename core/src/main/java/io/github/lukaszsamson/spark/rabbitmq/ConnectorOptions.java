@@ -85,6 +85,7 @@ public final class ConnectorOptions implements Serializable {
     public static final String INITIAL_CREDITS = "initialCredits";
     public static final String QUEUE_CAPACITY = "queueCapacity";
     public static final String ESTIMATED_MESSAGE_SIZE_BYTES = "estimatedMessageSizeBytes";
+    public static final String TAIL_PROBE_CACHE_MS = "tailProbeCacheMs";
     public static final String SINGLE_ACTIVE_CONSUMER = "singleActiveConsumer";
 
     // Sink
@@ -128,6 +129,7 @@ public final class ConnectorOptions implements Serializable {
     public static final int DEFAULT_INITIAL_CREDITS = 10;
     public static final int DEFAULT_QUEUE_CAPACITY = 10_000;
     public static final int DEFAULT_ESTIMATED_MESSAGE_SIZE_BYTES = 1024;
+    public static final long DEFAULT_TAIL_PROBE_CACHE_MS = 1_000L;
     public static final long DEFAULT_ENQUEUE_TIMEOUT_MS = 10_000L;
     public static final CompressionType DEFAULT_COMPRESSION = CompressionType.NONE;
     public static final RoutingStrategyType DEFAULT_ROUTING_STRATEGY = RoutingStrategyType.HASH;
@@ -201,6 +203,7 @@ public final class ConnectorOptions implements Serializable {
     private final int initialCredits;
     private final int queueCapacity;
     private final int estimatedMessageSizeBytes;
+    private final long tailProbeCacheMs;
     private final boolean singleActiveConsumer;
 
     // Sink
@@ -319,6 +322,8 @@ public final class ConnectorOptions implements Serializable {
         this.queueCapacity = getIntPrimitive(options, QUEUE_CAPACITY, DEFAULT_QUEUE_CAPACITY);
         this.estimatedMessageSizeBytes = getIntPrimitive(options, ESTIMATED_MESSAGE_SIZE_BYTES,
                 DEFAULT_ESTIMATED_MESSAGE_SIZE_BYTES);
+        this.tailProbeCacheMs = getLongPrimitive(options, TAIL_PROBE_CACHE_MS,
+                DEFAULT_TAIL_PROBE_CACHE_MS);
         this.singleActiveConsumer = getBoolean(options, SINGLE_ACTIVE_CONSUMER, false);
 
         // Sink
@@ -840,6 +845,7 @@ public final class ConnectorOptions implements Serializable {
     public String getFilterPostFilterClass() { return filterPostFilterClass; }
     public boolean isFilterWarningOnMismatch() { return filterWarningOnMismatch; }
     public long getPollTimeoutMs() { return pollTimeoutMs; }
+    public long getTailProbeCacheMs() { return tailProbeCacheMs; }
     public long getMaxWaitMs() { return maxWaitMs; }
     public long getCallbackEnqueueTimeoutMs() { return callbackEnqueueTimeoutMs; }
     public int getInitialCredits() { return initialCredits; }

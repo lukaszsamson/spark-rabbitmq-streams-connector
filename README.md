@@ -239,6 +239,7 @@ By default, unrecognized columns cause an error. Set `ignoreUnknownColumns=true`
 | `initialCredits` | int | 10 | Initial chunk credits |
 | `queueCapacity` | int | 10000 | Internal queue capacity (messages) |
 | `estimatedMessageSizeBytes` | int | 1024 | Initial message size estimate for byte-based limits |
+| `tailProbeCacheMs` | long | 1000 | TTL (ms) for cached tail-offset probe results in per-trigger `latestOffset()`. Increase to reduce broker churn with many streams or short trigger intervals; decrease for fresher tail visibility. Only relevant on RabbitMQ &lt; 4.3 where `committedOffset()` is unavailable |
 
 ### Filtering options (RabbitMQ 3.13+)
 

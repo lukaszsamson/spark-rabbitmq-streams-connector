@@ -47,7 +47,10 @@ final class RabbitMQBatch implements Batch {
         Map<String, Integer> splitsPerStream = new LinkedHashMap<>();
         if (maxRecordsPerPartition != null) {
             for (Map.Entry<String, long[]> entry : offsetRanges.entrySet()) {
-                long span = Math.max(0L, entry.getValue()[1] - entry.getValue()[0]);
+                long end = entry.getValue()[1];
+                // Late-bound partitions (endOffset=MAX_VALUE) cannot be split — range is unknown
+                long span = (end == Long.MAX_VALUE) ? 0L
+                        : Math.max(0L, end - entry.getValue()[0]);
                 int parts = span > 0 ? (int) Math.min(Integer.MAX_VALUE,
                         (span + maxRecordsPerPartition - 1) / maxRecordsPerPartition) : 0;
                 parts = Math.max(1, parts);
@@ -118,11 +121,14 @@ final class RabbitMQBatch implements Batch {
                                                Map<String, Integer> minimumSplitsPerStream) {
         long totalOffsetSpan = 0;
         for (long[] range : offsetRanges.values()) {
-            totalOffsetSpan += Math.max(0L, range[1] - range[0]);
+            long end = range[1];
+            totalOffsetSpan += (end == Long.MAX_VALUE) ? 0L : Math.max(0L, end - range[0]);
         }
 
         if (totalOffsetSpan == 0) {
-            return new InputPartition[0];
+            // All ranges are late-bound (Long.MAX_VALUE) or truly empty.
+            // Cannot split without known ranges — fall back to one partition per stream.
+            return planWithoutSplitting();
         }
 
         List<InputPartition> partitions = new ArrayList<>();
@@ -188,7 +194,7 @@ final class RabbitMQBatch implements Batch {
      */
     private void splitStream(List<InputPartition> partitions, String stream,
                              long start, long end, int numSplits) {
-        long offsetSpan = end - start;
+        long offsetSpan = (end == Long.MAX_VALUE) ? 0L : end - start;
         String[] location = RabbitMQInputPartition.locationForStream(stream);
         if (numSplits <= 1 || offsetSpan <= 1) {
             boolean useConfiguredStartingOffset = options.getStartingOffsets() == StartingOffsetsMode.TIMESTAMP;

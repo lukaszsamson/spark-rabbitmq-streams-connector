@@ -41,7 +41,7 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
     private static final long MAX_STATS_TAIL_CACHE_WINDOW_MS = 250L;
     final String stream;
     final long startOffset;
-    final long endOffset;
+    volatile long endOffset;
     final ConnectorOptions options;
     final boolean useConfiguredStartingOffset;
     final String messageSizeTrackerScope;
@@ -394,6 +394,22 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
             LOG.debug("Cannot check offset range for stream '{}': {}", stream, e.getMessage());
         }
 
+        // Late-bind endOffset for batch reads with endingOffsets=latest.
+        // The driver passes Long.MAX_VALUE as a sentinel; resolve the actual
+        // tail on the executor at read time (Kafka-style late binding).
+        if (endOffset == Long.MAX_VALUE) {
+            long resolved = probeTailFromExecutor(environment, stream);
+            if (resolved <= startOffset) {
+                LOG.info("Late-bound endOffset for stream '{}' resolved to {} " +
+                        "(at or before startOffset {}); nothing to read",
+                        stream, resolved, startOffset);
+                finished = true;
+                return;
+            }
+            endOffset = resolved;
+            LOG.info("Late-bound endOffset for stream '{}': {}", stream, endOffset);
+        }
+
         OffsetSpecification offsetSpec = resolveOffsetSpec();
         int effectiveInitialCredits = resolveEffectiveInitialCredits();
 
@@ -478,6 +494,36 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
     int resolveEffectiveInitialCredits() {
         return computeEffectiveInitialCredits(
                 options.getInitialCredits(), options.getQueueCapacity(), startOffset, endOffset);
+    }
+
+    /**
+     * Resolve the stream tail offset on the executor side for late-bound batch reads.
+     * Tries {@code committedOffset()} first (RabbitMQ 4.3+), then falls back to a
+     * probe consumer reading from {@code OffsetSpecification.last()}.
+     *
+     * @return exclusive end offset (last offset + 1)
+     */
+    static long probeTailFromExecutor(Environment env, String stream) {
+        try {
+            StreamStats stats = env.queryStreamStats(stream);
+            try {
+                return stats.committedOffset() + 1;
+            } catch (Exception ignored) {
+                // committedOffset() not available on this broker version
+            }
+        } catch (Exception e) {
+            LOG.debug("Cannot query stats for late-bind on stream '{}': {}",
+                    stream, e.getMessage());
+        }
+        // Fall back to probe
+        try {
+            return BaseRabbitMQMicroBatchStream.probeLastMessageOffsetInclusive(
+                    env, stream, BaseRabbitMQMicroBatchStream.TAIL_PROBE_WAIT_MS) + 1;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("Interrupted while probing tail offset for stream '"
+                    + stream + "'", e);
+        }
     }
 
     static int computeEffectiveInitialCredits(

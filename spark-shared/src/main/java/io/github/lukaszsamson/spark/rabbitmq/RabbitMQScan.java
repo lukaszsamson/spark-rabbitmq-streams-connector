@@ -385,7 +385,9 @@ final class RabbitMQScan implements Scan {
             return resolveTimestampEndingOffset(env, stream, options.getEndingTimestamp());
         }
 
-        return resolveLatestOffset(env, stream, stats);
+        // LATEST: defer resolution to executor (Kafka-style late binding).
+        // Each executor resolves the tail at read time for the freshest possible value.
+        return Long.MAX_VALUE;
     }
 
     private long resolveLatestOffset(Environment env, String stream, StreamStats stats) {
