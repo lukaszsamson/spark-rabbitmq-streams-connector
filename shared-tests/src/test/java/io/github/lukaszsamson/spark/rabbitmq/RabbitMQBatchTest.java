@@ -258,7 +258,10 @@ class RabbitMQBatchTest {
         }
 
         @Test
-        void zeroMessageTotalReturnsEmptyPartitions() {
+        void zeroSpanRangesWithMinPartitionsFallBackToOnePartitionPerStream() {
+            // When all offset ranges are zero-span (start == end), totalOffsetSpan is 0
+            // and the planner cannot distribute splits. It falls back to one partition
+            // per stream so late-bound readers can still determine the empty range.
             Map<String, long[]> ranges = new LinkedHashMap<>();
             ranges.put("s1", new long[]{10, 10});
             ranges.put("s2", new long[]{5, 5});
@@ -266,7 +269,13 @@ class RabbitMQBatchTest {
             RabbitMQBatch batch = new RabbitMQBatch(optionsWithMinPartitions(3), SCHEMA, ranges);
             InputPartition[] partitions = batch.planInputPartitions();
 
-            assertThat(partitions).isEmpty();
+            assertThat(partitions).hasSize(2);
+            assertThat(((RabbitMQInputPartition) partitions[0]).getStream()).isEqualTo("s1");
+            assertThat(((RabbitMQInputPartition) partitions[0]).getStartOffset()).isEqualTo(10L);
+            assertThat(((RabbitMQInputPartition) partitions[0]).getEndOffset()).isEqualTo(10L);
+            assertThat(((RabbitMQInputPartition) partitions[1]).getStream()).isEqualTo("s2");
+            assertThat(((RabbitMQInputPartition) partitions[1]).getStartOffset()).isEqualTo(5L);
+            assertThat(((RabbitMQInputPartition) partitions[1]).getEndOffset()).isEqualTo(5L);
         }
 
         @Test

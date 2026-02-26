@@ -252,6 +252,13 @@ final class EnvironmentBuilderHelper {
                             delegate.getClass().getName() + "'");
         }
 
+        // The delegate may be a lambda or inner class loaded by a different classloader
+        // (e.g. the unshaded test classpath vs. the shaded connector jar).
+        // Even though getMethods() returns the method as public, Method.invoke() enforces
+        // the declaring class's accessibility, which fails for cross-classloader lambda
+        // classes.  setAccessible(true) bypasses this check.
+        delegateMethod.setAccessible(true);
+
         Object[] sourceArgs = args == null ? new Object[0] : args;
         Object[] adaptedArgs = adaptArguments(sourceArgs, delegateMethod.getParameterTypes());
         try {

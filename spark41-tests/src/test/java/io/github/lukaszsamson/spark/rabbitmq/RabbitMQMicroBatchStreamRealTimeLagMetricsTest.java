@@ -56,11 +56,39 @@ class RabbitMQMicroBatchStreamRealTimeLagMetricsTest {
     }
 
     @Test
-    void stopDoesNotPersistRealTimeCachedLatestWithoutCommit() throws IOException {
+    void stopPersistsRealTimeCachedLatestEvenWithoutExplicitCommit() throws IOException {
+        // In real-time mode, Spark's source.commit() is deferred to the next batch's start.
+        // If only 1 batch runs before stop(), commit() is never called. The cachedLatestOffset
+        // (set by mergeOffsets after data delivery) should still be persisted as a safety net.
+        Path checkpoint = Files.createTempDirectory("rt-stop-offset-test-");
+        Map<String, String> opts = new LinkedHashMap<>();
+        opts.put("endpoints", "localhost:5552");
+        opts.put("stream", "test-stream");
+        opts.put("consumerName", "rt-test-consumer");
+        ConnectorOptions connectorOptions = new ConnectorOptions(opts);
+
+        RabbitMQMicroBatchStream stream = new RabbitMQMicroBatchStream(
+                connectorOptions, new StructType(), checkpoint.toString());
+        stream.prepareForRealTimeMode();
+
+        Environment env = mock(Environment.class);
+        stream.environment = env;
+        stream.cachedLatestOffset = new RabbitMQStreamOffset(Map.of("test-stream", 42L));
+
+        stream.stop();
+
+        // value - 1 = 41 (storeOffset stores lastProcessed = endOffset - 1)
+        verify(env).storeOffset("rt-test-consumer", "test-stream", 41L);
+    }
+
+    @Test
+    void stopDoesNotPersistCachedLatestInNonRealTimeMode() throws IOException {
+        // In regular micro-batch mode, cachedLatestOffset reflects the NEXT expected end
+        // (from latestOffset()), not actually processed data. It should NOT be persisted.
         Path checkpoint = Files.createTempDirectory("rt-stop-offset-test-");
         RabbitMQMicroBatchStream stream = new RabbitMQMicroBatchStream(
                 minimalOptions(), new StructType(), checkpoint.toString());
-        stream.prepareForRealTimeMode();
+        // Do NOT call prepareForRealTimeMode()
 
         Environment env = mock(Environment.class);
         stream.environment = env;

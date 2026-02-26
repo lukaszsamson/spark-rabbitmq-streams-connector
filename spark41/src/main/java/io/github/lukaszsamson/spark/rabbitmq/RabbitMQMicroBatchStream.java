@@ -129,6 +129,16 @@ final class RabbitMQMicroBatchStream extends BaseRabbitMQMicroBatchStream
         }
     }
 
+    // In real-time mode, Spark's source.commit() is deferred to the start of the NEXT batch
+    // (cleanUpLastExecutedMicroBatch). If the query is stopped after only 1 batch, commit() is
+    // never called and lastCommittedEndOffsets stays null. The checkpoint fallback may also fail
+    // if stop() races with the commit log write. As a safety net, allow cachedLatestOffset
+    // (set by mergeOffsets() after actual data delivery) to be used for stop-time persistence.
+    @Override
+    boolean shouldPersistCachedLatestOffsetsOnStop() {
+        return realTimeMode;
+    }
+
     // ---- Spark 4.1 direct API overrides ----
 
     @Override

@@ -341,13 +341,16 @@ final class RabbitMQScan implements Scan {
             if (observed != null) {
                 return Math.max(firstAvailable, observed);
             }
-            // No messages at/after timestamp: plan an empty range at the tail.
-            long tailExclusive = resolveLatestOffset(env, stream, stats);
-            return Math.max(firstAvailable, tailExclusive);
+            // No messages at/after timestamp — fail fast so the user gets a clear error
+            // instead of silently empty results.
+            throw new RuntimeException(
+                    "No messages found at or after timestamp " + timestamp
+                            + " in stream '" + stream + "'");
         } catch (NoOffsetException e) {
-            // No matching records for timestamp; plan from tail (empty range).
-            long tailExclusive = resolveLatestOffset(env, stream, stats);
-            return Math.max(firstAvailable, tailExclusive);
+            // Broker explicitly reports no matching offset for the requested timestamp.
+            throw new RuntimeException(
+                    "No offset matched from request for timestamp " + timestamp
+                            + " in stream '" + stream + "'", e);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new IllegalStateException(
@@ -387,6 +390,14 @@ final class RabbitMQScan implements Scan {
 
         // LATEST: defer resolution to executor (Kafka-style late binding).
         // Each executor resolves the tail at read time for the freshest possible value.
+        //
+        // Exception: when startingOffsets=timestamp, the start may resolve to the stream
+        // tail (no messages match). With late binding the range [tail, MAX_VALUE) looks
+        // non-empty, preventing empty-range detection at plan time. Resolve eagerly so
+        // that startOffset >= endOffset correctly identifies the empty range.
+        if (options.getStartingOffsets() == StartingOffsetsMode.TIMESTAMP) {
+            return resolveLatestOffset(env, stream, stats);
+        }
         return Long.MAX_VALUE;
     }
 

@@ -97,7 +97,10 @@ class RabbitMQScanTest {
         }
 
         @Test
-        void resolveStartOffsetLatestEqualsResolvedEndWhenNoData() throws Exception {
+        void resolveStartOffsetLatestReturnsZeroWhenNoDataAndEndIsMaxValue() throws Exception {
+            // When startingOffsets=latest but the stream is empty, start resolves to 0.
+            // endingOffsets=latest uses late binding (Long.MAX_VALUE sentinel); the actual
+            // end is resolved on the executor at read time.
             Map<String, String> opts = baseOptions();
             opts.put("startingOffsets", "latest");
             RabbitMQScan scan = new RabbitMQScan(new ConnectorOptions(opts), schema());
@@ -107,8 +110,8 @@ class RabbitMQScanTest {
             long start = resolveStartOffset(scan, env, "s1", 0L, stats);
             long end = resolveEndOffset(scan, env, "s1", stats);
 
-            assertThat(start).isEqualTo(end);
             assertThat(start).isEqualTo(0L);
+            assertThat(end).isEqualTo(Long.MAX_VALUE);
         }
 
         @Test
@@ -166,17 +169,19 @@ class RabbitMQScanTest {
         }
 
         @Test
-        void timestampStartPlanningWithoutMatchingRecordFallsBackToTailAndYieldsEmptyRange() {
+        void timestampStartPlanningWithoutMatchingRecordThrows() {
+            // When startingOffsets=timestamp but no records match the timestamp,
+            // the planner throws instead of silently returning an empty range.
             Map<String, String> opts = baseOptions();
             opts.put("startingOffsets", "timestamp");
             opts.put("startingTimestamp", "4102444800000"); // 2100-01-01T00:00:00Z
             RabbitMQScan scan = new RabbitMQScan(new ConnectorOptions(opts), schema());
 
-            long[] range = resolveStreamOffsetRange(scan,
+            assertThatThrownBy(() -> resolveStreamOffsetRange(scan,
                     new DelayedProbeEnvironment(0L, new Stats(10L, false, false, 99L)),
-                    "s1");
-
-            assertThat(range).isNull();
+                    "s1"))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("Failed to resolve timestamp start offset");
         }
 
         @Test
@@ -211,7 +216,10 @@ class RabbitMQScanTest {
         }
 
         @Test
-        void latestEndPlanningBoundsTailProbeWhenConsumerBuilderBlocks() throws Exception {
+        void latestEndPlanningReturnsMaxValueForLateBoundingWithoutCallingProbe() throws Exception {
+            // endingOffsets=latest now uses late binding: returns Long.MAX_VALUE as a sentinel
+            // that executors resolve at read time. No tail probe is called at plan time,
+            // so a blocking consumer builder environment does not stall planning.
             Map<String, String> opts = baseOptions();
             opts.put("endingOffsets", "latest");
             RabbitMQScan scan = new RabbitMQScan(new ConnectorOptions(opts), schema());
@@ -221,7 +229,7 @@ class RabbitMQScanTest {
                     resolveEndOffset(scan,
                             new BlockingConsumerBuilderEnvironment(5_000L, stats),
                             "s1", stats));
-            assertThat(end).isEqualTo(124L);
+            assertThat(end).isEqualTo(Long.MAX_VALUE);
         }
 
         @Test
@@ -259,14 +267,16 @@ class RabbitMQScanTest {
         }
 
         @Test
-        void resolveEndOffsetPrefersProbedTailOffsetWhenHigher() throws Exception {
+        void resolveEndOffsetReturnsMaxValueForLateBoundingWithDefaultEndingOffsets() throws Exception {
+            // Default endingOffsets=latest uses late binding (Long.MAX_VALUE sentinel).
+            // No probe is called at plan time; executors resolve the actual tail at read time.
             Map<String, String> opts = baseOptions();
             RabbitMQScan scan = new RabbitMQScan(new ConnectorOptions(opts), schema());
             StreamStats stats = new Stats(0L, true, true, 0L);
 
             long end = resolveEndOffset(scan, new ProbeTailEnvironment(), "s1", stats);
 
-            assertThat(end).isEqualTo(13L);
+            assertThat(end).isEqualTo(Long.MAX_VALUE);
         }
 
         @Test

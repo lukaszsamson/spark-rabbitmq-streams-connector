@@ -381,6 +381,11 @@ class BaseRabbitMQMicroBatchStream
             String stream = entry.getKey();
             long endOff = entry.getValue();
             Long knownStart = startOffsets.get(stream);
+            if (knownStart == null && !options.isSuperStreamMode()) {
+                LOG.warn("Start offset for stream '{}' is missing in start map; skipping split " +
+                        "to avoid backfilling from configured startingOffsets", stream);
+                continue;
+            }
             long startOff = knownStart != null
                     ? knownStart
                     : resolveMissingStartOffset(stream, "planInputPartitions");
@@ -749,8 +754,14 @@ class BaseRabbitMQMicroBatchStream
                 : start.getStreamOffsets();
         Map<String, Long> effectiveStartMap = new LinkedHashMap<>(startMap);
         for (String stream : tailOffsets.keySet()) {
-            effectiveStartMap.computeIfAbsent(
-                    stream, s -> resolveMissingStartOffset(s, "latestOffset"));
+            if (!effectiveStartMap.containsKey(stream)) {
+                if (!options.isSuperStreamMode()) {
+                    LOG.warn("Start offset for stream '{}' is missing in start map at latestOffset; "
+                            + "skipping to avoid backfilling from configured startingOffsets", stream);
+                    continue;
+                }
+                effectiveStartMap.put(stream, resolveMissingStartOffset(stream, "latestOffset"));
+            }
         }
 
         // Ensure tail offsets never go backwards due to failed per-stream queries
@@ -1699,17 +1710,23 @@ class BaseRabbitMQMicroBatchStream
     }
 
     static long resolveTailOffset(StreamStats stats) {
+        // committedOffset() is exact (available on RabbitMQ 4.3+).
         try {
             return stats.committedOffset() + 1;
         } catch (NoOffsetException e) {
-            // Broker does not have a committed offset yet, fall back below.
+            // Broker does not have a committed offset yet.
         } catch (RuntimeException e) {
-            LOG.debug("committedOffset() failed, falling back to committedChunkId(): {}",
+            LOG.debug("committedOffset() not available, falling back to committedChunkId(): {}",
                     e.toString());
         }
 
+        // committedChunkId() returns the first offset of the last committed chunk.
+        // Do NOT add 1: tracking chunks created by storeOffset() can push
+        // committedChunkId past the last user message, and +1 would overshoot.
+        // Returning the raw value is a safe lower bound — callers combine it
+        // with a probe for the actual tail.
         try {
-            return stats.committedChunkId() + 1;
+            return stats.committedChunkId();
         } catch (NoOffsetException e) {
             return 0;
         }

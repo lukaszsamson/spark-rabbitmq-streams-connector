@@ -34,6 +34,9 @@ import java.util.concurrent.atomic.AtomicReference;
 class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
 
     static final Logger LOG = LoggerFactory.getLogger(BaseRabbitMQPartitionReader.class);
+    /** Executor-side tail probe timeout — longer than driver-side (250ms) to allow for
+     *  cold-start consumer setup (new environment, address resolution, etc.). */
+    static final long EXECUTOR_TAIL_PROBE_WAIT_MS = 5_000L;
     private static final long CLOSED_CHECK_INTERVAL_MS = 100L;
     private static final long MIN_TAIL_PROBE_CACHE_WINDOW_MS = 25L;
     private static final long MAX_TAIL_PROBE_CACHE_WINDOW_MS = 250L;
@@ -498,27 +501,56 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
 
     /**
      * Resolve the stream tail offset on the executor side for late-bound batch reads.
-     * Tries {@code committedOffset()} first (RabbitMQ 4.3+), then falls back to a
-     * probe consumer reading from {@code OffsetSpecification.last()}.
+     * Tries {@code committedOffset()} first (RabbitMQ 4.3+), then falls back to
+     * {@code max(committedChunkId() + 1, probeLastMessage + 1)}.
      *
-     * @return exclusive end offset (last offset + 1)
+     * <p>{@code committedChunkId() + 1} is a known underestimate (first offset of
+     * the last committed chunk + 1), but it serves as a safe lower bound when the
+     * probe consumer times out (e.g. slow consumer startup with observation collectors).
+     *
+     * @return exclusive end offset (last offset + 1), or 0 if the stream appears empty
      */
     static long probeTailFromExecutor(Environment env, String stream) {
+        long statsTail = 0;
+        long committedChunkFallback = 0;
         try {
             StreamStats stats = env.queryStreamStats(stream);
-            try {
-                return stats.committedOffset() + 1;
-            } catch (Exception ignored) {
-                // committedOffset() not available on this broker version
+            statsTail = BaseRabbitMQMicroBatchStream.resolveTailOffset(stats);
+            // Keep committedChunkId()+1 as a last-resort fallback for batch reads.
+            // resolveTailOffset intentionally omits +1 to avoid overshoot in streaming,
+            // but for batch late-bind we need at least a positive value to attempt reading.
+            if (statsTail == 0) {
+                try {
+                    committedChunkFallback = stats.committedChunkId() + 1;
+                } catch (Exception ignored) {
+                    // No committed chunk available
+                }
             }
         } catch (Exception e) {
             LOG.debug("Cannot query stats for late-bind on stream '{}': {}",
                     stream, e.getMessage());
         }
-        // Fall back to probe
+        // Always probe to get the actual tail — stats alone underestimate.
+        // Use the standard first-wait so the extra-drain logic in probeLastMessageOffsetInclusive
+        // gets a proper budget (TAIL_PROBE_MAX_TOTAL_WAIT_MS - firstWait). If the first attempt
+        // returns -1 (consumer startup too slow), retry with progressively longer timeouts.
         try {
-            return BaseRabbitMQMicroBatchStream.probeLastMessageOffsetInclusive(
-                    env, stream, BaseRabbitMQMicroBatchStream.TAIL_PROBE_WAIT_MS) + 1;
+            long[] retryWaitsMs = {
+                    BaseRabbitMQMicroBatchStream.TAIL_PROBE_WAIT_MS,   // 250ms — standard
+                    1_000L,                                             // 1s    — warm-up retry
+                    EXECUTOR_TAIL_PROBE_WAIT_MS                         // 5s    — final attempt
+            };
+            for (long waitMs : retryWaitsMs) {
+                long probed = BaseRabbitMQMicroBatchStream.probeLastMessageOffsetInclusive(
+                        env, stream, waitMs) + 1;
+                if (probed > 0) {
+                    return Math.max(statsTail, probed);
+                }
+            }
+            // All retries failed — use stats, falling back to committedChunkId()+1
+            // if resolveTailOffset returned 0 (committedChunkId=0 means data starts
+            // at offset 0, not that the stream is empty).
+            return Math.max(statsTail, committedChunkFallback);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new RuntimeException("Interrupted while probing tail offset for stream '"

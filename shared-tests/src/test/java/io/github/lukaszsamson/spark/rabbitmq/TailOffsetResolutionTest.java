@@ -17,19 +17,21 @@ class TailOffsetResolutionTest {
     }
 
     @Test
-    void fallsBackToCommittedChunkWhenCommittedOffsetUnavailable() {
+    void fallsBackToCommittedChunkIdWithoutPlusOneWhenCommittedOffsetUnavailable() {
+        // committedChunkId() is returned WITHOUT +1 to avoid overshooting past the
+        // last user message when tracking chunks extend past actual data.
         StreamStats stats = new TestStats(10, 42, true, false);
 
-        assertThat(RabbitMQMicroBatchStream.resolveTailOffset(stats)).isEqualTo(11L);
-        assertThat(RabbitMQScan.resolveTailOffset(stats)).isEqualTo(11L);
+        assertThat(RabbitMQMicroBatchStream.resolveTailOffset(stats)).isEqualTo(10L);
+        assertThat(RabbitMQScan.resolveTailOffset(stats)).isEqualTo(10L);
     }
 
     @Test
-    void fallsBackToCommittedChunkWhenCommittedOffsetFailsUnexpectedly() {
+    void fallsBackToCommittedChunkIdWithoutPlusOneWhenCommittedOffsetFailsUnexpectedly() {
         StreamStats stats = new TestStats(10, 42, false, true);
 
-        assertThat(RabbitMQMicroBatchStream.resolveTailOffset(stats)).isEqualTo(11L);
-        assertThat(RabbitMQScan.resolveTailOffset(stats)).isEqualTo(11L);
+        assertThat(RabbitMQMicroBatchStream.resolveTailOffset(stats)).isEqualTo(10L);
+        assertThat(RabbitMQScan.resolveTailOffset(stats)).isEqualTo(10L);
     }
 
     @Test
