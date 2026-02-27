@@ -908,7 +908,7 @@ class RabbitMQPartitionReaderTest {
         }
 
         @Test
-        void resolveOffsetSpecUsesTimestampForInitialTimestampBatch() throws Exception {
+        void resolveOffsetSpecUsesPlannedOffsetForInitialTimestampBatch() throws Exception {
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
             opts.put("stream", "test-stream");
@@ -916,15 +916,15 @@ class RabbitMQPartitionReaderTest {
             opts.put("startingTimestamp", "1700000000000");
 
             RabbitMQInputPartition partition = new RabbitMQInputPartition(
-                    "test-stream", 0, 100, new ConnectorOptions(opts), true);
+                    "test-stream", 42, 100, new ConnectorOptions(opts), true);
             RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
 
             OffsetSpecification spec = resolveOffsetSpec(reader);
-            assertThat(spec).isEqualTo(OffsetSpecification.timestamp(1700000000000L));
+            assertThat(spec).isEqualTo(OffsetSpecification.offset(42));
         }
 
         @Test
-        void resolveOffsetSpecUsesPerStreamTimestampWhenGlobalTimestampMissing() throws Exception {
+        void resolveOffsetSpecUsesPlannedOffsetWhenPerStreamTimestampConfigured() throws Exception {
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
             opts.put("stream", "test-stream");
@@ -932,11 +932,11 @@ class RabbitMQPartitionReaderTest {
             opts.put("startingOffsetsByTimestamp", "{\"test-stream\":1700000001234}");
 
             RabbitMQInputPartition partition = new RabbitMQInputPartition(
-                    "test-stream", 0, 100, new ConnectorOptions(opts), true);
+                    "test-stream", 77, 100, new ConnectorOptions(opts), true);
             RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
 
             OffsetSpecification spec = resolveOffsetSpec(reader);
-            assertThat(spec).isEqualTo(OffsetSpecification.timestamp(1700000001234L));
+            assertThat(spec).isEqualTo(OffsetSpecification.offset(77));
         }
 
         @Test

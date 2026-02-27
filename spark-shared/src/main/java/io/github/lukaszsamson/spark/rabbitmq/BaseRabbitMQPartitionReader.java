@@ -415,6 +415,10 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
 
         OffsetSpecification offsetSpec = resolveOffsetSpec();
         int effectiveInitialCredits = resolveEffectiveInitialCredits();
+        LOG.debug("Initializing consumer for stream '{}' with planned range [{}, {}), "
+                        + "offsetSpec={}, useConfiguredStartingOffset={}, initialCredits={}",
+                stream, startOffset, endOffset, offsetSpec, useConfiguredStartingOffset,
+                effectiveInitialCredits);
 
         ConsumerBuilder builder = environment.consumerBuilder()
                 .stream(stream)
@@ -618,9 +622,9 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
     }
 
     OffsetSpecification resolveOffsetSpec() {
-        if (useConfiguredStartingOffset && options.getStartingOffsets() == StartingOffsetsMode.TIMESTAMP) {
-            return OffsetSpecification.timestamp(resolveStartingTimestampForStream());
-        }
+        // Spark already plans split ranges from resolved numeric offsets. Seeking by
+        // timestamp here forces the executor to replay historical backlog just to skip
+        // to startOffset, which can starve bounded micro-batches in SAC/SST live streams.
         return OffsetSpecification.offset(startOffset);
     }
 

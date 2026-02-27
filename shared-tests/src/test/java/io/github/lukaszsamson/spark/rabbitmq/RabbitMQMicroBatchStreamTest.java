@@ -295,7 +295,7 @@ class RabbitMQMicroBatchStreamTest {
         }
 
         @Test
-        void initialOffsetTimestampProbeFailureFailsFastInsteadOfFallingBackToEarliest()
+        void initialOffsetTimestampProbeFailureFallsBackToLatestTail()
                 throws Exception {
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
@@ -308,9 +308,8 @@ class RabbitMQMicroBatchStreamTest {
             setPrivateField(stream, "environment",
                     new ThrowingConsumerBuilderEnvironment(new RuntimeException("probe failed")));
 
-            assertThatThrownBy(stream::initialOffset)
-                    .isInstanceOf(IllegalStateException.class)
-                    .hasMessageContaining("Failed to resolve timestamp start offset");
+            RabbitMQStreamOffset offset = (RabbitMQStreamOffset) stream.initialOffset();
+            assertThat(offset.getStreamOffsets()).containsEntry("test-stream", 1L);
         }
 
         @Test
@@ -328,6 +327,29 @@ class RabbitMQMicroBatchStreamTest {
             assertThatThrownBy(stream::initialOffset)
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessageContaining("consumerName is explicitly configured");
+        }
+
+        @Test
+        void initialOffsetExplicitConsumerNameInterruptedLookupFallsBackToStartingOffsets()
+                throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("consumerName", "explicit");
+            opts.put("startingOffsets", "offset");
+            opts.put("startingOffset", "7");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            setPrivateField(stream, "environment", new StoredOffsetWithStatsEnvironment(
+                    Map.of("test-stream", 99L), Map.of("test-stream", 0L)));
+            Thread.currentThread().interrupt();
+            try {
+                RabbitMQStreamOffset offset = (RabbitMQStreamOffset) stream.initialOffset();
+                assertThat(offset.getStreamOffsets()).containsEntry("test-stream", 7L);
+                assertThat(Thread.currentThread().isInterrupted()).isFalse();
+            } finally {
+                Thread.interrupted();
+            }
         }
 
         @Test
@@ -448,6 +470,27 @@ class RabbitMQMicroBatchStreamTest {
 
             RabbitMQStreamOffset offset = (RabbitMQStreamOffset) stream.initialOffset();
             assertThat(offset.getStreamOffsets()).containsEntry("test-stream", 121L);
+        }
+
+        @Test
+        void initialOffsetTimestampIgnoresRecoveredStoredOffsetBeforeFirstAvailable()
+                throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("startingOffsets", "timestamp");
+            opts.put("startingTimestamp", "1700000000000");
+            opts.put("consumerName", "timestamp-consumer");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            setPrivateField(stream, "environment", new StoredOffsetWithStatsEnvironment(
+                    Map.of("test-stream", 0L),
+                    Map.of("test-stream", 100L)));
+
+            RabbitMQStreamOffset offset = (RabbitMQStreamOffset) stream.initialOffset();
+            assertThat(offset.getStreamOffsets().get("test-stream"))
+                    .as("timestamp mode should ignore stale recovered offsets and fallback")
+                    .isGreaterThanOrEqualTo(100L);
         }
 
         @Test

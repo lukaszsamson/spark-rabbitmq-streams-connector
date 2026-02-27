@@ -1244,6 +1244,16 @@ class ConnectorOptionsTest {
         }
 
         @Test
+        void allowsMinOffsetsPerTriggerHigherThanMaxRecordsPerTrigger() {
+            var map = minimalStreamOptions();
+            map.put("minOffsetsPerTrigger", "999999");
+            map.put("maxRecordsPerTrigger", "500");
+            map.put("maxTriggerDelay", "15s");
+            var opts = new ConnectorOptions(map);
+            assertThatCode(opts::validateForSource).doesNotThrowAnyException();
+        }
+
+        @Test
         void rejectsNonPositiveMinPartitions() {
             var map = minimalStreamOptions();
             map.put("minPartitions", "0");

@@ -588,13 +588,6 @@ public final class ConnectorOptions implements Serializable {
             throw new IllegalArgumentException(
                     "'" + MIN_OFFSETS_PER_TRIGGER + "' must be > 0, got: " + minOffsetsPerTrigger);
         }
-        if (minOffsetsPerTrigger != null && maxRecordsPerTrigger != null
-                && minOffsetsPerTrigger > maxRecordsPerTrigger) {
-            throw new IllegalArgumentException(
-                    "The value of " + MIN_OFFSETS_PER_TRIGGER + "(" + minOffsetsPerTrigger +
-                            ") is higher than the " + MAX_RECORDS_PER_TRIGGER + "(" +
-                            maxRecordsPerTrigger + ")");
-        }
         if (maxBytesPerTrigger != null && maxBytesPerTrigger <= 0) {
             throw new IllegalArgumentException(
                     "'" + MAX_BYTES_PER_TRIGGER + "' must be > 0, got: " + maxBytesPerTrigger);

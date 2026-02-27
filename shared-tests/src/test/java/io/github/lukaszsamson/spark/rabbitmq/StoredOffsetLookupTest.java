@@ -114,31 +114,34 @@ class StoredOffsetLookupTest {
                     "s1", LookupBehavior.withStoredOffset(1L)
             ));
 
-            assertThatThrownBy(() -> StoredOffsetLookup.lookupWithDetails(env, "c", List.of("s1")))
-                    .isInstanceOf(IllegalStateException.class)
-                    .hasMessageContaining("Interrupted");
-            assertThat(Thread.currentThread().isInterrupted()).isTrue();
+            StoredOffsetLookup.LookupResult result =
+                    StoredOffsetLookup.lookupWithDetails(env, "c", List.of("s1"));
+            assertThat(result.getOffsets()).isEmpty();
+            assertThat(result.getFailedStreams()).containsExactly("s1");
+            assertThat(result.wasInterruptedOrTimedOut()).isTrue();
+            assertThat(Thread.currentThread().isInterrupted()).isFalse();
             Thread.interrupted();
         }
 
         @Test
-        void stalledLookupTimesOutAndFailsFast() {
+        void stalledLookupTimesOutAndMarksStreamFailed() {
             Environment env = new FixedBehaviorEnvironment(Map.of(
                     "s1", LookupBehavior.delayedStoredOffset(1L, 500L)
             ));
 
             long startNanos = System.nanoTime();
-            assertThatThrownBy(() -> StoredOffsetLookup.lookupWithDetails(env, "c",
-                    List.of("s1"), 20L))
-                    .isInstanceOf(IllegalStateException.class)
-                    .hasMessageContaining("Timed out waiting for stored offset lookup");
+            StoredOffsetLookup.LookupResult result =
+                    StoredOffsetLookup.lookupWithDetails(env, "c", List.of("s1"), 20L);
             long elapsedMs = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(
                     System.nanoTime() - startNanos);
             assertThat(elapsedMs).isLessThan(1000L);
+            assertThat(result.getOffsets()).isEmpty();
+            assertThat(result.getFailedStreams()).containsExactly("s1");
+            assertThat(result.wasInterruptedOrTimedOut()).isTrue();
         }
 
         @Test
-        void lookupTimeoutUsesSharedDeadlineAcrossStreams() {
+        void lookupTimeoutUsesSharedDeadlineAcrossStreamsAndReturnsFailures() {
             Environment env = new FixedBehaviorEnvironment(Map.of(
                     "s1", LookupBehavior.delayedStoredOffset(1L, 80L),
                     "s2", LookupBehavior.delayedStoredOffset(2L, 80L)
@@ -146,12 +149,13 @@ class StoredOffsetLookupTest {
             ExecutorService single = Executors.newSingleThreadExecutor();
             try {
                 long startNanos = System.nanoTime();
-                assertThatThrownBy(() -> StoredOffsetLookup.lookupWithDetails(
-                        env, "c", List.of("s1", "s2"), 120L, single))
-                        .isInstanceOf(IllegalStateException.class)
-                        .hasMessageContaining("Timed out waiting for stored offset lookup");
+                StoredOffsetLookup.LookupResult result = StoredOffsetLookup.lookupWithDetails(
+                        env, "c", List.of("s1", "s2"), 120L, single);
                 long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
                 assertThat(elapsedMs).isLessThan(300L);
+                assertThat(result.getFailedStreams()).isNotEmpty();
+                assertThat(result.getFailedStreams()).contains("s2");
+                assertThat(result.wasInterruptedOrTimedOut()).isTrue();
             } finally {
                 single.shutdownNow();
             }

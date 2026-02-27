@@ -69,6 +69,7 @@ class BaseRabbitMQMicroBatchStream
     static final long TAIL_PROBE_MAX_EXTRA_WAIT_MS = 750L;
     static final long TAIL_PROBE_MAX_TOTAL_WAIT_MS = 600L;
     static final long MIN_TIMESTAMP_START_PROBE_TIMEOUT_MS = 250L;
+    static final long MAX_TIMESTAMP_START_PROBE_TIMEOUT_MS = 2_000L;
     private static final String DERIVED_CONSUMER_NAME_PREFIX = "spark-rmq-";
     private static final int DERIVED_CONSUMER_NAME_HASH_HEX_LENGTH = 16;
 
@@ -202,17 +203,25 @@ class BaseRabbitMQMicroBatchStream
 
                 if (result.hasFailures()) {
                     if (consumerNameExplicit) {
-                        // Explicit consumerName: fail fast on non-fatal lookup failures
-                        // (e.g. tracking-consumer limits)
-                        throw new IllegalStateException(
-                                "Stored offset lookup failed for consumer '" + consumerName +
-                                        "' on streams: " + result.getFailedStreams() +
-                                        ". Since consumerName is explicitly configured, " +
-                                        "non-fatal lookup failures are treated as fatal.");
+                        if (result.wasInterruptedOrTimedOut()) {
+                            LOG.warn("Stored offset lookup for explicit consumer '{}' was interrupted/timed out "
+                                            + "on streams {}. Falling back to startingOffsets for those streams.",
+                                    consumerName, result.getFailedStreams());
+                        } else {
+                            // Explicit consumerName: fail fast on non-fatal lookup failures
+                            // (e.g. tracking-consumer limits)
+                            throw new IllegalStateException(
+                                    "Stored offset lookup failed for consumer '" + consumerName +
+                                            "' on streams: " + result.getFailedStreams() +
+                                            ". Since consumerName is explicitly configured, " +
+                                            "non-fatal lookup failures are treated as fatal.");
+                        }
                     }
-                    LOG.warn("Stored offset lookup had non-fatal failures for derived consumer '{}'"
+                    LOG.warn("Stored offset lookup had non-fatal failures for {} consumer '{}'"
                                     + " on streams {}. Falling back to startingOffsets for those streams.",
-                            consumerName, result.getFailedStreams());
+                            consumerNameExplicit ? "explicit" : "derived",
+                            consumerName,
+                            result.getFailedStreams());
                 }
 
                 if (!stored.isEmpty()) {
@@ -263,10 +272,6 @@ class BaseRabbitMQMicroBatchStream
         if (storedOffsets == null || storedOffsets.isEmpty()) {
             return Map.of();
         }
-        if (options.getStartingOffsets() != StartingOffsetsMode.LATEST) {
-            return storedOffsets;
-        }
-
         Map<String, Long> sanitized = new LinkedHashMap<>();
         for (Map.Entry<String, Long> entry : storedOffsets.entrySet()) {
             String stream = entry.getKey();
@@ -275,8 +280,9 @@ class BaseRabbitMQMicroBatchStream
                 long firstAvailable = resolveFirstAvailable(stream);
                 if (recoveredNextOffset < firstAvailable) {
                     LOG.warn("Ignoring recovered stored offset {} for stream '{}' because it is "
-                                    + "before first available {}. Falling back to startingOffsets=latest.",
-                            recoveredNextOffset, stream, firstAvailable);
+                                    + "before first available {}. Falling back to configured "
+                                    + "startingOffsets={}.",
+                            recoveredNextOffset, stream, firstAvailable, options.getStartingOffsets());
                     continue;
                 }
             } catch (Exception e) {
@@ -1447,55 +1453,74 @@ class BaseRabbitMQMicroBatchStream
      * broker timestamp seek behavior.
      */
     private long resolveTimestampStartingOffset(Environment env, String stream, long timestamp) {
-        long firstAvailable = resolveFirstAvailable(stream);
-        BlockingQueue<Long> observedOffsets = new LinkedBlockingQueue<>();
-        com.rabbitmq.stream.Consumer probe = null;
+        long firstAvailable;
         try {
-            probe = env.consumerBuilder()
-                    .stream(stream)
-                    .offset(com.rabbitmq.stream.OffsetSpecification.timestamp(timestamp))
-                    .noTrackingStrategy()
-                    .messageHandler((context, message) -> observedOffsets.offer(context.offset()))
-                    .flow()
-                    .initialCredits(1)
-                    .strategy(ConsumerFlowStrategy.creditOnChunkArrival(1))
-                    .builder()
-                    .build();
-
-            Long observed = observedOffsets.poll(timestampStartProbeTimeoutMs(), TimeUnit.MILLISECONDS);
-            if (observed != null) {
-                return Math.max(firstAvailable, observed);
-            }
-
-            // No records at/after timestamp: plan an empty range near the tail.
-            long tailExclusive = queryStreamTailOffsetForLatest(env, stream);
-            return Math.max(firstAvailable, tailExclusive);
-        } catch (NoOffsetException e) {
-            return firstAvailable;
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new IllegalStateException(
-                    "Interrupted resolving timestamp start offset for stream '" + stream + "'", e);
-        } catch (IllegalStateException e) {
-            throw e;
+            firstAvailable = resolveFirstAvailable(stream);
         } catch (Exception e) {
-            LOG.warn("Failed to resolve timestamp start offset for stream '{}': {}",
+            LOG.warn("Failed to query first available offset for stream '{}' while resolving "
+                            + "timestamp start; continuing with fallback firstAvailable=0. Cause: {}",
                     stream, e.getMessage());
-            throw new IllegalStateException(
-                    "Failed to resolve timestamp start offset for stream '" + stream + "'", e);
-        } finally {
-            if (probe != null) {
-                try {
-                    probe.close();
-                } catch (Exception e) {
-                    LOG.debug("Error closing timestamp-start probe consumer for stream '{}'", stream, e);
+            firstAvailable = 0L;
+        }
+        final int maxAttempts = 3;
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            BlockingQueue<Long> observedOffsets = new LinkedBlockingQueue<>();
+            com.rabbitmq.stream.Consumer probe = null;
+            try {
+                probe = env.consumerBuilder()
+                        .stream(stream)
+                        .offset(com.rabbitmq.stream.OffsetSpecification.timestamp(timestamp))
+                        .noTrackingStrategy()
+                        .messageHandler((context, message) -> observedOffsets.offer(context.offset()))
+                        .flow()
+                        .initialCredits(1)
+                        .strategy(ConsumerFlowStrategy.creditOnChunkArrival(1))
+                        .builder()
+                        .build();
+
+                Long observed = observedOffsets.poll(timestampStartProbeTimeoutMs(),
+                        TimeUnit.MILLISECONDS);
+                if (observed != null) {
+                    return Math.max(firstAvailable, observed);
+                }
+
+                // No records at/after timestamp: plan an empty range near the tail.
+                long tailExclusive = queryStreamTailOffsetForLatest(env, stream);
+                return Math.max(firstAvailable, tailExclusive);
+            } catch (NoOffsetException e) {
+                return firstAvailable;
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            } catch (Exception e) {
+                if (attempt == maxAttempts) {
+                    break;
+                }
+                LOG.warn("Failed to resolve timestamp start offset for stream '{}' (attempt {}/{}): {}",
+                        stream, attempt, maxAttempts, e.getMessage());
+            } finally {
+                if (probe != null) {
+                    try {
+                        probe.close();
+                    } catch (Exception e) {
+                        LOG.debug("Error closing timestamp-start probe consumer for stream '{}'",
+                                stream, e);
+                    }
                 }
             }
         }
+
+        long fallback = queryStreamTailOffsetForLatest(env, stream);
+        LOG.warn("Falling back to latest tail offset {} for stream '{}' after timestamp-start "
+                        + "probe failures (timestamp={}, firstAvailable={})",
+                fallback, stream, timestamp, firstAvailable);
+        return Math.max(firstAvailable, fallback);
     }
 
     private long timestampStartProbeTimeoutMs() {
-        return Math.max(MIN_TIMESTAMP_START_PROBE_TIMEOUT_MS, options.getPollTimeoutMs());
+        return Math.max(
+                MIN_TIMESTAMP_START_PROBE_TIMEOUT_MS,
+                Math.min(options.getPollTimeoutMs(), MAX_TIMESTAMP_START_PROBE_TIMEOUT_MS));
     }
 
     private long queryStreamTailOffsetForLatest(Environment env, String stream) {

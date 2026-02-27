@@ -66,15 +66,21 @@ final class StoredOffsetLookup {
     static final class LookupResult {
         private final Map<String, Long> offsets;
         private final List<String> failedStreams;
+        private final boolean interruptedOrTimedOut;
 
-        LookupResult(Map<String, Long> offsets, List<String> failedStreams) {
+        LookupResult(
+                Map<String, Long> offsets,
+                List<String> failedStreams,
+                boolean interruptedOrTimedOut) {
             this.offsets = offsets;
             this.failedStreams = failedStreams;
+            this.interruptedOrTimedOut = interruptedOrTimedOut;
         }
 
         Map<String, Long> getOffsets() { return offsets; }
         List<String> getFailedStreams() { return failedStreams; }
         boolean hasFailures() { return !failedStreams.isEmpty(); }
+        boolean wasInterruptedOrTimedOut() { return interruptedOrTimedOut; }
     }
 
     /**
@@ -137,9 +143,10 @@ final class StoredOffsetLookup {
                                             ExecutorService executor) {
         Map<String, Long> offsets = new LinkedHashMap<>();
         List<String> failed = new java.util.ArrayList<>();
+        boolean interruptedOrTimedOut = false;
 
         if (streams.isEmpty()) {
-            return new LookupResult(offsets, failed);
+            return new LookupResult(offsets, failed, false);
         }
 
         long effectiveTimeoutMs = Math.max(1L, futureTimeoutMs);
@@ -157,9 +164,13 @@ final class StoredOffsetLookup {
             // Collect results, preserving insertion order
             for (Map.Entry<String, Future<Long>> entry : futures.entrySet()) {
                 if (Thread.currentThread().isInterrupted()) {
-                    Thread.currentThread().interrupt();
-                    throw new IllegalStateException(
-                            "Interrupted during stored offset lookup");
+                    Thread.interrupted();
+                    markRemainingStreamsFailed(streams, failed, offsets);
+                    interruptedOrTimedOut = true;
+                    LOG.warn("Interrupted during stored offset lookup for consumer '{}'; "
+                                    + "falling back for unresolved streams: {}",
+                            consumerName, failed);
+                    break;
                 }
                 String stream = entry.getKey();
                 try {
@@ -189,14 +200,23 @@ final class StoredOffsetLookup {
                     }
                 } catch (TimeoutException e) {
                     entry.getValue().cancel(true);
-                    throw new IllegalStateException(
-                            "Timed out waiting for stored offset lookup for consumer '" +
-                                    consumerName + "' on stream '" + stream + "' after " +
-                                    effectiveTimeoutMs + "ms", e);
+                    if (!failed.contains(stream) && !offsets.containsKey(stream)) {
+                        failed.add(stream);
+                    }
+                    markRemainingStreamsFailed(streams, failed, offsets);
+                    interruptedOrTimedOut = true;
+                    LOG.warn("Timed out waiting for stored offset lookup for consumer '{}' "
+                                    + "after {}ms; falling back for unresolved streams: {}",
+                            consumerName, effectiveTimeoutMs, failed, e);
+                    break;
                 } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    throw new IllegalStateException(
-                            "Interrupted during stored offset lookup", e);
+                    Thread.interrupted();
+                    markRemainingStreamsFailed(streams, failed, offsets);
+                    interruptedOrTimedOut = true;
+                    LOG.warn("Interrupted during stored offset lookup for consumer '{}'; "
+                                    + "falling back for unresolved streams: {}",
+                            consumerName, failed, e);
+                    break;
                 }
             }
         } finally {
@@ -204,7 +224,16 @@ final class StoredOffsetLookup {
                 future.cancel(true);
             }
         }
-        return new LookupResult(offsets, failed);
+        return new LookupResult(offsets, failed, interruptedOrTimedOut);
+    }
+
+    private static void markRemainingStreamsFailed(
+            List<String> streams, List<String> failed, Map<String, Long> offsets) {
+        for (String stream : streams) {
+            if (!offsets.containsKey(stream) && !failed.contains(stream)) {
+                failed.add(stream);
+            }
+        }
     }
 
     /**
