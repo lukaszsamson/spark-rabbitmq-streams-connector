@@ -2,16 +2,24 @@ package io.github.lukaszsamson.spark.rabbitmq;
 
 import com.rabbitmq.stream.Address;
 import com.rabbitmq.stream.Environment;
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.RowFactory;
 import org.apache.spark.sql.streaming.StreamingQuery;
 import org.apache.spark.sql.streaming.Trigger;
+import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.StructType;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -347,6 +355,146 @@ class BugsReproIT extends AbstractRabbitMQIT {
         assertThat(secondCount).as("second run must not duplicate output").isEqualTo(firstCount);
     }
 
+    @Test
+    void singleActiveConsumerWithTimestampAndServerTrackingConsumesRows() throws Exception {
+        long startTs = System.currentTimeMillis() - 30_000L;
+        String consumerName = "bug9-sac-" + UUID.randomUUID().toString().substring(0, 8);
+        Path outputDir = Files.createTempDirectory("spark-bug9-out-");
+        Path checkpointDir = Files.createTempDirectory("spark-bug9-cp-");
+
+        StreamingQuery query = spark.readStream()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("startingOffsets", "timestamp")
+                .option("startingTimestamp", String.valueOf(startTs))
+                .option("singleActiveConsumer", "true")
+                .option("consumerName", consumerName)
+                .option("serverSideOffsetTracking", "true")
+                .option("initialCredits", "100")
+                .option("maxRecordsPerTrigger", "200")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "io.github.lukaszsamson.spark.rabbitmq.TestAddressResolver")
+                .load()
+                .writeStream()
+                .format("parquet")
+                .option("path", outputDir.toString())
+                .option("checkpointLocation", checkpointDir.toString())
+                .trigger(Trigger.ProcessingTime("2 seconds"))
+                .start();
+
+        publishMessagesAsync(stream, 300, "bug9-live-", 800L);
+        long count = waitForParquetCountAtLeast(outputDir, 10L, 35_000L);
+
+        var error = query.exception();
+        query.stop();
+
+        assertThat(error.isDefined())
+                .as("SAC timestamp query should not fail")
+                .isFalse();
+        assertThat(count)
+                .as("SAC timestamp query should consume rows from live stream")
+                .isGreaterThan(0L);
+    }
+
+    @Test
+    void compressionSnappyWithSubEntrySizePublishesAndReadsBack() {
+        String marker = "bug11-snappy-" + UUID.randomUUID().toString().substring(0, 8);
+        long count = writeCompressedAndCount(marker, "snappy");
+        assertThat(count)
+                .as("snappy + subEntrySize should publish and be readable")
+                .isEqualTo(10L);
+    }
+
+    @Test
+    void compressionZstdWithSubEntrySizePublishesAndReadsBack() {
+        String marker = "bug11-zstd-" + UUID.randomUUID().toString().substring(0, 8);
+        long count = writeCompressedAndCount(marker, "zstd");
+        assertThat(count)
+                .as("zstd + subEntrySize should publish and be readable")
+                .isEqualTo(10L);
+    }
+
+    @Test
+    void veryHighMinOffsetsPerTriggerStillProcessesAfterMaxTriggerDelay() throws Exception {
+        Path outputDir = Files.createTempDirectory("spark-bug12-out-");
+        Path checkpointDir = Files.createTempDirectory("spark-bug12-cp-");
+
+        StreamingQuery query = spark.readStream()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("startingOffsets", "latest")
+                .option("minOffsetsPerTrigger", "999999")
+                .option("maxTriggerDelay", "15s")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "io.github.lukaszsamson.spark.rabbitmq.TestAddressResolver")
+                .load()
+                .writeStream()
+                .format("parquet")
+                .option("path", outputDir.toString())
+                .option("checkpointLocation", checkpointDir.toString())
+                .trigger(Trigger.ProcessingTime("1 seconds"))
+                .start();
+
+        publishMessagesAsync(stream, 500, "bug12-live-", 1_000L);
+        long count = waitForParquetCountAtLeast(outputDir, 1L, 45_000L);
+
+        var error = query.exception();
+        query.stop();
+
+        assertThat(error.isDefined())
+                .as("minOffsets/maxTriggerDelay query should not fail")
+                .isFalse();
+        assertThat(count)
+                .as("maxTriggerDelay should eventually force a micro-batch")
+                .isGreaterThan(0L);
+    }
+
+    @Test
+    void checkpointResumeWithServerTrackingAndTimestampConsumesInPhaseOne() throws Exception {
+        String consumerName = "bug13-sst-" + UUID.randomUUID().toString().substring(0, 8);
+        long startTs = System.currentTimeMillis() - 60_000L;
+        Path outputDir = Files.createTempDirectory("spark-bug13-out-");
+        Path checkpointDir = Files.createTempDirectory("spark-bug13-cp-");
+
+        var baseReader = spark.readStream()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("startingOffsets", "timestamp")
+                .option("startingTimestamp", String.valueOf(startTs))
+                .option("consumerName", consumerName)
+                .option("serverSideOffsetTracking", "true")
+                .option("initialCredits", "100")
+                .option("maxRecordsPerTrigger", "500")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "io.github.lukaszsamson.spark.rabbitmq.TestAddressResolver")
+                .load();
+
+        StreamingQuery phase1 = baseReader.writeStream()
+                .format("parquet")
+                .option("path", outputDir.toString())
+                .option("checkpointLocation", checkpointDir.toString())
+                .trigger(Trigger.ProcessingTime("2 seconds"))
+                .start();
+
+        publishMessagesAsync(stream, 250, "bug13-phase1-", 800L);
+        long phase1Count = waitForParquetCountAtLeast(outputDir, 10L, 35_000L);
+        var phase1Error = phase1.exception();
+        phase1.stop();
+
+        assertThat(phase1Error.isDefined())
+                .as("phase 1 with SST+timestamp should not fail")
+                .isFalse();
+        assertThat(phase1Count)
+                .as("phase 1 should consume rows")
+                .isGreaterThan(0L);
+    }
+
     private long waitForParquetCountAtLeast(Path outputDir, long minimum, long timeoutMs)
             throws InterruptedException {
         long deadline = System.currentTimeMillis() + timeoutMs;
@@ -375,6 +523,43 @@ class BugsReproIT extends AbstractRabbitMQIT {
         } catch (IOException e) {
             throw new RuntimeException("Failed to inspect output directory " + outputDir, e);
         }
+    }
+
+    private long writeCompressedAndCount(String marker, String compressionCodec) {
+        StructType schema = new StructType()
+                .add("value", DataTypes.BinaryType, false);
+
+        List<Row> data = new ArrayList<>();
+        for (int i = 0; i < 10; i++) {
+            data.add(RowFactory.create((marker + "-" + i).getBytes(StandardCharsets.UTF_8)));
+        }
+
+        Dataset<Row> writeDf = spark.createDataFrame(data, schema);
+        writeDf.write()
+                .format("rabbitmq_streams")
+                .mode("append")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("compression", compressionCodec)
+                .option("subEntrySize", "5")
+                .option("addressResolverClass",
+                        "io.github.lukaszsamson.spark.rabbitmq.TestAddressResolver")
+                .save();
+
+        Dataset<Row> readDf = spark.read()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("startingOffsets", "earliest")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "io.github.lukaszsamson.spark.rabbitmq.TestAddressResolver")
+                .load();
+
+        return readDf.collectAsList().stream()
+                .map(row -> new String((byte[]) row.getAs("value"), StandardCharsets.UTF_8))
+                .filter(value -> value.startsWith(marker + "-"))
+                .count();
     }
 
     private void storeOffset(String consumerName, String streamName, long offset) {

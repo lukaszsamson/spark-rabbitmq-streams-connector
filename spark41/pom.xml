@@ -131,14 +131,6 @@
                                     <shadedPattern>${shading.prefix}.com.swiftmq</shadedPattern>
                                 </relocation>
                                 <relocation>
-                                    <pattern>org.xerial.snappy</pattern>
-                                    <shadedPattern>${shading.prefix}.org.xerial.snappy</shadedPattern>
-                                </relocation>
-                                <relocation>
-                                    <pattern>com.github.luben.zstd</pattern>
-                                    <shadedPattern>${shading.prefix}.com.github.luben.zstd</shadedPattern>
-                                </relocation>
-                                <relocation>
                                     <pattern>net.jpountz</pattern>
                                     <shadedPattern>${shading.prefix}.net.jpountz</shadedPattern>
                                 </relocation>
