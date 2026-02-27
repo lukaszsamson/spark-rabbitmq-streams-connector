@@ -254,7 +254,7 @@ By default, unrecognized columns cause an error. Set `ignoreUnknownColumns=true`
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `producerName` | string | — | Producer name (enables deduplication if set) |
+| `producerName` | string | — | Producer name. Enables retry dedup guarantees for streaming writes; batch writes remain at-least-once |
 | `publishing_id` | long column | — | Optional per-row publishing ID override in sink schema |
 | `publisherConfirmTimeoutMs` | long | — | Publisher confirm timeout (`0` disables timeout and waits for confirms indefinitely) |
 | `maxInFlight` | int | — | Max unconfirmed messages |
@@ -278,7 +278,8 @@ By default, unrecognized columns cause an error. Set `ignoreUnknownColumns=true`
 
 The connector provides at-least-once semantics for both source and sink:
 - **Source**: If a task fails before Spark commits, the same offset range is re-read on retry.
-- **Sink**: Publisher confirms ensure messages are persisted. With deduplication enabled (`producerName` set), streaming retries in the same `(queryId, partitionId, epochId)` reuse the same producer identity and publishing sequence.
+- **Sink (streaming)**: Publisher confirms ensure messages are persisted. With deduplication enabled (`producerName` set), retries in the same `(queryId, partitionId, epochId)` reuse the same producer identity and publishing sequence.
+- **Sink (batch)**: At-least-once only. Batch writer identities are task-scoped, so repeated `write.save()` calls or retried task attempts can append duplicates unless deterministic publishing IDs and producer identity semantics are provided explicitly by the application.
 
 ### Offset sources (priority order)
 
@@ -355,6 +356,8 @@ TLS is configured via JKS keystores/truststores converted to Netty `SslContext` 
 - Deduplication is not guaranteed when sub-entry batching/compression is enabled (`subEntrySize > 1`).
 - Streaming deduplication names are derived as `producerName + "-q" + sanitized(queryId) + "-p" + partitionId + "-e" + epochId` and start publishing IDs at `0` for each epoch-scoped producer identity.
 - Batch deduplication names remain task-scoped (`... + "-t" + taskId`) to avoid attempt collisions.
+- Batch mode does not provide retry dedup guarantees from `producerName` alone; treat batch sink semantics as at-least-once by default.
+- Deduplication guarantees are streaming-scoped by default; in batch mode, deterministic behavior requires explicitly supplied deterministic `publishing_id` values and producer identity control in the write workflow.
 - Streaming deduplication is incompatible with `spark.speculation=true`; the connector fails fast when speculation is enabled and `producerName` is set.
 
 ## Extension interfaces
