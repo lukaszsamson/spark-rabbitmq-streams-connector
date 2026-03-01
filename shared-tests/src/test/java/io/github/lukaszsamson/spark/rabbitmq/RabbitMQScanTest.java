@@ -204,6 +204,7 @@ class RabbitMQScanTest {
         @Test
         void timestampEndPlanningUsesPerStreamTimestampOverride() throws Exception {
             Map<String, String> opts = baseOptions();
+            opts.put("endingOffsets", "timestamp");
             opts.put("endingOffsetsByTimestamp", "{\"s1\":1700000000000}");
             opts.put("pollTimeoutMs", "1000");
             RabbitMQScan scan = new RabbitMQScan(new ConnectorOptions(opts), schema());

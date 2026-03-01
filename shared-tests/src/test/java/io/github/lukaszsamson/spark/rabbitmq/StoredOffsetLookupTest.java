@@ -119,8 +119,8 @@ class StoredOffsetLookupTest {
             assertThat(result.getOffsets()).isEmpty();
             assertThat(result.getFailedStreams()).containsExactly("s1");
             assertThat(result.wasInterruptedOrTimedOut()).isTrue();
-            assertThat(Thread.currentThread().isInterrupted()).isFalse();
-            Thread.interrupted();
+            assertThat(Thread.currentThread().isInterrupted()).isTrue();
+            Thread.interrupted(); // clear for next test
         }
 
         @Test

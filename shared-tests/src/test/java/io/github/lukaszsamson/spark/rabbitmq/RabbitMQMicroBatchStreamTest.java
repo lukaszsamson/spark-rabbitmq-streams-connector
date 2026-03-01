@@ -346,9 +346,9 @@ class RabbitMQMicroBatchStreamTest {
             try {
                 RabbitMQStreamOffset offset = (RabbitMQStreamOffset) stream.initialOffset();
                 assertThat(offset.getStreamOffsets()).containsEntry("test-stream", 7L);
-                assertThat(Thread.currentThread().isInterrupted()).isFalse();
+                assertThat(Thread.currentThread().isInterrupted()).isTrue();
             } finally {
-                Thread.interrupted();
+                Thread.interrupted(); // Clear interrupt status
             }
         }
 

@@ -602,9 +602,23 @@ class EnvironmentPoolTest {
 
     private static Object newEntry(Environment environment) throws Exception {
         Class<?> entryClass = Class.forName("io.github.lukaszsamson.spark.rabbitmq.EnvironmentPool$PooledEntry");
-        Constructor<?> ctor = entryClass.getDeclaredConstructor(Environment.class);
+        Constructor<?> ctor = entryClass.getDeclaredConstructor();
         ctor.setAccessible(true);
-        return ctor.newInstance(environment);
+        Object entry = ctor.newInstance();
+        
+        Field futureField = entryClass.getDeclaredField("environmentFuture");
+        futureField.setAccessible(true);
+        ((java.util.concurrent.CompletableFuture<Environment>) futureField.get(entry)).complete(environment);
+
+        Field envField = entryClass.getDeclaredField("environment");
+        envField.setAccessible(true);
+        envField.set(entry, environment);
+
+        Field refCountField = entryClass.getDeclaredField("refCount");
+        refCountField.setAccessible(true);
+        ((java.util.concurrent.atomic.AtomicInteger) refCountField.get(entry)).set(1);
+
+        return entry;
     }
 
     private static int getRefCount(Object entry) throws Exception {

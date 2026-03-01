@@ -490,7 +490,27 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
                     .builder();
         }
 
-        consumer = builder.build();
+        try {
+            consumer = builder.build();
+        } catch (NullPointerException e) {
+            // Workaround for rabbitmq-stream-java-client bug where Client.subscribe returns null
+            // when the connection is closed or stream is deleted concurrently, causing an NPE in
+            // ConsumersCoordinator$ClientSubscriptionsManager.add.
+            boolean isSubscribeResponseBug = e.getMessage() != null && e.getMessage().contains("subscribeResponse");
+            if (!isSubscribeResponseBug) {
+                for (StackTraceElement element : e.getStackTrace()) {
+                    if (element.getClassName().contains("ConsumersCoordinator$ClientSubscriptionsManager")
+                            && element.getMethodName().equals("add")) {
+                        isSubscribeResponseBug = true;
+                        break;
+                    }
+                }
+            }
+            if (isSubscribeResponseBug) {
+                throw new StreamDoesNotExistException(stream);
+            }
+            throw e;
+        }
 
         LOG.info("Opened consumer for stream '{}' with offsets [{}, {})",
                 stream, startOffset, endOffset);
