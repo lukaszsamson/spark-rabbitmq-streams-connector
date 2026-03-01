@@ -1620,19 +1620,17 @@ class BaseRabbitMQMicroBatchStream
             }
         }
 
+
         long resolved = resolveStartingOffset(stream);
         synchronized (mutableStateLock) {
-            Map<String, Long> currentInitial = this.initialOffsets;
-            if (currentInitial == null) {
-                currentInitial = new LinkedHashMap<>();
-                this.initialOffsets = currentInitial;
-            } else if (!(currentInitial instanceof LinkedHashMap)) {
-                currentInitial = new LinkedHashMap<>(currentInitial);
-                this.initialOffsets = currentInitial;
-            }
-            currentInitial.putIfAbsent(stream, resolved);
+            Map<String, Long> newInitial = this.initialOffsets == null 
+                    ? new LinkedHashMap<>() 
+                    : new LinkedHashMap<>(this.initialOffsets);
+            newInitial.putIfAbsent(stream, resolved);
+            this.initialOffsets = newInitial;
         }
         LOG.warn("Missing start offset for stream '{}' at {}; resolved from startingOffsets={} => {}",
+
                 stream, location, options.getStartingOffsets(), resolved);
         return resolved;
     }
