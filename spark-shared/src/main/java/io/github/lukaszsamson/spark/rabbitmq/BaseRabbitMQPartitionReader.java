@@ -62,8 +62,8 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
 
     boolean pooledEnvironment = false;
     volatile Environment environment;
-    Consumer consumer;
-    InternalRow currentRow;
+    volatile Consumer consumer;
+    volatile InternalRow currentRow;
     volatile long lastEmittedOffset = -1;
     volatile long lastObservedOffset = -1;
     boolean filteredTailReached = false;
@@ -74,9 +74,9 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
     long lastStatsTailOffset = -1L;
 
     // Task-level metric counters
-    long recordsRead = 0;
-    long payloadBytesRead = 0;
-    long estimatedWireBytesRead = 0;
+    volatile long recordsRead = 0;
+    volatile long payloadBytesRead = 0;
+    volatile long estimatedWireBytesRead = 0;
     long pollWaitMs = 0;
     long offsetOutOfRange = 0;
     long dataLoss = 0;
