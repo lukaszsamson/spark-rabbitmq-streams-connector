@@ -124,9 +124,15 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
                 }
                 builder.publishingId(explicitPublishingId);
                 if (nextPublishingId >= 0) {
+                    if (explicitPublishingId == Long.MAX_VALUE) {
+                        throw new IOException("Publishing ID space exhausted (reached Long.MAX_VALUE)");
+                    }
                     nextPublishingId = explicitPublishingId + 1;
                 }
             } else if (nextPublishingId >= 0) {
+                if (nextPublishingId == Long.MAX_VALUE) {
+                    throw new IOException("Publishing ID space exhausted (reached Long.MAX_VALUE)");
+                }
                 builder.publishingId(nextPublishingId++);
             }
             Message message = converter.convert(record, builder);
@@ -395,7 +401,12 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
 
             // Initialize dedup publishing ID
             if (derivedName != null) {
-                nextPublishingId = epochId >= 0 ? 0L : producer.getLastPublishingId() + 1;
+                long lastId = producer.getLastPublishingId();
+                if (lastId == Long.MAX_VALUE && epochId < 0) {
+                    throw new IllegalStateException(
+                            "Producer '" + derivedName + "' has exhausted publishing ID space");
+                }
+                nextPublishingId = epochId >= 0 ? 0L : lastId + 1;
                 LOG.info("Dedup enabled for partition {} with producer '{}', starting publishingId={}",
                         partitionId, derivedName, nextPublishingId);
             }

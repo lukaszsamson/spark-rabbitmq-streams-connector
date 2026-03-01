@@ -1431,9 +1431,11 @@ class BaseRabbitMQMicroBatchStream
      */
     long resolveStartingOffset(String stream) {
         // Check for per-stream timestamp override
-        Map<String, Long> perStreamTs = options.getStartingOffsetsByTimestamp();
-        if (perStreamTs != null && perStreamTs.containsKey(stream)) {
-            return resolveTimestampStartingOffset(getEnvironment(), stream, perStreamTs.get(stream));
+        if (options.getStartingOffsets() == StartingOffsetsMode.TIMESTAMP) {
+            Map<String, Long> perStreamTs = options.getStartingOffsetsByTimestamp();
+            if (perStreamTs != null && perStreamTs.containsKey(stream)) {
+                return resolveTimestampStartingOffset(getEnvironment(), stream, perStreamTs.get(stream));
+            }
         }
         return switch (options.getStartingOffsets()) {
             case EARLIEST -> resolveFirstAvailable(stream);
@@ -1778,8 +1780,12 @@ class BaseRabbitMQMicroBatchStream
 
         List<Map.Entry<String, Long>> toStore = new ArrayList<>();
         for (Map.Entry<String, Long> entry : endOffsets.entrySet()) {
-            if (entry.getValue() > 0) {
-                toStore.add(entry);
+            String stream = entry.getKey();
+            long offset = entry.getValue();
+            if (offset > 0) {
+                if (lastStoredEndOffsets == null || !Objects.equals(lastStoredEndOffsets.get(stream), offset)) {
+                    toStore.add(entry);
+                }
             }
         }
         if (toStore.isEmpty()) {

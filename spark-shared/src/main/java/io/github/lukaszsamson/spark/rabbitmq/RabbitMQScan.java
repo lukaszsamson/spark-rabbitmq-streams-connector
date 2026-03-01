@@ -306,10 +306,12 @@ final class RabbitMQScan implements Scan {
 
     private long resolveStartOffset(Environment env, String stream, long firstAvailable, StreamStats stats) {
         // Check for per-stream timestamp override
-        Map<String, Long> perStreamTs = options.getStartingOffsetsByTimestamp();
-        if (perStreamTs != null && perStreamTs.containsKey(stream)) {
-            return resolveTimestampStartingOffset(
-                    env, stream, firstAvailable, stats, perStreamTs.get(stream));
+        if (options.getStartingOffsets() == StartingOffsetsMode.TIMESTAMP) {
+            Map<String, Long> perStreamTs = options.getStartingOffsetsByTimestamp();
+            if (perStreamTs != null && perStreamTs.containsKey(stream)) {
+                return resolveTimestampStartingOffset(
+                        env, stream, firstAvailable, stats, perStreamTs.get(stream));
+            }
         }
         return switch (options.getStartingOffsets()) {
             case EARLIEST -> firstAvailable;
@@ -374,18 +376,17 @@ final class RabbitMQScan implements Scan {
     }
 
     private long resolveEndOffset(Environment env, String stream, StreamStats stats) {
-        // Check for per-stream ending timestamp override
-        Map<String, Long> perStreamTs = options.getEndingOffsetsByTimestamp();
-        if (perStreamTs != null && perStreamTs.containsKey(stream)) {
-            return resolveTimestampEndingOffset(env, stream, perStreamTs.get(stream));
+        if (options.getEndingOffsets() == EndingOffsetsMode.TIMESTAMP) {
+            // Check for per-stream ending timestamp override
+            Map<String, Long> perStreamTs = options.getEndingOffsetsByTimestamp();
+            if (perStreamTs != null && perStreamTs.containsKey(stream)) {
+                return resolveTimestampEndingOffset(env, stream, perStreamTs.get(stream));
+            }
+            return resolveTimestampEndingOffset(env, stream, options.getEndingTimestamp());
         }
 
         if (options.getEndingOffsets() == EndingOffsetsMode.OFFSET) {
             return options.getEndingOffset();
-        }
-
-        if (options.getEndingOffsets() == EndingOffsetsMode.TIMESTAMP) {
-            return resolveTimestampEndingOffset(env, stream, options.getEndingTimestamp());
         }
 
         // LATEST: defer resolution to executor (Kafka-style late binding).
@@ -443,7 +444,7 @@ final class RabbitMQScan implements Scan {
             // No messages at/after timestamp: all data is before the cutoff.
             // Use stream tail as ending offset (include everything).
             StreamStats stats = env.queryStreamStats(stream);
-            return resolveTailOffset(stats);
+            return resolveLatestOffset(env, stream, stats);
         } catch (NoOffsetException e) {
             // Stream is empty
             return 0;

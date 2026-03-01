@@ -64,8 +64,8 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
     volatile Environment environment;
     Consumer consumer;
     InternalRow currentRow;
-    long lastEmittedOffset = -1;
-    long lastObservedOffset = -1;
+    volatile long lastEmittedOffset = -1;
+    volatile long lastObservedOffset = -1;
     boolean filteredTailReached = false;
     volatile boolean finished = false;
     long lastTailProbeNanos = -1L;
@@ -294,6 +294,10 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
             // providing natural backpressure when the pull side is slow.
             qm.context().processed();
 
+            if (qm.offset() > lastObservedOffset) {
+                lastObservedOffset = qm.offset();
+            }
+
             // Skip messages before start offset (can happen with timestamp-based starting)
             if (qm.offset() < startOffset) {
                 continue;
@@ -302,10 +306,6 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
             // De-dup on reconnection: skip already-emitted offsets
             if (qm.offset() <= lastEmittedOffset) {
                 continue;
-            }
-
-            if (qm.offset() > lastObservedOffset) {
-                lastObservedOffset = qm.offset();
             }
 
             if (shouldSkipByTimestamp(qm.chunkTimestampMillis())) {

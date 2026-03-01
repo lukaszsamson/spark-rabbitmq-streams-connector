@@ -70,7 +70,8 @@ final class EnvironmentPool {
             String nettyByteBufAllocator,
             String nettyChannelCustomizer,
             String nettyBootstrapCustomizer,
-            String compressionCodecFactoryClass
+            String compressionCodecFactoryClass,
+            long environmentIdleTimeoutMs
     ) {
         static EnvironmentKey from(ConnectorOptions options) {
             return new EnvironmentKey(
@@ -105,7 +106,8 @@ final class EnvironmentPool {
                     options.getNettyByteBufAllocator(),
                     options.getNettyChannelCustomizer(),
                     options.getNettyBootstrapCustomizer(),
-                    options.getCompressionCodecFactoryClass()
+                    options.getCompressionCodecFactoryClass(),
+                    options.getEnvironmentIdleTimeoutMs()
             );
         }
 
