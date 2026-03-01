@@ -2055,6 +2055,20 @@ class RabbitMQMicroBatchStreamTest {
         }
 
         @Test
+        void latestOffsetAfterStopReturnsCachedOffsetWithoutBrokerAccess() throws Exception {
+            RabbitMQMicroBatchStream stream = createStream(minimalOptions());
+            setPrivateField(stream, "cachedLatestOffset",
+                    new RabbitMQStreamOffset(Map.of("test-stream", 9L)));
+
+            stream.stop();
+
+            RabbitMQStreamOffset latest = (RabbitMQStreamOffset) stream.latestOffset(
+                    new RabbitMQStreamOffset(Map.of("test-stream", 9L)),
+                    ReadLimit.allAvailable());
+            assertThat(latest.getStreamOffsets()).containsEntry("test-stream", 9L);
+        }
+
+        @Test
         void streamModeUsesSingleThreadBrokerExecutor() throws Exception {
             RabbitMQMicroBatchStream stream = createStream(minimalOptions());
             try {

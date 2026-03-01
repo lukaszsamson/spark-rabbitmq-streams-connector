@@ -121,6 +121,8 @@ class BaseRabbitMQMicroBatchStream
     volatile long lastAccumulatedMessageRecords;
     /** Recent per-stream tail probe results used by latestOffset planning. */
     final ConcurrentHashMap<String, CachedTailProbe> latestTailProbeCache = new ConcurrentHashMap<>();
+    /** Set once stop() begins to prevent new environment usage during shutdown. */
+    final AtomicBoolean stopping = new AtomicBoolean(false);
     /** Guards compound read-modify-write updates on mutable admission-control state. */
     final Object mutableStateLock = new Object();
 
@@ -338,6 +340,10 @@ class BaseRabbitMQMicroBatchStream
             } catch (Exception e) {
                 LOG.warn("Failed to persist broker offsets during stop()", e);
             }
+        }
+
+        if (!stopping.compareAndSet(false, true)) {
+            return;
         }
 
         brokerCommitExecutor.shutdownNow();
@@ -745,6 +751,9 @@ class BaseRabbitMQMicroBatchStream
 
     @Override
     public Offset latestOffset(Offset startOffset, ReadLimit limit) {
+        if (stopping.get()) {
+            return latestOffsetDuringStop(startOffset);
+        }
         RabbitMQStreamOffset invocationCached = getCachedLatestOffsetInvocation(startOffset, limit);
         if (invocationCached != null) {
             return invocationCached;
@@ -868,6 +877,17 @@ class BaseRabbitMQMicroBatchStream
     @Override
     public Offset reportLatestOffset() {
         return cachedTailOffset != null ? cachedTailOffset : cachedLatestOffset;
+    }
+
+    private Offset latestOffsetDuringStop(Offset startOffset) {
+        Offset cached = cachedTailOffset != null ? cachedTailOffset : cachedLatestOffset;
+        if (cached != null) {
+            return cached;
+        }
+        if (startOffset != null) {
+            return startOffset;
+        }
+        return new RabbitMQStreamOffset(Map.of());
     }
 
     // ---- SupportsTriggerAvailableNow ----
@@ -1226,11 +1246,17 @@ class BaseRabbitMQMicroBatchStream
     }
 
     Environment getEnvironment() {
+        if (stopping.get()) {
+            throw new IllegalStateException("Stream is stopping/stopped");
+        }
         Environment env = environment;
         if (env != null) {
             return env;
         }
         synchronized (this) {
+            if (stopping.get()) {
+                throw new IllegalStateException("Stream is stopping/stopped");
+            }
             env = environment;
             if (env == null) {
                 env = EnvironmentBuilderHelper.buildEnvironment(options);
