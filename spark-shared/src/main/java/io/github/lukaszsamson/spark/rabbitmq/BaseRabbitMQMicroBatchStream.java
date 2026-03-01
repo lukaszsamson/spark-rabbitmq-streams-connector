@@ -385,6 +385,8 @@ class BaseRabbitMQMicroBatchStream
         // Collect validated per-stream ranges
         Map<String, long[]> validRanges = new LinkedHashMap<>();
         Map<String, Long> startOffsets = startOffset.getStreamOffsets();
+        Map<String, Long> checkpointFallbackOffsets = null;
+        boolean checkpointFallbackLoaded = false;
         for (Map.Entry<String, Long> entry : endOffset.getStreamOffsets().entrySet()) {
             String stream = entry.getKey();
             long endOff = entry.getValue();
@@ -394,9 +396,14 @@ class BaseRabbitMQMicroBatchStream
                         "to avoid backfilling from configured startingOffsets", stream);
                 continue;
             }
+            if (knownStart == null && !checkpointFallbackLoaded) {
+                checkpointFallbackOffsets = loadCommittedOffsetsFromCheckpoint();
+                checkpointFallbackLoaded = true;
+            }
             long startOff = knownStart != null
                     ? knownStart
-                    : resolveMissingStartOffset(stream, "planInputPartitions");
+                    : resolveMissingStartOffset(
+                            stream, "planInputPartitions", checkpointFallbackOffsets);
 
             if (endOff <= startOff) {
                 continue;
@@ -761,6 +768,8 @@ class BaseRabbitMQMicroBatchStream
                 ? Map.of()
                 : start.getStreamOffsets();
         Map<String, Long> effectiveStartMap = new LinkedHashMap<>(startMap);
+        Map<String, Long> checkpointFallbackOffsets = null;
+        boolean checkpointFallbackLoaded = false;
         for (String stream : tailOffsets.keySet()) {
             if (!effectiveStartMap.containsKey(stream)) {
                 if (!options.isSuperStreamMode()) {
@@ -768,7 +777,14 @@ class BaseRabbitMQMicroBatchStream
                             + "skipping to avoid backfilling from configured startingOffsets", stream);
                     continue;
                 }
-                effectiveStartMap.put(stream, resolveMissingStartOffset(stream, "latestOffset"));
+                if (!checkpointFallbackLoaded) {
+                    checkpointFallbackOffsets = loadCommittedOffsetsFromCheckpoint();
+                    checkpointFallbackLoaded = true;
+                }
+                effectiveStartMap.put(
+                        stream,
+                        resolveMissingStartOffset(
+                                stream, "latestOffset", checkpointFallbackOffsets));
             }
         }
 
@@ -1610,7 +1626,8 @@ class BaseRabbitMQMicroBatchStream
         }
     }
 
-    private long resolveMissingStartOffset(String stream, String location) {
+    private long resolveMissingStartOffset(
+            String stream, String location, Map<String, Long> fromCheckpoint) {
         synchronized (mutableStateLock) {
             Map<String, Long> initial = this.initialOffsets;
             if (initial != null) {
@@ -1623,7 +1640,6 @@ class BaseRabbitMQMicroBatchStream
             }
         }
 
-        Map<String, Long> fromCheckpoint = loadCommittedOffsetsFromCheckpoint();
         if (fromCheckpoint != null) {
             Long committedOffset = fromCheckpoint.get(stream);
             if (committedOffset != null) {
@@ -1903,7 +1919,7 @@ class BaseRabbitMQMicroBatchStream
         return false;
     }
 
-    private Map<String, Long> loadCommittedOffsetsFromCheckpoint() {
+    Map<String, Long> loadCommittedOffsetsFromCheckpoint() {
         Path sourceCheckpointPath = toCheckpointPath();
         if (sourceCheckpointPath == null) {
             return null;

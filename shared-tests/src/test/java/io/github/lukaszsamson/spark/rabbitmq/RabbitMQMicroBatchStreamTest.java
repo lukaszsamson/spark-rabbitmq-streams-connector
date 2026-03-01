@@ -638,6 +638,31 @@ class RabbitMQMicroBatchStreamTest {
         }
 
         @Test
+        void planInputPartitionsLoadsCheckpointFallbackOnlyOnceForMultipleMissingStreams()
+                throws Exception {
+            Map<String, String> optsMap = new LinkedHashMap<>();
+            optsMap.put("endpoints", "localhost:5552");
+            optsMap.put("superstream", "super");
+            ConnectorOptions opts = new ConnectorOptions(optsMap);
+            var schema = RabbitMQStreamTable.buildSourceSchema(opts.getMetadataFields());
+            CheckpointFallbackCountingMicroBatchStream stream =
+                    new CheckpointFallbackCountingMicroBatchStream(
+                            opts,
+                            schema,
+                            "/tmp/checkpoint",
+                            java.util.List.of("s1", "s2"),
+                            Map.of("s1", 2L, "s2", 3L));
+            setPrivateField(stream, "environment", new FirstOffsetEnvironment(0L));
+
+            InputPartition[] partitions = stream.planInputPartitions(
+                    new RabbitMQStreamOffset(Map.of()),
+                    new RabbitMQStreamOffset(Map.of("s1", 10L, "s2", 11L)));
+
+            assertThat(partitions).hasSize(2);
+            assertThat(stream.checkpointLoadCalls()).isEqualTo(1);
+        }
+
+        @Test
         void marksConfiguredStartingOffsetOnlyForInitialTimestampBatch() throws Exception {
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
@@ -955,6 +980,31 @@ class RabbitMQMicroBatchStreamTest {
                     start, ReadLimit.maxRows(20));
 
             assertThat(latest.getStreamOffsets()).containsEntry("test-stream", 20L);
+        }
+
+        @Test
+        void latestOffsetLoadsCheckpointFallbackOnlyOnceForMultipleMissingStreams() throws Exception {
+            Map<String, String> optsMap = new LinkedHashMap<>();
+            optsMap.put("endpoints", "localhost:5552");
+            optsMap.put("superstream", "super");
+            ConnectorOptions opts = new ConnectorOptions(optsMap);
+            var schema = RabbitMQStreamTable.buildSourceSchema(opts.getMetadataFields());
+            CheckpointFallbackCountingMicroBatchStream stream =
+                    new CheckpointFallbackCountingMicroBatchStream(
+                            opts,
+                            schema,
+                            "/tmp/checkpoint",
+                            java.util.List.of("s1", "s2"),
+                            Map.of("s1", 2L, "s2", 3L));
+            setPrivateField(stream, "availableNowSnapshot", Map.of("s1", 10L, "s2", 11L));
+
+            RabbitMQStreamOffset latest = (RabbitMQStreamOffset) stream.latestOffset(
+                    new RabbitMQStreamOffset(Map.of()), ReadLimit.allAvailable());
+
+            assertThat(latest.getStreamOffsets())
+                    .containsEntry("s1", 10L)
+                    .containsEntry("s2", 11L);
+            assertThat(stream.checkpointLoadCalls()).isEqualTo(1);
         }
 
         @Test
@@ -2413,6 +2463,39 @@ class RabbitMQMicroBatchStreamTest {
             int current = Math.min(index, discoveries.size() - 1);
             index++;
             return discoveries.get(current);
+        }
+    }
+
+    private static final class CheckpointFallbackCountingMicroBatchStream
+            extends BaseRabbitMQMicroBatchStream {
+        private final java.util.List<String> forcedStreams;
+        private final Map<String, Long> checkpointOffsets;
+        private int checkpointLoadCalls;
+
+        private CheckpointFallbackCountingMicroBatchStream(
+                ConnectorOptions options,
+                org.apache.spark.sql.types.StructType schema,
+                String checkpointLocation,
+                java.util.List<String> forcedStreams,
+                Map<String, Long> checkpointOffsets) {
+            super(options, schema, checkpointLocation);
+            this.forcedStreams = forcedStreams;
+            this.checkpointOffsets = checkpointOffsets;
+        }
+
+        @Override
+        synchronized java.util.List<String> discoverStreams() {
+            return forcedStreams;
+        }
+
+        @Override
+        synchronized Map<String, Long> loadCommittedOffsetsFromCheckpoint() {
+            checkpointLoadCalls++;
+            return checkpointOffsets;
+        }
+
+        int checkpointLoadCalls() {
+            return checkpointLoadCalls;
         }
     }
 
