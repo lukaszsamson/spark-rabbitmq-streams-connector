@@ -1585,22 +1585,26 @@ class BaseRabbitMQMicroBatchStream
         if (options.getStartingOffsets() != StartingOffsetsMode.TIMESTAMP) {
             return false;
         }
-        Map<String, Long> initial = this.initialOffsets;
-        if (initial == null) {
-            return false;
+        synchronized (mutableStateLock) {
+            Map<String, Long> initial = this.initialOffsets;
+            if (initial == null) {
+                return false;
+            }
+            Long initialOffset = initial.get(stream);
+            return initialOffset != null && initialOffset == startOffset;
         }
-        Long initialOffset = initial.get(stream);
-        return initialOffset != null && initialOffset == startOffset;
     }
 
     private long resolveMissingStartOffset(String stream, String location) {
-        Map<String, Long> initial = this.initialOffsets;
-        if (initial != null) {
-            Long initialOffset = initial.get(stream);
-            if (initialOffset != null) {
-                LOG.warn("Missing start offset for stream '{}' at {}; using initialOffset={}",
-                        stream, location, initialOffset);
-                return initialOffset;
+        synchronized (mutableStateLock) {
+            Map<String, Long> initial = this.initialOffsets;
+            if (initial != null) {
+                Long initialOffset = initial.get(stream);
+                if (initialOffset != null) {
+                    LOG.warn("Missing start offset for stream '{}' at {}; using initialOffset={}",
+                            stream, location, initialOffset);
+                    return initialOffset;
+                }
             }
         }
 

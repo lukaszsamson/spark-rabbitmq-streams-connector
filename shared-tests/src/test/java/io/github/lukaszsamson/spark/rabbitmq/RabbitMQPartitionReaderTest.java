@@ -1572,11 +1572,11 @@ class RabbitMQPartitionReaderTest {
     class FlowCredits {
 
         @Test
-        void computeEffectiveInitialCreditsScalesToFinitePlannedRange() {
+        void computeEffectiveInitialCreditsRespectsConfiguredValue() {
             int effective = BaseRabbitMQPartitionReader.computeEffectiveInitialCredits(
                     10, 10_000, 100L, 600L);
 
-            assertThat(effective).isEqualTo(500);
+            assertThat(effective).isEqualTo(10);
         }
 
         @Test
@@ -1590,7 +1590,7 @@ class RabbitMQPartitionReaderTest {
         @Test
         void computeEffectiveInitialCreditsCapsToQueueCapacity() {
             int effective = BaseRabbitMQPartitionReader.computeEffectiveInitialCredits(
-                    10, 250, 0L, 2_000L);
+                    1000, 250, 0L, 2_000L);
 
             assertThat(effective).isEqualTo(250);
         }

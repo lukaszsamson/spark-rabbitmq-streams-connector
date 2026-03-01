@@ -333,6 +333,7 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
             return;
         }
         finished = true;
+        queue.clear(); // Immediately unblock Netty callback
         // Report actual message sizes for running average estimation.
         // Prefer Spark accumulators (driver-visible across executors); fall back to JVM-local tracker.
         if (messageSizeBytesAccumulator != null && messageSizeRecordsAccumulator != null) {
@@ -519,6 +520,11 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
         long committedChunkFallback = 0;
         try {
             StreamStats stats = env.queryStreamStats(stream);
+            try {
+                stats.firstOffset();
+            } catch (NoOffsetException e) {
+                return 0L; // Stream is genuinely empty, bypass probe
+            }
             statsTail = BaseRabbitMQMicroBatchStream.resolveTailOffset(stats);
             // Keep committedChunkId()+1 as a last-resort fallback for batch reads.
             // resolveTailOffset intentionally omits +1 to avoid overshoot in streaming,
@@ -569,18 +575,7 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
             long endOffset) {
         int configured = Math.max(1, configuredInitialCredits);
         int capacity = Math.max(1, queueCapacity);
-        if (endOffset <= startOffset || endOffset == Long.MAX_VALUE) {
-            return Math.min(configured, capacity);
-        }
-
-        long plannedRange = endOffset - startOffset;
-        long boundedRange = Math.min((long) capacity, plannedRange);
-        if (boundedRange <= 0L) {
-            return Math.min(configured, capacity);
-        }
-
-        long effective = Math.max(configured, boundedRange);
-        return (int) Math.min(capacity, Math.min(Integer.MAX_VALUE, effective));
+        return Math.min(configured, capacity);
     }
 
     void enqueueFromCallback(MessageHandler.Context context, Message message) {
