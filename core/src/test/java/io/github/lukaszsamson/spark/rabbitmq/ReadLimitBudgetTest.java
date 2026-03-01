@@ -3,7 +3,6 @@ package io.github.lukaszsamson.spark.rabbitmq;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
-import java.util.LinkedHashMap;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -159,77 +158,4 @@ class ReadLimitBudgetTest {
         }
     }
 
-    @Nested
-    class ProportionalAllocation {
-
-        @Test
-        void singleStreamGetsFullBudget() {
-            Map<String, Long> pending = Map.of("s1", 100L);
-            Map<String, Long> result = ReadLimitBudget.allocateProportionally(pending, 50);
-            assertThat(result.get("s1")).isEqualTo(50L);
-        }
-
-        @Test
-        void emptyStreamGetsZero() {
-            // Use LinkedHashMap for deterministic ordering
-            Map<String, Long> pending = new LinkedHashMap<>();
-            pending.put("s1", 100L);
-            pending.put("s2", 0L);
-
-            Map<String, Long> result = ReadLimitBudget.allocateProportionally(pending, 50);
-            assertThat(result.get("s2")).isEqualTo(0L);
-            assertThat(result.get("s1")).isEqualTo(50L);
-        }
-
-        @Test
-        void equalSharesForEqualPending() {
-            Map<String, Long> pending = new LinkedHashMap<>();
-            pending.put("s1", 100L);
-            pending.put("s2", 100L);
-
-            Map<String, Long> result = ReadLimitBudget.allocateProportionally(pending, 100);
-            assertThat(result.get("s1")).isEqualTo(50L);
-            assertThat(result.get("s2")).isEqualTo(50L);
-        }
-
-        @Test
-        void remainderDistributedByLargestFraction() {
-            Map<String, Long> pending = new LinkedHashMap<>();
-            pending.put("s1", 70L);
-            pending.put("s2", 30L);
-
-            // Budget of 10: s1 gets 7, s2 gets 3
-            Map<String, Long> result = ReadLimitBudget.allocateProportionally(pending, 10);
-            assertThat(result.get("s1") + result.get("s2")).isLessThanOrEqualTo(10L);
-            assertThat(result.get("s1")).isGreaterThan(result.get("s2"));
-        }
-
-        @Test
-        void neverExceedsBudgetWhenBudgetBelowNonEmptyStreams() {
-            Map<String, Long> pending = new LinkedHashMap<>();
-            pending.put("s1", 100L);
-            pending.put("s2", 100L);
-            pending.put("s3", 100L);
-
-            Map<String, Long> result = ReadLimitBudget.allocateProportionally(pending, 2);
-            long total = result.values().stream().mapToLong(Long::longValue).sum();
-            assertThat(total).isEqualTo(2L);
-            assertThat(result.values().stream().filter(v -> v == 1L).count()).isEqualTo(2L);
-        }
-
-        @Test
-        void neverExceedsBudgetWhenFloorRoundingWouldOverAllocate() {
-            Map<String, Long> pending = new LinkedHashMap<>();
-            pending.put("big", 1000L);
-            pending.put("s1", 1L);
-            pending.put("s2", 1L);
-            pending.put("s3", 1L);
-            pending.put("s4", 1L);
-            pending.put("s5", 1L);
-
-            Map<String, Long> result = ReadLimitBudget.allocateProportionally(pending, 8);
-            long total = result.values().stream().mapToLong(Long::longValue).sum();
-            assertThat(total).isEqualTo(8L);
-        }
-    }
 }

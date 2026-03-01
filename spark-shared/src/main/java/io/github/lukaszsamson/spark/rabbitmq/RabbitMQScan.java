@@ -46,30 +46,49 @@ final class RabbitMQScan implements Scan {
                     StoredOffsetLookup.MAX_CONCURRENT_LOOKUPS));
     private static final AtomicInteger TAIL_PROBE_THREAD_COUNTER = new AtomicInteger(0);
     private static final AtomicInteger RANGE_RESOLVER_THREAD_COUNTER = new AtomicInteger(0);
-    // Shared pool to avoid per-stream short-lived executor churn during tail probing.
-    private static final ExecutorService TAIL_PROBE_TIMEOUT_EXECUTOR =
-            Executors.newFixedThreadPool(TAIL_PROBE_EXECUTOR_PARALLELISM, r -> {
-                Thread t = new Thread(
-                        r,
-                        "rabbitmq-scan-tail-probe-" + TAIL_PROBE_THREAD_COUNTER.incrementAndGet());
-                t.setDaemon(true);
-                return t;
-            });
-    // Shared pool to avoid per-call range resolver thread churn.
-    private static final ExecutorService RANGE_RESOLVER_EXECUTOR =
-            Executors.newFixedThreadPool(RANGE_RESOLVER_EXECUTOR_PARALLELISM, r -> {
-                Thread t = new Thread(
-                        r,
-                        "rabbitmq-scan-range-resolver-"
-                                + RANGE_RESOLVER_THREAD_COUNTER.incrementAndGet());
-                t.setDaemon(true);
-                return t;
-            });
-    static {
-        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            TAIL_PROBE_TIMEOUT_EXECUTOR.shutdownNow();
-            RANGE_RESOLVER_EXECUTOR.shutdownNow();
-        }, "rabbitmq-scan-executors-shutdown"));
+
+    // Lazily initialize shared pools so idle scans do not allocate worker threads.
+    private static final class SharedExecutors {
+        private static final ExecutorService TAIL_PROBE_TIMEOUT_EXECUTOR =
+                createTailProbeExecutor();
+        private static final ExecutorService RANGE_RESOLVER_EXECUTOR =
+                createRangeResolverExecutor();
+
+        static {
+            Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+                TAIL_PROBE_TIMEOUT_EXECUTOR.shutdownNow();
+                RANGE_RESOLVER_EXECUTOR.shutdownNow();
+            }, "rabbitmq-scan-executors-shutdown"));
+        }
+    }
+
+    private static ExecutorService tailProbeTimeoutExecutor() {
+        return SharedExecutors.TAIL_PROBE_TIMEOUT_EXECUTOR;
+    }
+
+    private static ExecutorService rangeResolverExecutor() {
+        return SharedExecutors.RANGE_RESOLVER_EXECUTOR;
+    }
+
+    private static ExecutorService createTailProbeExecutor() {
+        return Executors.newFixedThreadPool(TAIL_PROBE_EXECUTOR_PARALLELISM, r -> {
+            Thread t = new Thread(
+                    r,
+                    "rabbitmq-scan-tail-probe-" + TAIL_PROBE_THREAD_COUNTER.incrementAndGet());
+            t.setDaemon(true);
+            return t;
+        });
+    }
+
+    private static ExecutorService createRangeResolverExecutor() {
+        return Executors.newFixedThreadPool(RANGE_RESOLVER_EXECUTOR_PARALLELISM, r -> {
+            Thread t = new Thread(
+                    r,
+                    "rabbitmq-scan-range-resolver-"
+                            + RANGE_RESOLVER_THREAD_COUNTER.incrementAndGet());
+            t.setDaemon(true);
+            return t;
+        });
     }
 
     private final ConnectorOptions options;
@@ -196,7 +215,7 @@ final class RabbitMQScan implements Scan {
 
         Map<String, Future<long[]>> futures = new LinkedHashMap<>();
         for (String stream : streams) {
-            futures.put(stream, RANGE_RESOLVER_EXECUTOR.submit(() -> resolveStreamOffsetRange(env, stream)));
+            futures.put(stream, rangeResolverExecutor().submit(() -> resolveStreamOffsetRange(env, stream)));
         }
         for (Map.Entry<String, Future<long[]>> entry : futures.entrySet()) {
             long[] range = awaitResolvedRange(entry.getKey(), entry.getValue());
@@ -480,7 +499,7 @@ final class RabbitMQScan implements Scan {
 
     private long probeTailOffsetFromLastMessageWithTimeout(
             Environment env, String stream, long timeoutMs) {
-        Future<Long> future = TAIL_PROBE_TIMEOUT_EXECUTOR.submit(
+        Future<Long> future = tailProbeTimeoutExecutor().submit(
                 () -> probeTailOffsetFromLastMessage(env, stream));
         try {
             return future.get(timeoutMs, TimeUnit.MILLISECONDS);

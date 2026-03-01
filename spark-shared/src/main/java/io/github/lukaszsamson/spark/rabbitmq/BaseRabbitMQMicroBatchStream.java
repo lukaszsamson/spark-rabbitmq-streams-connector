@@ -1768,7 +1768,7 @@ class BaseRabbitMQMicroBatchStream
         }
     }
 
-    private int currentEstimatedMessageSize() {
+    final int currentEstimatedMessageSize() {
         synchronized (mutableStateLock) {
             return estimatedMessageSize;
         }

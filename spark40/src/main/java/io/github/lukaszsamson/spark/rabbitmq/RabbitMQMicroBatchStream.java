@@ -63,7 +63,7 @@ final class RabbitMQMicroBatchStream extends BaseRabbitMQMicroBatchStream {
 
         if (limit instanceof ReadMaxBytes maxBytes) {
             return ReadLimitBudget.distributeByteBudget(
-                    startOffsets, tailOffsets, maxBytes.maxBytes(), estimatedMessageSize);
+                    startOffsets, tailOffsets, maxBytes.maxBytes(), currentEstimatedMessageSize());
         }
 
         if (limit instanceof CompositeReadLimit composite) {
