@@ -260,9 +260,6 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
                 continue;
             }
 
-            // Reset wait timer on message receipt
-            totalWaitMs = 0;
-            waitStartNanos = System.nanoTime();
 
             if (consumerClosed.get()
                     && shouldDetectOffsetGapsAfterConsumerClosure()
