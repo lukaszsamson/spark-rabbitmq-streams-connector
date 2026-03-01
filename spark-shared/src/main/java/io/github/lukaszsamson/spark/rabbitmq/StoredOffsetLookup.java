@@ -164,7 +164,7 @@ final class StoredOffsetLookup {
             // Collect results, preserving insertion order
             for (Map.Entry<String, Future<Long>> entry : futures.entrySet()) {
                 if (Thread.currentThread().isInterrupted()) {
-                    Thread.interrupted();
+                    Thread.currentThread().interrupt();
                     markRemainingStreamsFailed(streams, failed, offsets);
                     interruptedOrTimedOut = true;
                     LOG.warn("Interrupted during stored offset lookup for consumer '{}'; "
@@ -210,7 +210,7 @@ final class StoredOffsetLookup {
                             consumerName, effectiveTimeoutMs, failed, e);
                     break;
                 } catch (InterruptedException e) {
-                    Thread.interrupted();
+                    Thread.currentThread().interrupt();
                     markRemainingStreamsFailed(streams, failed, offsets);
                     interruptedOrTimedOut = true;
                     LOG.warn("Interrupted during stored offset lookup for consumer '{}'; "
