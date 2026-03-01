@@ -319,7 +319,9 @@ class BaseRabbitMQMicroBatchStream
 
         RabbitMQStreamOffset endOffset = (RabbitMQStreamOffset) end;
         Map<String, Long> committed = new LinkedHashMap<>(endOffset.getStreamOffsets());
-        lastCommittedEndOffsets = committed;
+        synchronized (mutableStateLock) {
+            lastCommittedEndOffsets = committed;
+        }
         persistBrokerOffsets(committed);
     }
 
@@ -1859,7 +1861,9 @@ class BaseRabbitMQMicroBatchStream
         }
 
         if (commitObservationComplete) {
-            lastStoredEndOffsets = new LinkedHashMap<>(endOffsets);
+            synchronized (mutableStateLock) {
+                lastStoredEndOffsets = new LinkedHashMap<>(endOffsets);
+            }
         }
     }
 
