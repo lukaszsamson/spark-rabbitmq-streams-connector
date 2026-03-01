@@ -1931,7 +1931,7 @@ class BaseRabbitMQMicroBatchStream
             }
 
             Set<String> knownStreams = new LinkedHashSet<>();
-            List<String> discovered = streams;
+            List<String> discovered = discoverStreams();
             if (discovered != null) {
                 knownStreams.addAll(discovered);
             }
