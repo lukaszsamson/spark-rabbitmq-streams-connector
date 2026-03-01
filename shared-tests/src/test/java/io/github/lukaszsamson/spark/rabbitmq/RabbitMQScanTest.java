@@ -64,6 +64,20 @@ class RabbitMQScanTest {
         }
 
         @Test
+        void toBatchSuperStreamOperationalFailureFailsEvenWhenFailOnDataLossFalse() {
+            Map<String, String> opts = baseOptions();
+            opts.remove("stream");
+            opts.put("superstream", "super");
+            opts.put("failOnDataLoss", "false");
+            RabbitMQScan scan = new RabbitMQScan(new ConnectorOptions(opts), schema());
+
+            assertThatThrownBy(() ->
+                    resolveStreamOffsetRange(scan, new QueryFailureEnvironment(), "partition"))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("Failed to query stream stats");
+        }
+
+        @Test
         void discoverSuperStreamEmptyPartitionsRespectsFailOnDataLoss() {
             Map<String, String> opts = baseOptions();
             opts.remove("stream");
@@ -374,6 +388,52 @@ class RabbitMQScanTest {
         @Override
         public StreamStats queryStreamStats(String stream) {
             throw new StreamDoesNotExistException(streamMode ? stream : "partition");
+        }
+
+        @Override
+        public StreamCreator streamCreator() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void deleteStream(String stream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void deleteSuperStream(String superStream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void storeOffset(String reference, String stream, long offset) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public boolean streamExists(String stream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public ProducerBuilder producerBuilder() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public ConsumerBuilder consumerBuilder() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void close() {
+        }
+    }
+
+    private static final class QueryFailureEnvironment implements Environment {
+        @Override
+        public StreamStats queryStreamStats(String stream) {
+            throw new RuntimeException("connection failed");
         }
 
         @Override

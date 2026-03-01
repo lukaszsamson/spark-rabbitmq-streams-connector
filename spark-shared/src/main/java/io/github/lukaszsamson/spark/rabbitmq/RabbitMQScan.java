@@ -252,12 +252,10 @@ final class RabbitMQScan implements Scan {
             LOG.warn("Partition stream '{}' does not exist, skipping (failOnDataLoss=false)", stream);
             return null;
         } catch (Exception e) {
-            if (options.isFailOnDataLoss()) {
-                throw new IllegalStateException(
-                        "Failed to query stream stats for '" + stream + "'", e);
-            }
-            LOG.warn("Failed to query stream stats for '{}', skipping: {}", stream, e.getMessage());
-            return null;
+            // failOnDataLoss controls retention/topology data loss handling.
+            // Operational failures (auth/TLS/connectivity/protocol) must fail fast.
+            throw new IllegalStateException(
+                    "Failed to query stream stats for '" + stream + "'", e);
         }
 
         long firstAvailable;
