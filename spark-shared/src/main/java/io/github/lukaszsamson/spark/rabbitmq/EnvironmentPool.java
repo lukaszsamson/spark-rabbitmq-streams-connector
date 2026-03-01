@@ -133,18 +133,8 @@ final class EnvironmentPool {
     private static final class PooledEntry {
         final CompletableFuture<Environment> environmentFuture = new CompletableFuture<>();
         volatile Environment environment;
-        final AtomicInteger refCount = new AtomicInteger(1);
+        final AtomicInteger refCount = new AtomicInteger(0);
         volatile ScheduledFuture<?> evictionTask;
-
-        PooledEntry() {
-            this.refCount.set(0);
-        }
-
-        PooledEntry(Environment environment) {
-            Environment validated = Objects.requireNonNull(environment);
-            this.environment = validated;
-            this.environmentFuture.complete(validated);
-        }
     }
 
     private final ConcurrentHashMap<EnvironmentKey, PooledEntry> pool = new ConcurrentHashMap<>();
