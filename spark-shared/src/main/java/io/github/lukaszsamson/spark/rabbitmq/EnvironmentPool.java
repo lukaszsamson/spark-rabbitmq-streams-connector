@@ -361,7 +361,12 @@ final class EnvironmentPool {
                     entry.evictionTask = null;
                 }
                 try {
-                    entry.environment.close();
+                    Environment environment = entry.environment;
+                    if (environment != null) {
+                        environment.close();
+                    }
+                } catch (RuntimeException e) {
+                    LOG.debug("Runtime error closing environment during pool shutdown", e);
                 } catch (Exception e) {
                     LOG.debug("Error closing environment during pool shutdown", e);
                 }
