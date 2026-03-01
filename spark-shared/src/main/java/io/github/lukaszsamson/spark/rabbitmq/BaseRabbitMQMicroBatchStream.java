@@ -1006,7 +1006,7 @@ class BaseRabbitMQMicroBatchStream
         Long maxBytes = extractReadMaxBytes(limit);
         if (maxBytes != null) {
             return ReadLimitBudget.distributeByteBudget(
-                    startOffsets, tailOffsets, maxBytes, estimatedMessageSize);
+                    startOffsets, tailOffsets, maxBytes, currentEstimatedMessageSize());
         }
 
         if (limit instanceof CompositeReadLimit composite) {
