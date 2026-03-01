@@ -48,24 +48,50 @@ final class RabbitMQScan implements Scan {
                     StoredOffsetLookup.MAX_CONCURRENT_LOOKUPS));
     private static final AtomicInteger TAIL_PROBE_THREAD_COUNTER = new AtomicInteger(0);
     private static final AtomicInteger RANGE_RESOLVER_THREAD_COUNTER = new AtomicInteger(0);
-    // Shared pool to avoid per-stream short-lived executor churn during tail probing.
-    private static final ExecutorService TAIL_PROBE_TIMEOUT_EXECUTOR =
-            Executors.newFixedThreadPool(TAIL_PROBE_EXECUTOR_PARALLELISM, r -> {
-                Thread t = new Thread(
-                        r,
-                        "rabbitmq-scan-tail-probe-" + TAIL_PROBE_THREAD_COUNTER.incrementAndGet());
-                t.setDaemon(true);
-                return t;
-            });
-    private static final ExecutorService RANGE_RESOLVER_EXECUTOR =
-            Executors.newFixedThreadPool(RANGE_RESOLVER_EXECUTOR_PARALLELISM, r -> {
-                Thread t = new Thread(
-                        r,
-                        "rabbitmq-scan-range-resolver-"
-                                + RANGE_RESOLVER_THREAD_COUNTER.incrementAndGet());
-                t.setDaemon(true);
-                return t;
-            });
+
+    // Lazily initialize shared pools so idle scans do not allocate worker threads.
+    private static final class SharedExecutors {
+        private static final ExecutorService TAIL_PROBE_TIMEOUT_EXECUTOR =
+                createTailProbeExecutor();
+        private static final ExecutorService RANGE_RESOLVER_EXECUTOR =
+                createRangeResolverExecutor();
+
+        static {
+            Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+                TAIL_PROBE_TIMEOUT_EXECUTOR.shutdownNow();
+                RANGE_RESOLVER_EXECUTOR.shutdownNow();
+            }, "rabbitmq-scan-executors-shutdown"));
+        }
+    }
+
+    private static ExecutorService tailProbeTimeoutExecutor() {
+        return SharedExecutors.TAIL_PROBE_TIMEOUT_EXECUTOR;
+    }
+
+    private static ExecutorService rangeResolverExecutor() {
+        return SharedExecutors.RANGE_RESOLVER_EXECUTOR;
+    }
+
+    private static ExecutorService createTailProbeExecutor() {
+        return Executors.newFixedThreadPool(TAIL_PROBE_EXECUTOR_PARALLELISM, r -> {
+            Thread t = new Thread(
+                    r,
+                    "rabbitmq-scan-tail-probe-" + TAIL_PROBE_THREAD_COUNTER.incrementAndGet());
+            t.setDaemon(true);
+            return t;
+        });
+    }
+
+    private static ExecutorService createRangeResolverExecutor() {
+        return Executors.newFixedThreadPool(RANGE_RESOLVER_EXECUTOR_PARALLELISM, r -> {
+            Thread t = new Thread(
+                    r,
+                    "rabbitmq-scan-range-resolver-"
+                            + RANGE_RESOLVER_THREAD_COUNTER.incrementAndGet());
+            t.setDaemon(true);
+            return t;
+        });
+    }
 
     private final ConnectorOptions options;
     private final StructType schema;
@@ -186,7 +212,7 @@ final class RabbitMQScan implements Scan {
 
         Map<String, Future<long[]>> futures = new LinkedHashMap<>();
         for (String stream : streams) {
-            futures.put(stream, RANGE_RESOLVER_EXECUTOR.submit(() -> resolveStreamOffsetRange(env, stream)));
+            futures.put(stream, rangeResolverExecutor().submit(() -> resolveStreamOffsetRange(env, stream)));
         }
         for (Map.Entry<String, Future<long[]>> entry : futures.entrySet()) {
             long[] range = awaitResolvedRange(entry.getKey(), entry.getValue());
@@ -242,12 +268,10 @@ final class RabbitMQScan implements Scan {
             LOG.warn("Partition stream '{}' does not exist, skipping (failOnDataLoss=false)", stream);
             return null;
         } catch (Exception e) {
-            if (options.isFailOnDataLoss()) {
-                throw new IllegalStateException(
-                        "Failed to query stream stats for '" + stream + "'", e);
-            }
-            LOG.warn("Failed to query stream stats for '{}', skipping: {}", stream, e.getMessage());
-            return null;
+            // failOnDataLoss controls retention/topology data loss handling.
+            // Operational failures (auth/TLS/connectivity/protocol) must fail fast.
+            throw new IllegalStateException(
+                    "Failed to query stream stats for '" + stream + "'", e);
         }
 
         long firstAvailable;
@@ -295,10 +319,12 @@ final class RabbitMQScan implements Scan {
     }
 
     private long resolveStartOffset(Environment env, String stream, long firstAvailable, StreamStats stats) {
-        Map<String, Long> perStreamTs = options.getStartingOffsetsByTimestamp();
-        if (perStreamTs != null && perStreamTs.containsKey(stream)) {
-            return resolveTimestampStartingOffset(
-                    env, stream, firstAvailable, stats, perStreamTs.get(stream));
+        if (options.getStartingOffsets() == StartingOffsetsMode.TIMESTAMP) {
+            Map<String, Long> perStreamTs = options.getStartingOffsetsByTimestamp();
+            if (perStreamTs != null && perStreamTs.containsKey(stream)) {
+                return resolveTimestampStartingOffset(
+                        env, stream, firstAvailable, stats, perStreamTs.get(stream));
+            }
         }
         return switch (options.getStartingOffsets()) {
             case EARLIEST -> firstAvailable;
@@ -331,16 +357,9 @@ final class RabbitMQScan implements Scan {
             if (observed != null) {
                 return Math.max(firstAvailable, observed);
             }
-            // No messages at/after timestamp — fail fast so the user gets a clear error
-            // instead of silently empty results.
-            throw new RuntimeException(
-                    "No messages found at or after timestamp " + timestamp
-                            + " in stream '" + stream + "'");
+            return handleTimestampStartNoMatch(env, stream, firstAvailable, stats, timestamp);
         } catch (NoOffsetException e) {
-            // Broker explicitly reports no matching offset for the requested timestamp.
-            throw new RuntimeException(
-                    "No offset matched from request for timestamp " + timestamp
-                            + " in stream '" + stream + "'", e);
+            return handleTimestampStartNoMatch(env, stream, firstAvailable, stats, timestamp);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new IllegalStateException(
@@ -361,6 +380,20 @@ final class RabbitMQScan implements Scan {
                 }
             }
         }
+    }
+
+    private long handleTimestampStartNoMatch(
+            Environment env, String stream, long firstAvailable, StreamStats stats, long timestamp) {
+        if (options.getStartingOffsetsByTimestampStrategy()
+                == StartingOffsetsByTimestampStrategy.LATEST) {
+            long tailExclusive = resolveLatestOffset(env, stream, stats);
+            return Math.max(firstAvailable, tailExclusive);
+        }
+        throw new IllegalStateException(
+                "No offset matched the requested starting timestamp " + timestamp
+                        + " for stream '" + stream + "'. "
+                        + "Set '" + ConnectorOptions.STARTING_OFFSETS_BY_TIMESTAMP_STRATEGY
+                        + "=latest' to fall back to tail.");
     }
 
     private long timestampProbeTimeoutMs() {
@@ -449,7 +482,7 @@ final class RabbitMQScan implements Scan {
 
     private long probeTailOffsetFromLastMessageWithTimeout(
             Environment env, String stream, long timeoutMs) {
-        Future<Long> future = TAIL_PROBE_TIMEOUT_EXECUTOR.submit(
+        Future<Long> future = tailProbeTimeoutExecutor().submit(
                 () -> probeTailOffsetFromLastMessage(env, stream));
         try {
             return future.get(timeoutMs, TimeUnit.MILLISECONDS);
