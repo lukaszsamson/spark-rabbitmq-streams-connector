@@ -64,6 +64,8 @@ public final class ConnectorOptions implements Serializable {
     public static final String STARTING_OFFSET = "startingOffset";
     public static final String STARTING_TIMESTAMP = "startingTimestamp";
     public static final String STARTING_OFFSETS_BY_TIMESTAMP = "startingOffsetsByTimestamp";
+    public static final String STARTING_OFFSETS_BY_TIMESTAMP_STRATEGY =
+            "startingOffsetsByTimestampStrategy";
     public static final String ENDING_OFFSETS = "endingOffsets";
     public static final String ENDING_OFFSET = "endingOffset";
     public static final String ENDING_TIMESTAMP = "endingTimestamp";
@@ -120,6 +122,9 @@ public final class ConnectorOptions implements Serializable {
     public static final boolean DEFAULT_TLS = false;
     public static final boolean DEFAULT_TLS_TRUST_ALL = false;
     public static final StartingOffsetsMode DEFAULT_STARTING_OFFSETS = StartingOffsetsMode.EARLIEST;
+    public static final StartingOffsetsByTimestampStrategy
+            DEFAULT_STARTING_OFFSETS_BY_TIMESTAMP_STRATEGY =
+            StartingOffsetsByTimestampStrategy.ERROR;
     public static final EndingOffsetsMode DEFAULT_ENDING_OFFSETS = EndingOffsetsMode.LATEST;
     public static final boolean DEFAULT_FILTER_MATCH_UNFILTERED = false;
     public static final boolean DEFAULT_FILTER_WARNING_ON_MISMATCH = true;
@@ -182,6 +187,7 @@ public final class ConnectorOptions implements Serializable {
     private final Long startingOffset;
     private final Long startingTimestamp;
     private final Map<String, Long> startingOffsetsByTimestamp;
+    private final StartingOffsetsByTimestampStrategy startingOffsetsByTimestampStrategy;
     private final EndingOffsetsMode endingOffsets;
     private final Long endingOffset;
     private final Long endingTimestamp;
@@ -286,6 +292,10 @@ public final class ConnectorOptions implements Serializable {
         this.startingTimestamp = getLong(options, STARTING_TIMESTAMP);
         this.startingOffsetsByTimestamp = parseJsonLongMap(
                 getString(options, STARTING_OFFSETS_BY_TIMESTAMP));
+        this.startingOffsetsByTimestampStrategy = parseEnum(
+                options, STARTING_OFFSETS_BY_TIMESTAMP_STRATEGY,
+                StartingOffsetsByTimestampStrategy::fromString,
+                DEFAULT_STARTING_OFFSETS_BY_TIMESTAMP_STRATEGY);
         this.endingOffsets = parseEnum(options, ENDING_OFFSETS,
                 EndingOffsetsMode::fromString, DEFAULT_ENDING_OFFSETS);
         this.endingOffset = getLong(options, ENDING_OFFSET);
@@ -849,6 +859,9 @@ public final class ConnectorOptions implements Serializable {
     public Long getStartingOffset() { return startingOffset; }
     public Long getStartingTimestamp() { return startingTimestamp; }
     public Map<String, Long> getStartingOffsetsByTimestamp() { return startingOffsetsByTimestamp; }
+    public StartingOffsetsByTimestampStrategy getStartingOffsetsByTimestampStrategy() {
+        return startingOffsetsByTimestampStrategy;
+    }
     public EndingOffsetsMode getEndingOffsets() { return endingOffsets; }
     public Long getEndingOffset() { return endingOffset; }
     public Long getEndingTimestamp() { return endingTimestamp; }

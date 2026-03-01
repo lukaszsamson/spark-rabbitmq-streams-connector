@@ -332,6 +332,22 @@ class ConnectorOptionsTest {
         }
 
         @Test
+        void startingOffsetsByTimestampStrategyDefaultsToError() {
+            var opts = new ConnectorOptions(minimalStreamOptions());
+            assertThat(opts.getStartingOffsetsByTimestampStrategy())
+                    .isEqualTo(StartingOffsetsByTimestampStrategy.ERROR);
+        }
+
+        @Test
+        void parsesStartingOffsetsByTimestampStrategyLatest() {
+            var map = minimalStreamOptions();
+            map.put("startingOffsetsByTimestampStrategy", "latest");
+            var opts = new ConnectorOptions(map);
+            assertThat(opts.getStartingOffsetsByTimestampStrategy())
+                    .isEqualTo(StartingOffsetsByTimestampStrategy.LATEST);
+        }
+
+        @Test
         void parsesStartingOffsetsByTimestampWithEscapedBackslashBeforeQuote() {
             var map = minimalStreamOptions();
             map.put("startingOffsetsByTimestamp", "{\"a\\\\\":1,\"x\":2}");
@@ -366,6 +382,16 @@ class ConnectorOptionsTest {
                     .isInstanceOf(IllegalArgumentException.class)
                     .hasMessageContaining("startingOffsets")
                     .hasMessageContaining("bogus");
+        }
+
+        @Test
+        void rejectsInvalidStartingOffsetsByTimestampStrategy() {
+            var map = minimalStreamOptions();
+            map.put("startingOffsetsByTimestampStrategy", "boom");
+            assertThatThrownBy(() -> new ConnectorOptions(map))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("startingOffsetsByTimestampStrategy")
+                    .hasMessageContaining("boom");
         }
 
         @Test

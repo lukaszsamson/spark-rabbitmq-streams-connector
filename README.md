@@ -221,6 +221,7 @@ By default, unrecognized columns cause an error. Set `ignoreUnknownColumns=true`
 | `startingOffset` | long | — | Starting offset (required when `startingOffsets=offset`) |
 | `startingTimestamp` | long | — | Starting timestamp in epoch millis (required when `startingOffsets=timestamp`) |
 | `startingOffsetsByTimestamp` | string | — | Per-stream starting timestamps as JSON map (e.g. `{"stream-0": 1700000000000}`). Overrides `startingTimestamp` for individual streams when `startingOffsets=timestamp` |
+| `startingOffsetsByTimestampStrategy` | string | error | Strategy when no offset exists at/after requested starting timestamp: `error` (Kafka-compatible default, fail query) or `latest` (fallback to tail and produce empty batch if no new data) |
 | `endingOffsets` | string | latest | `latest`, `offset`, or `timestamp` (batch only) |
 | `endingOffset` | long | — | Ending offset (required when `endingOffsets=offset`) |
 | `endingTimestamp` | long | — | Ending timestamp in epoch millis (required when `endingOffsets=timestamp`, unless `endingOffsetsByTimestamp` is set) |

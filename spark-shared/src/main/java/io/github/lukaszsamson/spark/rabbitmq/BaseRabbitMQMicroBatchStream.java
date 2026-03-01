@@ -1461,10 +1461,9 @@ class BaseRabbitMQMicroBatchStream
         try {
             firstAvailable = resolveFirstAvailable(stream);
         } catch (Exception e) {
-            LOG.warn("Failed to query first available offset for stream '{}' while resolving "
-                            + "timestamp start; continuing with fallback firstAvailable=0. Cause: {}",
-                    stream, e.getMessage());
-            firstAvailable = 0L;
+            throw new IllegalStateException(
+                    "Failed to resolve first available offset for timestamp start in stream '"
+                            + stream + "'", e);
         }
         final int maxAttempts = 3;
         for (int attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -1488,20 +1487,22 @@ class BaseRabbitMQMicroBatchStream
                     return Math.max(firstAvailable, observed);
                 }
 
-                // No records at/after timestamp: plan an empty range near the tail.
-                long tailExclusive = queryStreamTailOffsetForLatest(env, stream);
-                return Math.max(firstAvailable, tailExclusive);
+                return handleTimestampStartNoMatch(env, stream, firstAvailable, timestamp);
             } catch (NoOffsetException e) {
-                return firstAvailable;
+                return handleTimestampStartNoMatch(env, stream, firstAvailable, timestamp);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                break;
+                throw new IllegalStateException(
+                        "Interrupted resolving timestamp start offset for stream '" + stream + "'",
+                        e);
             } catch (Exception e) {
-                if (attempt == maxAttempts) {
-                    break;
+                if (attempt < maxAttempts) {
+                    LOG.warn("Failed to resolve timestamp start offset for stream '{}' (attempt {}/{}): {}",
+                            stream, attempt, maxAttempts, e.getMessage());
+                    continue;
                 }
-                LOG.warn("Failed to resolve timestamp start offset for stream '{}' (attempt {}/{}): {}",
-                        stream, attempt, maxAttempts, e.getMessage());
+                throw new IllegalStateException(
+                        "Failed to resolve timestamp start offset for stream '" + stream + "'", e);
             } finally {
                 if (probe != null) {
                     try {
@@ -1513,12 +1514,22 @@ class BaseRabbitMQMicroBatchStream
                 }
             }
         }
+        throw new IllegalStateException(
+                "Failed to resolve timestamp start offset for stream '" + stream + "'");
+    }
 
-        long fallback = queryStreamTailOffsetForLatest(env, stream);
-        LOG.warn("Falling back to latest tail offset {} for stream '{}' after timestamp-start "
-                        + "probe failures (timestamp={}, firstAvailable={})",
-                fallback, stream, timestamp, firstAvailable);
-        return Math.max(firstAvailable, fallback);
+    private long handleTimestampStartNoMatch(
+            Environment env, String stream, long firstAvailable, long timestamp) {
+        if (options.getStartingOffsetsByTimestampStrategy()
+                == StartingOffsetsByTimestampStrategy.LATEST) {
+            long tailExclusive = queryStreamTailOffsetForLatest(env, stream);
+            return Math.max(firstAvailable, tailExclusive);
+        }
+        throw new IllegalStateException(
+                "No offset matched the requested starting timestamp " + timestamp
+                        + " for stream '" + stream + "'. "
+                        + "Set '" + ConnectorOptions.STARTING_OFFSETS_BY_TIMESTAMP_STRATEGY
+                        + "=latest' to fall back to tail.");
     }
 
     private long timestampStartProbeTimeoutMs() {

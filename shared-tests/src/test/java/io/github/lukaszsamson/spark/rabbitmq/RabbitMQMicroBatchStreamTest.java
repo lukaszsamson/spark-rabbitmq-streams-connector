@@ -295,7 +295,7 @@ class RabbitMQMicroBatchStreamTest {
         }
 
         @Test
-        void initialOffsetTimestampProbeFailureFallsBackToLatestTail()
+        void initialOffsetTimestampProbeFailureFailsFast()
                 throws Exception {
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
@@ -308,8 +308,9 @@ class RabbitMQMicroBatchStreamTest {
             setPrivateField(stream, "environment",
                     new ThrowingConsumerBuilderEnvironment(new RuntimeException("probe failed")));
 
-            RabbitMQStreamOffset offset = (RabbitMQStreamOffset) stream.initialOffset();
-            assertThat(offset.getStreamOffsets()).containsEntry("test-stream", 1L);
+            assertThatThrownBy(stream::initialOffset)
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("Failed to resolve timestamp start offset");
         }
 
         @Test
@@ -480,6 +481,7 @@ class RabbitMQMicroBatchStreamTest {
             opts.put("stream", "test-stream");
             opts.put("startingOffsets", "timestamp");
             opts.put("startingTimestamp", "1700000000000");
+            opts.put("startingOffsetsByTimestampStrategy", "latest");
             opts.put("consumerName", "timestamp-consumer");
 
             RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
@@ -1011,6 +1013,43 @@ class RabbitMQMicroBatchStreamTest {
 
             RabbitMQStreamOffset offset = (RabbitMQStreamOffset) stream.initialOffset();
             assertThat(offset.getStreamOffsets()).containsEntry("test-stream", 42L);
+        }
+
+        @Test
+        void resolveStartingOffsetTimestampWithoutMatchFailsByDefault() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("startingOffsets", "timestamp");
+            opts.put("startingTimestamp", "4102444800000");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            setPrivateField(stream, "environment",
+                    new TimestampStartEnvironment(10L, java.util.List.of()));
+
+            assertThatThrownBy(stream::initialOffset)
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasRootCauseMessage(
+                            "No offset matched the requested starting timestamp 4102444800000 "
+                                    + "for stream 'test-stream'. Set "
+                                    + "'startingOffsetsByTimestampStrategy=latest' to fall back to tail.");
+        }
+
+        @Test
+        void resolveStartingOffsetTimestampWithoutMatchUsesTailWhenStrategyLatest() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("startingOffsets", "timestamp");
+            opts.put("startingTimestamp", "4102444800000");
+            opts.put("startingOffsetsByTimestampStrategy", "latest");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            setPrivateField(stream, "environment",
+                    new TimestampStartEnvironment(10L, java.util.List.of()));
+
+            RabbitMQStreamOffset offset = (RabbitMQStreamOffset) stream.initialOffset();
+            assertThat(offset.getStreamOffsets()).containsEntry("test-stream", 11L);
         }
 
         @Test

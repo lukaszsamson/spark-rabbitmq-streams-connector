@@ -341,16 +341,9 @@ final class RabbitMQScan implements Scan {
             if (observed != null) {
                 return Math.max(firstAvailable, observed);
             }
-            // No messages at/after timestamp — fail fast so the user gets a clear error
-            // instead of silently empty results.
-            throw new RuntimeException(
-                    "No messages found at or after timestamp " + timestamp
-                            + " in stream '" + stream + "'");
+            return handleTimestampStartNoMatch(env, stream, firstAvailable, stats, timestamp);
         } catch (NoOffsetException e) {
-            // Broker explicitly reports no matching offset for the requested timestamp.
-            throw new RuntimeException(
-                    "No offset matched from request for timestamp " + timestamp
-                            + " in stream '" + stream + "'", e);
+            return handleTimestampStartNoMatch(env, stream, firstAvailable, stats, timestamp);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new IllegalStateException(
@@ -371,6 +364,20 @@ final class RabbitMQScan implements Scan {
                 }
             }
         }
+    }
+
+    private long handleTimestampStartNoMatch(
+            Environment env, String stream, long firstAvailable, StreamStats stats, long timestamp) {
+        if (options.getStartingOffsetsByTimestampStrategy()
+                == StartingOffsetsByTimestampStrategy.LATEST) {
+            long tailExclusive = resolveLatestOffset(env, stream, stats);
+            return Math.max(firstAvailable, tailExclusive);
+        }
+        throw new IllegalStateException(
+                "No offset matched the requested starting timestamp " + timestamp
+                        + " for stream '" + stream + "'. "
+                        + "Set '" + ConnectorOptions.STARTING_OFFSETS_BY_TIMESTAMP_STRATEGY
+                        + "=latest' to fall back to tail.");
     }
 
     private long resolveEndOffset(Environment env, String stream, StreamStats stats) {

@@ -183,9 +183,7 @@ class RabbitMQScanTest {
         }
 
         @Test
-        void timestampStartPlanningWithoutMatchingRecordThrows() {
-            // When startingOffsets=timestamp but no records match the timestamp,
-            // the planner throws instead of silently returning an empty range.
+        void timestampStartPlanningWithoutMatchingRecordFailsByDefault() {
             Map<String, String> opts = baseOptions();
             opts.put("startingOffsets", "timestamp");
             opts.put("startingTimestamp", "4102444800000"); // 2100-01-01T00:00:00Z
@@ -195,7 +193,21 @@ class RabbitMQScanTest {
                     new DelayedProbeEnvironment(0L, new Stats(10L, false, false, 99L)),
                     "s1"))
                     .isInstanceOf(IllegalStateException.class)
-                    .hasMessageContaining("Failed to resolve timestamp start offset");
+                    .hasMessageContaining("No offset matched");
+        }
+
+        @Test
+        void timestampStartPlanningWithoutMatchingRecordUsesTailWhenStrategyLatest() {
+            Map<String, String> opts = baseOptions();
+            opts.put("startingOffsets", "timestamp");
+            opts.put("startingTimestamp", "4102444800000"); // 2100-01-01T00:00:00Z
+            opts.put("startingOffsetsByTimestampStrategy", "latest");
+            RabbitMQScan scan = new RabbitMQScan(new ConnectorOptions(opts), schema());
+
+            long[] range = resolveStreamOffsetRange(scan,
+                    new DelayedProbeEnvironment(0L, new Stats(10L, false, false, 99L)),
+                    "s1");
+            assertThat(range).isNull();
         }
 
         @Test

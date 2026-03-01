@@ -1137,10 +1137,30 @@ class BatchReadIT extends AbstractRabbitMQIT {
         assertThat(df4.collectAsList()).hasSize(5);
     }
 
-    // ---- IT-OFFSET-007: no matched timestamp resolves to error ----
+    // ---- IT-OFFSET-007: no matched timestamp strategy parity with Kafka ----
 
     @Test
-    void batchReadTimestampNoMatchFailsFast() {
+    void batchReadTimestampNoMatchErrorsByDefault() {
+        publishMessages(stream, 10, "ts-");
+
+        long futureTimestamp = System.currentTimeMillis() + 24 * 60 * 60 * 1000L;
+
+        assertThatThrownBy(() -> spark.read()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("startingOffsets", "timestamp")
+                .option("startingTimestamp", String.valueOf(futureTimestamp))
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "io.github.lukaszsamson.spark.rabbitmq.TestAddressResolver")
+                .load()
+                .collectAsList())
+                .hasMessageContaining("No offset matched");
+    }
+
+    @Test
+    void batchReadTimestampNoMatchLatestStrategyReturnsEmpty() {
         publishMessages(stream, 10, "ts-");
 
         long futureTimestamp = System.currentTimeMillis() + 24 * 60 * 60 * 1000L;
@@ -1151,16 +1171,13 @@ class BatchReadIT extends AbstractRabbitMQIT {
                 .option("stream", stream)
                 .option("startingOffsets", "timestamp")
                 .option("startingTimestamp", String.valueOf(futureTimestamp))
+                .option("startingOffsetsByTimestampStrategy", "latest")
                 .option("metadataFields", "")
                 .option("addressResolverClass",
                         "io.github.lukaszsamson.spark.rabbitmq.TestAddressResolver")
                 .load();
 
-        assertThatThrownBy(df::collectAsList)
-                .satisfies(ex -> assertThat(ex.toString())
-                        .containsAnyOf(
-                                "No offset matched from request",
-                                "Failed to resolve timestamp start offset"));
+        assertThat(df.collectAsList()).isEmpty();
     }
 
     // ---- IT-OPT-006-source: invalid option combinations ----
