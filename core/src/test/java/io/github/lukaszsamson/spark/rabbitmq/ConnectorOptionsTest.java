@@ -1500,6 +1500,7 @@ class ConnectorOptionsTest {
         @Test
         void rejectsNegativeStartingOffsetsByTimestampEntry() {
             var map = minimalStreamOptions();
+            map.put("startingOffsets", "timestamp");
             map.put("startingOffsetsByTimestamp", "{\"orders\":-1}");
             var opts = new ConnectorOptions(map);
             assertThatThrownBy(opts::validateForSource)
@@ -1512,6 +1513,7 @@ class ConnectorOptionsTest {
         @Test
         void rejectsNegativeEndingOffsetsByTimestampEntry() {
             var map = minimalStreamOptions();
+            map.put("endingOffsets", "timestamp");
             map.put("endingOffsetsByTimestamp", "{\"orders\":-1}");
             var opts = new ConnectorOptions(map);
             assertThatThrownBy(opts::validateForSource)
@@ -1597,7 +1599,7 @@ class ConnectorOptionsTest {
 
         @Test
         void rejectsCustomRoutingWithoutPartitionerClass() {
-            var map = minimalStreamOptions();
+            var map = minimalSuperStreamOptions();
             map.put("routingStrategy", "custom");
             var opts = new ConnectorOptions(map);
             assertThatThrownBy(opts::validateForSink)
@@ -1609,7 +1611,7 @@ class ConnectorOptionsTest {
 
         @Test
         void acceptsCustomRoutingWithPartitionerClass() {
-            var map = minimalStreamOptions();
+            var map = minimalSuperStreamOptions();
             map.put("routingStrategy", "custom");
             map.put("partitionerClass", TestRoutingStrategy.class.getName());
             var opts = new ConnectorOptions(map);
@@ -1696,7 +1698,7 @@ class ConnectorOptionsTest {
 
         @Test
         void rejectsInvalidPartitionerClassNotFound() {
-            var map = minimalStreamOptions();
+            var map = minimalSuperStreamOptions();
             map.put("routingStrategy", "custom");
             map.put("partitionerClass", "com.nonexistent.Router");
             var opts = new ConnectorOptions(map);
@@ -1757,7 +1759,7 @@ class ConnectorOptionsTest {
 
         @Test
         void rejectsPartitionerClassWrongType() {
-            var map = minimalStreamOptions();
+            var map = minimalSuperStreamOptions();
             map.put("routingStrategy", "custom");
             map.put("partitionerClass", "java.lang.String");
             var opts = new ConnectorOptions(map);

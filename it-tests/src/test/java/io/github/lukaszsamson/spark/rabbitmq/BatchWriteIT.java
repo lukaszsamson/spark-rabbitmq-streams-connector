@@ -955,7 +955,7 @@ class BatchWriteIT extends AbstractRabbitMQIT {
                         .format("rabbitmq_streams")
                         .mode("append")
                         .option("endpoints", streamEndpoint())
-                        .option("stream", stream)
+                        .option("superStream", stream)
                         .option("routingStrategy", "custom")
                         .option("addressResolverClass",
                                 "io.github.lukaszsamson.spark.rabbitmq.TestAddressResolver")

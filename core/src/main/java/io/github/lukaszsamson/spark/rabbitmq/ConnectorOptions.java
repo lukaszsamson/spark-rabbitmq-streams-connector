@@ -501,6 +501,10 @@ public final class ConnectorOptions implements Serializable {
             throw new IllegalArgumentException(
                     "'" + FILTER_VALUE_PATH + "' is not applicable to source reads");
         }
+        if (filterValueExtractorClass != null && !filterValueExtractorClass.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "'" + FILTER_VALUE_EXTRACTOR_CLASS + "' is not applicable to source reads");
+        }
         if (compressionCodecFactoryClass != null && !compressionCodecFactoryClass.isEmpty()) {
             throw new IllegalArgumentException(
                     "'" + COMPRESSION_CODEC_FACTORY_CLASS + "' is not applicable to source reads");
@@ -520,6 +524,12 @@ public final class ConnectorOptions implements Serializable {
                     "'" + STARTING_TIMESTAMP + "' or '" + STARTING_OFFSETS_BY_TIMESTAMP +
                             "' is required when '" + STARTING_OFFSETS + "' is 'timestamp'");
         }
+        if (startingOffsets != StartingOffsetsMode.TIMESTAMP
+                && startingOffsetsByTimestamp != null && !startingOffsetsByTimestamp.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "'" + STARTING_OFFSETS_BY_TIMESTAMP + "' is only supported when '" +
+                            STARTING_OFFSETS + "' is 'timestamp'");
+        }
         // endingOffsets=offset requires endingOffset
         if (endingOffsets == EndingOffsetsMode.OFFSET && endingOffset == null) {
             throw new IllegalArgumentException(
@@ -533,6 +543,12 @@ public final class ConnectorOptions implements Serializable {
             throw new IllegalArgumentException(
                     "'" + ENDING_TIMESTAMP + "' or '" + ENDING_OFFSETS_BY_TIMESTAMP +
                             "' is required when '" + ENDING_OFFSETS + "' is 'timestamp'");
+        }
+        if (endingOffsets != EndingOffsetsMode.TIMESTAMP
+                && endingOffsetsByTimestamp != null && !endingOffsetsByTimestamp.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "'" + ENDING_OFFSETS_BY_TIMESTAMP + "' is only supported when '" +
+                            ENDING_OFFSETS + "' is 'timestamp'");
         }
         // Numeric range checks
         if (startingOffset != null && startingOffset < 0) {
@@ -673,8 +689,19 @@ public final class ConnectorOptions implements Serializable {
             }
         }
 
+        if (!isSuperStreamMode()) {
+            if (routingStrategy != DEFAULT_ROUTING_STRATEGY) {
+                throw new IllegalArgumentException(
+                        "'" + ROUTING_STRATEGY + "' is only valid for superstream sink mode");
+            }
+            if (partitionerClass != null && !partitionerClass.isEmpty()) {
+                throw new IllegalArgumentException(
+                        "'" + PARTITIONER_CLASS + "' is only valid for superstream sink mode");
+            }
+        }
+
         // routingStrategy=custom requires partitionerClass
-        if (routingStrategy == RoutingStrategyType.CUSTOM) {
+        if (isSuperStreamMode() && routingStrategy == RoutingStrategyType.CUSTOM) {
             if (partitionerClass == null || partitionerClass.isEmpty()) {
                 throw new IllegalArgumentException(
                         "'" + PARTITIONER_CLASS + "' is required when '" + ROUTING_STRATEGY +
