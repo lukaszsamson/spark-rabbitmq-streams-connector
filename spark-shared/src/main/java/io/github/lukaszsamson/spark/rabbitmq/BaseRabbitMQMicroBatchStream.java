@@ -409,7 +409,10 @@ class BaseRabbitMQMicroBatchStream
             long startOff = knownStart != null
                     ? knownStart
                     : resolveMissingStartOffset(
-                            stream, "planInputPartitions", checkpointFallbackOffsets);
+                            stream,
+                            "planInputPartitions",
+                            checkpointFallbackOffsets,
+                            true);
 
             if (endOff <= startOff) {
                 continue;
@@ -783,7 +786,8 @@ class BaseRabbitMQMicroBatchStream
         for (String stream : tailOffsets.keySet()) {
             if (!effectiveStartMap.containsKey(stream)) {
                 if (!options.isSuperStreamMode()) {
-                    long stableStart = resolveMissingStartOffset(stream, "latestOffset", null);
+                    long stableStart = resolveMissingStartOffset(
+                            stream, "latestOffset", null, false);
                     long tailOff = tailOffsets.getOrDefault(stream, 0L);
                     if (tailOff <= stableStart) {
                         LOG.warn("Start offset for stream '{}' is missing in start map at latestOffset; "
@@ -805,7 +809,10 @@ class BaseRabbitMQMicroBatchStream
                 effectiveStartMap.put(
                         stream,
                         resolveMissingStartOffset(
-                                stream, "latestOffset", checkpointFallbackOffsets));
+                                stream,
+                                "latestOffset",
+                                checkpointFallbackOffsets,
+                                start != null));
             }
         }
 
@@ -1681,7 +1688,10 @@ class BaseRabbitMQMicroBatchStream
     }
 
     private long resolveMissingStartOffset(
-            String stream, String location, Map<String, Long> fromCheckpoint) {
+            String stream,
+            String location,
+            Map<String, Long> fromCheckpoint,
+            boolean discoveredAfterStart) {
         synchronized (mutableStateLock) {
             Map<String, Long> initial = this.initialOffsets;
             if (initial != null) {
@@ -1703,8 +1713,17 @@ class BaseRabbitMQMicroBatchStream
             }
         }
 
-
-        long resolved = resolveStartingOffset(stream);
+        long resolved;
+        if (options.isSuperStreamMode() && discoveredAfterStart) {
+            resolved = resolveFirstAvailable(stream);
+            LOG.warn("Missing start offset for stream '{}' at {}; initializing newly discovered "
+                            + "superstream partition from first available offset {}",
+                    stream, location, resolved);
+        } else {
+            resolved = resolveStartingOffset(stream);
+            LOG.warn("Missing start offset for stream '{}' at {}; resolved from startingOffsets={} => {}",
+                    stream, location, options.getStartingOffsets(), resolved);
+        }
         synchronized (mutableStateLock) {
             Map<String, Long> newInitial = this.initialOffsets == null 
                     ? new LinkedHashMap<>() 
@@ -1712,9 +1731,6 @@ class BaseRabbitMQMicroBatchStream
             newInitial.putIfAbsent(stream, resolved);
             this.initialOffsets = newInitial;
         }
-        LOG.warn("Missing start offset for stream '{}' at {}; resolved from startingOffsets={} => {}",
-
-                stream, location, options.getStartingOffsets(), resolved);
         return resolved;
     }
 

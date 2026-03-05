@@ -920,23 +920,23 @@ class RabbitMQMicroBatchStreamTest {
         }
 
         @Test
-        void latestOffsetUsesConfiguredStartForStreamsMissingFromCheckpoint() throws Exception {
+        void latestOffsetSeedsNewSuperStreamPartitionsFromEarliestOffset() throws Exception {
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
             opts.put("superstream", "super");
-            opts.put("startingOffsets", "offset");
-            opts.put("startingOffset", "5");
+            opts.put("startingOffsets", "latest");
 
             RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            setPrivateField(stream, "environment", new FirstOffsetEnvironment(2L));
             setPrivateField(stream, "availableNowSnapshot", Map.of("s1", 10L, "s2", 4L));
 
             RabbitMQStreamOffset start = new RabbitMQStreamOffset(Map.of("s1", 10L));
-            Offset latest = stream.latestOffset(start, ReadLimit.allAvailable());
+            Offset latest = stream.latestOffset(start, ReadLimit.maxRows(1));
 
             assertThat(latest).isNotSameAs(start);
             assertThat(((RabbitMQStreamOffset) latest).getStreamOffsets())
                     .containsEntry("s1", 10L)
-                    .containsEntry("s2", 5L);
+                    .containsEntry("s2", 3L);
         }
 
         @Test
