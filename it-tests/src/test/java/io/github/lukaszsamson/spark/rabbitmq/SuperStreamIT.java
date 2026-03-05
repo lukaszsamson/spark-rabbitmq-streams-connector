@@ -1615,7 +1615,12 @@ class SuperStreamIT extends AbstractRabbitMQIT {
                 .option("superstream", superStream)
                 .option("startingOffsets", "earliest")
                 .option("failOnDataLoss", "false")
+                // This scenario validates duplicate handling across partition recreation.
+                // Broker-side offset persistence is orthogonal here and can perturb tail planning
+                // between batches, which makes the test flaky without changing the behavior under test.
+                .option("serverSideOffsetTracking", "false")
                 .option("maxRecordsPerTrigger", "8")
+                .option("maxWaitMs", "5000")
                 .option("metadataFields", "")
                 .option("addressResolverClass",
                         "io.github.lukaszsamson.spark.rabbitmq.TestAddressResolver")
