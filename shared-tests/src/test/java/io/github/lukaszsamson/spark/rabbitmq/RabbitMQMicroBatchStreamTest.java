@@ -940,25 +940,26 @@ class RabbitMQMicroBatchStreamTest {
         }
 
         @Test
-        void latestOffsetWithMissingStartInSingleStreamModeStaysAtStart() throws Exception {
-            // For non-super-stream mode, a missing start offset must not produce a synthetic
-            // end offset. Otherwise Spark can checkpoint progress for a batch that plans no
-            // input partitions and never reads any data.
+        void latestOffsetWithMissingStartInSingleStreamModeReturnsExpandedStableOffsetWhenNoData()
+                throws Exception {
+            // If the missing start resolves to the current stable tail, latestOffset should
+            // still expand the source offset to include the known stream. This preserves the
+            // no-new-data behavior expected by direct micro-batch callers and integration tests.
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
             opts.put("stream", "test-stream");
             opts.put("startingOffsets", "offset");
-            opts.put("startingOffset", "100");
+            opts.put("startingOffset", "500");
             opts.put("maxRecordsPerTrigger", "500");
 
             RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
-            setPrivateField(stream, "availableNowSnapshot", Map.of("test-stream", 1000L));
+            setPrivateField(stream, "availableNowSnapshot", Map.of("test-stream", 500L));
 
             RabbitMQStreamOffset resumedStart = new RabbitMQStreamOffset(Map.of());
             RabbitMQStreamOffset latest = (RabbitMQStreamOffset) stream.latestOffset(
                     resumedStart, ReadLimit.maxRows(500));
 
-            assertThat(latest).isEqualTo(resumedStart);
+            assertThat(latest.getStreamOffsets()).containsEntry("test-stream", 500L);
         }
 
         @Test

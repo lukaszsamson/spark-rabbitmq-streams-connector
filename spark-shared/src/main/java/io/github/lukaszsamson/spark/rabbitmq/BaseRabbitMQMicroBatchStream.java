@@ -783,9 +783,19 @@ class BaseRabbitMQMicroBatchStream
         for (String stream : tailOffsets.keySet()) {
             if (!effectiveStartMap.containsKey(stream)) {
                 if (!options.isSuperStreamMode()) {
-                    LOG.warn("Start offset for stream '{}' is missing in start map at latestOffset; "
-                            + "skipping to avoid backfilling from configured startingOffsets", stream);
-                    skippedStreams.add(stream);
+                    long stableStart = resolveMissingStartOffset(stream, "latestOffset", null);
+                    long tailOff = tailOffsets.getOrDefault(stream, 0L);
+                    if (tailOff <= stableStart) {
+                        LOG.warn("Start offset for stream '{}' is missing in start map at latestOffset; "
+                                        + "using stable offset {} because tail {} does not exceed it",
+                                stream, stableStart, tailOff);
+                        effectiveStartMap.put(stream, stableStart);
+                    } else {
+                        LOG.warn("Start offset for stream '{}' is missing in start map at latestOffset; "
+                                        + "skipping to avoid backfilling from configured startingOffsets",
+                                stream);
+                        skippedStreams.add(stream);
+                    }
                     continue;
                 }
                 if (!checkpointFallbackLoaded) {
