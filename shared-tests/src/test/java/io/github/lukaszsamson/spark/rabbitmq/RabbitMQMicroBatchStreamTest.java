@@ -940,10 +940,10 @@ class RabbitMQMicroBatchStreamTest {
         }
 
         @Test
-        void latestOffsetWithMissingStartInSingleStreamModeUsesZeroAsEffectiveStart() throws Exception {
-            // For non-super-stream mode, a missing start offset is SKIPPED from effectiveStartMap.
-            // The read-limit budget is then applied with effective start = 0 (default),
-            // so the returned end offset is 0 + budget = 500, not configured_start + budget.
+        void latestOffsetWithMissingStartInSingleStreamModeStaysAtStart() throws Exception {
+            // For non-super-stream mode, a missing start offset must not produce a synthetic
+            // end offset. Otherwise Spark can checkpoint progress for a batch that plans no
+            // input partitions and never reads any data.
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
             opts.put("stream", "test-stream");
@@ -958,14 +958,14 @@ class RabbitMQMicroBatchStreamTest {
             RabbitMQStreamOffset latest = (RabbitMQStreamOffset) stream.latestOffset(
                     resumedStart, ReadLimit.maxRows(500));
 
-            assertThat(latest.getStreamOffsets()).containsEntry("test-stream", 500L);
+            assertThat(latest).isEqualTo(resumedStart);
         }
 
         @Test
-        void latestOffsetMissingStartInNonSuperStreamIsSkippedAndEffectiveStartIsZero() throws Exception {
-            // For non-super-stream mode, a missing start offset in the start map is SKIPPED
-            // (not backfilled from initialOffsets). The read-limit budget is applied with
-            // effective start = 0 (default), so end = 0 + budget = 20, not 100 + budget.
+        void latestOffsetMissingStartInNonSuperStreamIgnoresTailAndStaysAtStart() throws Exception {
+            // Even if initialOffsets are available, a non-super-stream query with a missing
+            // checkpoint/start entry must stay at the stable start offset instead of advancing
+            // from a synthetic default and risking checkpoint-only progress.
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
             opts.put("stream", "test-stream");
@@ -979,7 +979,7 @@ class RabbitMQMicroBatchStreamTest {
             RabbitMQStreamOffset latest = (RabbitMQStreamOffset) stream.latestOffset(
                     start, ReadLimit.maxRows(20));
 
-            assertThat(latest.getStreamOffsets()).containsEntry("test-stream", 20L);
+            assertThat(latest).isEqualTo(start);
         }
 
         @Test

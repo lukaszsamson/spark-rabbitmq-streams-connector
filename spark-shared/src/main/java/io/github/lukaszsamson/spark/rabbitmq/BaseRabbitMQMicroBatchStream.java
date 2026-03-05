@@ -777,6 +777,7 @@ class BaseRabbitMQMicroBatchStream
                 ? Map.of()
                 : start.getStreamOffsets();
         Map<String, Long> effectiveStartMap = new LinkedHashMap<>(startMap);
+        Set<String> skippedStreams = new LinkedHashSet<>();
         Map<String, Long> checkpointFallbackOffsets = null;
         boolean checkpointFallbackLoaded = false;
         for (String stream : tailOffsets.keySet()) {
@@ -784,6 +785,7 @@ class BaseRabbitMQMicroBatchStream
                 if (!options.isSuperStreamMode()) {
                     LOG.warn("Start offset for stream '{}' is missing in start map at latestOffset; "
                             + "skipping to avoid backfilling from configured startingOffsets", stream);
+                    skippedStreams.add(stream);
                     continue;
                 }
                 if (!checkpointFallbackLoaded) {
@@ -794,6 +796,22 @@ class BaseRabbitMQMicroBatchStream
                         stream,
                         resolveMissingStartOffset(
                                 stream, "latestOffset", checkpointFallbackOffsets));
+            }
+        }
+
+        if (!skippedStreams.isEmpty()) {
+            Map<String, Long> filteredTailOffsets = new LinkedHashMap<>(tailOffsets);
+            skippedStreams.forEach(filteredTailOffsets::remove);
+            tailOffsets = filteredTailOffsets;
+            if (tailOffsets.isEmpty()) {
+                LOG.debug("No readable streams remain after filtering missing start offsets");
+                RabbitMQStreamOffset stable = start != null
+                        ? start
+                        : new RabbitMQStreamOffset(Map.of());
+                cachedLatestOffset = stable;
+                cachedTailOffset = stable;
+                cacheLatestOffsetInvocation(startOffset, limit, stable, stable);
+                return stable;
             }
         }
 
