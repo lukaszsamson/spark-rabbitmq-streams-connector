@@ -64,6 +64,8 @@ class BaseRabbitMQMicroBatchStream
     /** Reuse full latestOffset() results briefly to keep per-trigger planning stable. */
     static final long LATEST_OFFSET_RESULT_CACHE_WINDOW_MS = 250L;
     static final long TAIL_PROBE_WAIT_MS = 250L;
+    static final long TAIL_PROBE_RETRY_WAIT_MS = 1_000L;
+    static final long TAIL_PROBE_FINAL_WAIT_MS = 5_000L;
     static final long TAIL_PROBE_DRAIN_WAIT_MS = 40L;
     static final long TAIL_PROBE_IDLE_GRACE_MS = 200L;
     static final long TAIL_PROBE_MAX_EXTRA_WAIT_MS = 750L;
@@ -1421,6 +1423,27 @@ class BaseRabbitMQMicroBatchStream
         }
     }
 
+    long probeTailOffsetFromLastMessageWithRetry(Environment env, String stream) {
+        long[] retryWaitsMs = {TAIL_PROBE_WAIT_MS, TAIL_PROBE_RETRY_WAIT_MS, TAIL_PROBE_FINAL_WAIT_MS};
+        for (long waitMs : retryWaitsMs) {
+            try {
+                long maxSeen = probeLastMessageOffsetInclusive(env, stream, waitMs);
+                if (maxSeen >= 0) {
+                    return maxSeen + 1;
+                }
+            } catch (NoOffsetException e) {
+                return 0;
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return 0;
+            } catch (Exception e) {
+                LOG.debug("Unable to probe last message tail offset for stream '{}' with wait {} ms: {}",
+                        stream, waitMs, e.getMessage());
+            }
+        }
+        return 0;
+    }
+
     static long probeLastMessageOffsetInclusive(
             Environment env, String stream, long firstMessageWaitMs)
             throws InterruptedException {
@@ -1627,23 +1650,31 @@ class BaseRabbitMQMicroBatchStream
         if (cached != null && nowNanos < cached.expiresAtNanos()) {
             return cached.tailExclusive();
         }
-        long probedTail = probeTailOffsetFromLastMessage(env, stream);
-        latestTailProbeCache.put(
-                stream,
-                new CachedTailProbe(
-                        probedTail,
-                        nowNanos + TimeUnit.MILLISECONDS.toNanos(options.getTailProbeCacheMs())));
+        long probedTail = probeTailOffsetFromLastMessageWithRetry(env, stream);
+        if (probedTail > 0L) {
+            latestTailProbeCache.put(
+                    stream,
+                    new CachedTailProbe(
+                            probedTail,
+                            nowNanos + TimeUnit.MILLISECONDS.toNanos(options.getTailProbeCacheMs())));
+        } else {
+            latestTailProbeCache.remove(stream);
+        }
         return probedTail;
     }
 
     private long queryStreamTailOffsetForAvailableNow(Environment env, String stream) {
         long statsTail = queryStreamTailOffset(env, stream);
-        long probedTail = probeTailOffsetFromLastMessage(env, stream);
+        long probedTail = probeTailOffsetFromLastMessageWithRetry(env, stream);
         // Seed the per-trigger cache so subsequent latestOffset() calls get the fresh value
         long nowNanos = System.nanoTime();
-        latestTailProbeCache.put(stream, new CachedTailProbe(
-                probedTail,
-                nowNanos + TimeUnit.MILLISECONDS.toNanos(options.getTailProbeCacheMs())));
+        if (probedTail > 0L) {
+            latestTailProbeCache.put(stream, new CachedTailProbe(
+                    probedTail,
+                    nowNanos + TimeUnit.MILLISECONDS.toNanos(options.getTailProbeCacheMs())));
+        } else {
+            latestTailProbeCache.remove(stream);
+        }
         return Math.max(statsTail, probedTail);
     }
 

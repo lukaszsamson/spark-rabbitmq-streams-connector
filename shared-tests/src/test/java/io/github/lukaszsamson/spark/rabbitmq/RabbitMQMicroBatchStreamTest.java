@@ -1145,6 +1145,49 @@ class RabbitMQMicroBatchStreamTest {
         }
 
         @Test
+        void latestOffsetRetriesSlowProbeWhenStatsTailIsStale() throws Exception {
+            RabbitMQMicroBatchStream stream = createStream(minimalOptions());
+            SequencedProbeCountingEnvironment env = new SequencedProbeCountingEnvironment(
+                    true,
+                    java.util.List.of(java.util.List.of(49L)),
+                    java.util.List.of(400L));
+            setPrivateField(stream, "environment", env);
+
+            RabbitMQStreamOffset start = new RabbitMQStreamOffset(Map.of("test-stream", 0L));
+            RabbitMQStreamOffset latest =
+                    (RabbitMQStreamOffset) stream.latestOffset(start, ReadLimit.allAvailable());
+
+            assertThat(latest.getStreamOffsets()).containsEntry("test-stream", 50L);
+            assertThat(env.queryStatsCalls).isEqualTo(2);
+            assertThat(env.probeBuilderCalls).isEqualTo(2);
+        }
+
+        @Test
+        void latestOffsetDoesNotCacheFailedProbeResults() throws Exception {
+            RabbitMQMicroBatchStream stream = createStream(minimalOptions());
+            SequencedProbeCountingEnvironment env = new SequencedProbeCountingEnvironment(
+                    true,
+                    java.util.List.of(
+                            java.util.List.of(),
+                            java.util.List.of(),
+                            java.util.List.of(),
+                            java.util.List.of(49L)));
+            setPrivateField(stream, "environment", env);
+
+            RabbitMQStreamOffset start = new RabbitMQStreamOffset(Map.of("test-stream", 0L));
+            RabbitMQStreamOffset first =
+                    (RabbitMQStreamOffset) stream.latestOffset(start, ReadLimit.allAvailable());
+            setPrivateField(stream, "latestOffsetInvocationCache", null);
+            RabbitMQStreamOffset second =
+                    (RabbitMQStreamOffset) stream.latestOffset(start, ReadLimit.allAvailable());
+
+            assertThat(first.getStreamOffsets()).containsEntry("test-stream", 0L);
+            assertThat(second.getStreamOffsets()).containsEntry("test-stream", 50L);
+            assertThat(env.queryStatsCalls).isEqualTo(3);
+            assertThat(env.probeBuilderCalls).isEqualTo(4);
+        }
+
+        @Test
         void planInputPartitionsClearsLatestOffsetInvocationCache() throws Exception {
             RabbitMQMicroBatchStream stream = createStream(minimalOptions());
             ProbeCountingEnvironment env = new ProbeCountingEnvironment(10L, java.util.List.of(14L));
@@ -2432,6 +2475,84 @@ class RabbitMQMicroBatchStreamTest {
         @Override
         public com.rabbitmq.stream.ConsumerBuilder consumerBuilder() {
             return new FixedOffsetProbeConsumerBuilder(probeOffsets);
+        }
+
+        @Override
+        public void close() {
+        }
+    }
+
+    private static final class SequencedProbeCountingEnvironment implements com.rabbitmq.stream.Environment {
+        private final boolean committedOffsetUnavailable;
+        private final java.util.List<java.util.List<Long>> probeOffsetsByAttempt;
+        private final java.util.List<Long> probeInitialDelayMsByAttempt;
+        private int queryStatsCalls = 0;
+        private int probeBuilderCalls = 0;
+
+        private SequencedProbeCountingEnvironment(
+                boolean committedOffsetUnavailable,
+                java.util.List<java.util.List<Long>> probeOffsetsByAttempt) {
+            this(committedOffsetUnavailable, probeOffsetsByAttempt, java.util.List.of());
+        }
+
+        private SequencedProbeCountingEnvironment(
+                boolean committedOffsetUnavailable,
+                java.util.List<java.util.List<Long>> probeOffsetsByAttempt,
+                java.util.List<Long> probeInitialDelayMsByAttempt) {
+            this.committedOffsetUnavailable = committedOffsetUnavailable;
+            this.probeOffsetsByAttempt = probeOffsetsByAttempt;
+            this.probeInitialDelayMsByAttempt = probeInitialDelayMsByAttempt;
+        }
+
+        @Override
+        public com.rabbitmq.stream.StreamCreator streamCreator() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void deleteStream(String stream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void deleteSuperStream(String superStream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public com.rabbitmq.stream.StreamStats queryStreamStats(String stream) {
+            queryStatsCalls++;
+            if (committedOffsetUnavailable) {
+                return new NoCommittedOffsetStreamStats();
+            }
+            return new FixedStreamStats(0L);
+        }
+
+        @Override
+        public void storeOffset(String reference, String stream, long offset) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public boolean streamExists(String stream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public com.rabbitmq.stream.ProducerBuilder producerBuilder() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public com.rabbitmq.stream.ConsumerBuilder consumerBuilder() {
+            int attempt = probeBuilderCalls++;
+            java.util.List<Long> offsets = attempt < probeOffsetsByAttempt.size()
+                    ? probeOffsetsByAttempt.get(attempt)
+                    : probeOffsetsByAttempt.get(probeOffsetsByAttempt.size() - 1);
+            long initialDelayMs = attempt < probeInitialDelayMsByAttempt.size()
+                    ? probeInitialDelayMsByAttempt.get(attempt)
+                    : 0L;
+            return new FixedOffsetProbeConsumerBuilder(offsets, initialDelayMs);
         }
 
         @Override
