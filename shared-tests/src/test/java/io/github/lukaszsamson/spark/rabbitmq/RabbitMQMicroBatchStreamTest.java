@@ -474,6 +474,33 @@ class RabbitMQMicroBatchStreamTest {
         }
 
         @Test
+        void initialOffsetLatestIsStableAcrossRepeatedCalls() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("startingOffsets", "latest");
+            opts.put("serverSideOffsetTracking", "false");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            SequencedProbeCountingEnvironment env = new SequencedProbeCountingEnvironment(
+                    true,
+                    java.util.List.of(
+                            java.util.List.of(49L),
+                            java.util.List.of(99L)));
+            setPrivateField(stream, "environment", env);
+
+            RabbitMQStreamOffset first = (RabbitMQStreamOffset) stream.initialOffset();
+            int queryStatsCallsAfterFirst = env.queryStatsCalls;
+            int probeBuilderCallsAfterFirst = env.probeBuilderCalls;
+            RabbitMQStreamOffset second = (RabbitMQStreamOffset) stream.initialOffset();
+
+            assertThat(first.getStreamOffsets()).containsEntry("test-stream", 50L);
+            assertThat(second).isEqualTo(first);
+            assertThat(env.queryStatsCalls).isEqualTo(queryStatsCallsAfterFirst);
+            assertThat(env.probeBuilderCalls).isEqualTo(probeBuilderCallsAfterFirst);
+        }
+
+        @Test
         void initialOffsetTimestampIgnoresRecoveredStoredOffsetBeforeFirstAvailable()
                 throws Exception {
             Map<String, String> opts = new LinkedHashMap<>();
@@ -1185,6 +1212,28 @@ class RabbitMQMicroBatchStreamTest {
             assertThat(second.getStreamOffsets()).containsEntry("test-stream", 50L);
             assertThat(env.queryStatsCalls).isEqualTo(3);
             assertThat(env.probeBuilderCalls).isEqualTo(4);
+        }
+
+        @Test
+        void latestOffsetNeverRegressesBelowStartWhenStatsTailIsStaleAndProbeFails() throws Exception {
+            RabbitMQMicroBatchStream stream = createStream(minimalOptions());
+            SequencedProbeCountingEnvironment env = new SequencedProbeCountingEnvironment(
+                    true,
+                    java.util.List.of(
+                            java.util.List.of(),
+                            java.util.List.of(),
+                            java.util.List.of()));
+            setPrivateField(stream, "environment", env);
+
+            RabbitMQStreamOffset start = new RabbitMQStreamOffset(Map.of("test-stream", 50L));
+            RabbitMQStreamOffset latest =
+                    (RabbitMQStreamOffset) stream.latestOffset(start, ReadLimit.allAvailable());
+
+            assertThat(latest.getStreamOffsets()).containsEntry("test-stream", 50L);
+            assertThat(((RabbitMQStreamOffset) stream.reportLatestOffset()).getStreamOffsets())
+                    .containsEntry("test-stream", 50L);
+            assertThat(env.queryStatsCalls).isEqualTo(2);
+            assertThat(env.probeBuilderCalls).isEqualTo(3);
         }
 
         @Test

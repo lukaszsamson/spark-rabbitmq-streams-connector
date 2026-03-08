@@ -182,6 +182,12 @@ class BaseRabbitMQMicroBatchStream
 
     @Override
     public Offset initialOffset() {
+        synchronized (mutableStateLock) {
+            if (initialOffsets != null) {
+                return new RabbitMQStreamOffset(new LinkedHashMap<>(initialOffsets));
+            }
+        }
+
         List<String> streams = discoverStreams();
         String consumerName = effectiveConsumerName;
         boolean consumerNameExplicit = options.getConsumerName() != null
