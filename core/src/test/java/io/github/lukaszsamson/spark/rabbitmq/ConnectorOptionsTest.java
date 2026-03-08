@@ -1360,6 +1360,17 @@ class ConnectorOptionsTest {
         }
 
         @Test
+        void rejectsSingleInitialCreditWithHalfProcessedFlowStrategy() {
+            var map = minimalStreamOptions();
+            map.put("initialCredits", "1");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateForSource)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("initialCredits")
+                    .hasMessageContaining(">= 2");
+        }
+
+        @Test
         void rejectsNonPositiveQueueCapacity() {
             var map = minimalStreamOptions();
             map.put("queueCapacity", "0");

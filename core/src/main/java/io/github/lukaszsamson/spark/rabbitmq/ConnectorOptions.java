@@ -688,6 +688,12 @@ public final class ConnectorOptions implements Serializable {
             throw new IllegalArgumentException(
                     "'" + INITIAL_CREDITS + "' must be > 0, got: " + initialCredits);
         }
+        if (initialCredits == 1) {
+            throw new IllegalArgumentException(
+                    "'" + INITIAL_CREDITS + "' must be >= 2 when using the connector's "
+                            + "creditWhenHalfMessagesProcessed flow strategy; got: "
+                            + initialCredits);
+        }
         if (queueCapacity <= 0) {
             throw new IllegalArgumentException(
                     "'" + QUEUE_CAPACITY + "' must be > 0, got: " + queueCapacity);
