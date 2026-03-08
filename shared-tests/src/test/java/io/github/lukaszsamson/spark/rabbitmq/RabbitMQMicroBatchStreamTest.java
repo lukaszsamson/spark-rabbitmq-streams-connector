@@ -2037,7 +2037,6 @@ class RabbitMQMicroBatchStreamTest {
                     "maxOffsetsBehindLatest",
                     "avgOffsetsBehindLatest");
         }
-
         @Test
         void metricsUseTailOffsetsWhenAvailable() throws Exception {
             RabbitMQMicroBatchStream stream = createStream(minimalOptions());
@@ -2137,6 +2136,36 @@ class RabbitMQMicroBatchStreamTest {
             } finally {
                 stream.stop();
             }
+        }
+    }
+
+    @Nested
+    class StreamIdentity {
+
+        @Test
+        void equivalentStreamsCompareEqualForProgressLookups() {
+            RabbitMQMicroBatchStream first = createStream(minimalOptions(), "/tmp/cp-progress");
+            RabbitMQMicroBatchStream second = createStream(minimalOptions(), "/tmp/cp-progress");
+
+            Map<SparkDataStream, Long> progressBySource = new HashMap<>();
+            progressBySource.put(first, 42L);
+
+            assertThat(second).isEqualTo(first);
+            assertThat(second.hashCode()).isEqualTo(first.hashCode());
+            assertThat(progressBySource.get(second)).isEqualTo(42L);
+        }
+
+        @Test
+        void streamsWithDifferentRawOptionsDoNotCompareEqual() {
+            RabbitMQMicroBatchStream first = createStream(minimalOptions(), "/tmp/cp-progress");
+
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "another-stream");
+            ConnectorOptions differentOptions = new ConnectorOptions(opts);
+            RabbitMQMicroBatchStream second = createStream(differentOptions, "/tmp/cp-progress");
+
+            assertThat(second).isNotEqualTo(first);
         }
     }
 

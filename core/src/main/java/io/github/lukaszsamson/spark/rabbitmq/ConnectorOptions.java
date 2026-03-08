@@ -114,6 +114,11 @@ public final class ConnectorOptions implements Serializable {
     // Resource management
     public static final String ENVIRONMENT_IDLE_TIMEOUT_MS = "environmentIdleTimeoutMs";
 
+    private static final Set<String> SENSITIVE_OPTION_KEYS = Set.of(
+            PASSWORD.toLowerCase(Locale.ROOT),
+            TLS_TRUSTSTORE_PASSWORD.toLowerCase(Locale.ROOT),
+            TLS_KEYSTORE_PASSWORD.toLowerCase(Locale.ROOT));
+
     // ---- Default values ----
 
     public static final String DEFAULT_METADATA_FIELDS =
@@ -143,6 +148,8 @@ public final class ConnectorOptions implements Serializable {
     public static final long DEFAULT_ENVIRONMENT_IDLE_TIMEOUT_MS = 60_000L;
 
     // ---- Parsed fields ----
+
+    private final Map<String, String> normalizedOptions;
 
     // Common
     private final String endpoints;
@@ -244,6 +251,7 @@ public final class ConnectorOptions implements Serializable {
      * @param options raw option map (typically from Spark's CaseInsensitiveStringMap)
      */
     public ConnectorOptions(Map<String, String> options) {
+        this.normalizedOptions = normalizeOptions(options);
         // Common
         this.endpoints = getString(options, ENDPOINTS);
         this.uris = getString(options, URIS);
@@ -365,6 +373,34 @@ public final class ConnectorOptions implements Serializable {
         // Resource management
         this.environmentIdleTimeoutMs = getLongPrimitive(options, ENVIRONMENT_IDLE_TIMEOUT_MS,
                 DEFAULT_ENVIRONMENT_IDLE_TIMEOUT_MS);
+    }
+
+    /**
+     * Returns a canonicalized, case-insensitive view of the original raw options.
+     *
+     * <p>Keys are lowercased using {@link Locale#ROOT} and sorted to provide a stable identity
+     * surface for Spark progress bookkeeping across stream instance re-creation (for example when
+     * using Spark Connect).
+     */
+    public Map<String, String> getNormalizedOptions() {
+        return normalizedOptions;
+    }
+
+    /**
+     * Stable, non-sensitive option summary suitable for logging and source descriptions.
+     */
+    public String progressDescription() {
+        StringBuilder out = new StringBuilder();
+        normalizedOptions.forEach((key, value) -> {
+            if (SENSITIVE_OPTION_KEYS.contains(key)) {
+                return;
+            }
+            if (out.length() > 0) {
+                out.append(", ");
+            }
+            out.append(key).append('=').append(value);
+        });
+        return out.toString();
     }
 
     // ---- Validation ----
@@ -1171,5 +1207,20 @@ public final class ConnectorOptions implements Serializable {
                 .map(String::trim)
                 .filter(s -> !s.isEmpty())
                 .toList();
+    }
+
+    private static Map<String, String> normalizeOptions(Map<String, String> options) {
+        TreeMap<String, String> normalized = new TreeMap<>();
+        if (options == null) {
+            return Collections.emptyMap();
+        }
+        for (Map.Entry<String, String> entry : options.entrySet()) {
+            String key = entry.getKey();
+            if (key == null || key.isBlank()) {
+                continue;
+            }
+            normalized.put(key.toLowerCase(Locale.ROOT), entry.getValue());
+        }
+        return Collections.unmodifiableMap(normalized);
     }
 }

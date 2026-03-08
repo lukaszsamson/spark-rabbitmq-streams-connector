@@ -77,6 +77,7 @@ class BaseRabbitMQMicroBatchStream
 
     final ConnectorOptions options;
     final StructType schema;
+    final String schemaJson;
     final String checkpointLocation;
     final String effectiveConsumerName;
     final String messageSizeTrackerScope;
@@ -140,6 +141,7 @@ class BaseRabbitMQMicroBatchStream
                               String checkpointLocation) {
         this.options = options;
         this.schema = schema;
+        this.schemaJson = schema.json();
         this.checkpointLocation = checkpointLocation;
         this.effectiveConsumerName = deriveConsumerName(options, checkpointLocation);
         this.messageSizeTrackerScope = deriveMessageSizeTrackerScope(
@@ -1052,6 +1054,34 @@ class BaseRabbitMQMicroBatchStream
         metrics.put("maxOffsetsBehindLatest", String.valueOf(maxLag));
         metrics.put("avgOffsetsBehindLatest", String.format(java.util.Locale.ROOT, "%.1f", avgLag));
         return metrics;
+    }
+
+    @Override
+    public boolean equals(Object other) {
+        if (this == other) {
+            return true;
+        }
+        if (other == null || getClass() != other.getClass()) {
+            return false;
+        }
+        BaseRabbitMQMicroBatchStream that = (BaseRabbitMQMicroBatchStream) other;
+        return Objects.equals(checkpointLocation, that.checkpointLocation)
+                && Objects.equals(schemaJson, that.schemaJson)
+                && Objects.equals(options.getNormalizedOptions(), that.options.getNormalizedOptions());
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(getClass(), checkpointLocation, schemaJson, options.getNormalizedOptions());
+    }
+
+    @Override
+    public String toString() {
+        String description = options.progressDescription();
+        if (description.isBlank()) {
+            return "rabbitmq_streams[" + checkpointLocation + "]";
+        }
+        return "rabbitmq_streams[" + description + ", checkpointLocation=" + checkpointLocation + "]";
     }
 
     // ---- Read limit dispatch ----
