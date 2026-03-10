@@ -182,10 +182,14 @@ class BaseRabbitMQMicroBatchStream
 
     @Override
     public Offset initialOffset() {
+        Map<String, Long> availableNowSnapshotView;
         synchronized (mutableStateLock) {
             if (initialOffsets != null) {
                 return new RabbitMQStreamOffset(new LinkedHashMap<>(initialOffsets));
             }
+            availableNowSnapshotView = availableNowSnapshot == null
+                    ? null
+                    : new LinkedHashMap<>(availableNowSnapshot);
         }
 
         List<String> streams = discoverStreams();
@@ -197,7 +201,9 @@ class BaseRabbitMQMicroBatchStream
             LOG.debug("Server-side offset tracking disabled, skipping broker offset lookup");
             Map<String, Long> offsets = new LinkedHashMap<>();
             for (String stream : streams) {
-                offsets.put(stream, resolveStartingOffset(stream));
+                offsets.put(
+                        stream,
+                        resolveInitialOffsetForStream(stream, availableNowSnapshotView));
             }
             this.initialOffsets = new LinkedHashMap<>(offsets);
             LOG.info("Initial offsets from startingOffsets={}: {}", options.getStartingOffsets(), offsets);
@@ -262,7 +268,9 @@ class BaseRabbitMQMicroBatchStream
         // 2. Fall back to startingOffsets
         Map<String, Long> offsets = new LinkedHashMap<>();
         for (String stream : streams) {
-            offsets.put(stream, resolveStartingOffset(stream));
+            offsets.put(
+                    stream,
+                    resolveInitialOffsetForStream(stream, availableNowSnapshotView));
         }
         this.initialOffsets = new LinkedHashMap<>(offsets);
         LOG.info("Initial offsets from startingOffsets={}: {}", options.getStartingOffsets(), offsets);
@@ -273,11 +281,51 @@ class BaseRabbitMQMicroBatchStream
             Map<String, Long> storedOffsets, List<String> streams) {
         // Fill in any missing streams with starting offset resolution.
         Map<String, Long> merged = new LinkedHashMap<>(storedOffsets);
+        Map<String, Long> availableNowSnapshotView;
+        synchronized (mutableStateLock) {
+            availableNowSnapshotView = availableNowSnapshot == null
+                    ? null
+                    : new LinkedHashMap<>(availableNowSnapshot);
+        }
         for (String stream : streams) {
-            merged.putIfAbsent(stream, resolveStartingOffset(stream));
+            merged.putIfAbsent(
+                    stream,
+                    resolveInitialOffsetForStream(stream, availableNowSnapshotView));
         }
         this.initialOffsets = new LinkedHashMap<>(merged);
         return new RabbitMQStreamOffset(merged);
+    }
+
+    private long resolveInitialOffsetForStream(
+            String stream,
+            Map<String, Long> availableNowSnapshotView) {
+        if (availableNowSnapshotView != null
+                && options.getStartingOffsets() == StartingOffsetsMode.LATEST) {
+            Long snapshottedTail = availableNowSnapshotView.get(stream);
+            if (snapshottedTail != null) {
+                return snapshottedTail;
+            }
+        }
+        return clampInitialOffsetToAvailableNowSnapshot(
+                stream,
+                resolveStartingOffset(stream),
+                availableNowSnapshotView);
+    }
+
+    private long clampInitialOffsetToAvailableNowSnapshot(
+            String stream,
+            long resolvedOffset,
+            Map<String, Long> availableNowSnapshotView) {
+        if (availableNowSnapshotView == null) {
+            return resolvedOffset;
+        }
+        Long ceiling = availableNowSnapshotView.get(stream);
+        if (ceiling == null || resolvedOffset <= ceiling) {
+            return resolvedOffset;
+        }
+        LOG.info("Clamping initial offset for stream '{}' from {} to Trigger.AvailableNow snapshot {}",
+                stream, resolvedOffset, ceiling);
+        return ceiling;
     }
 
     private Map<String, Long> sanitizeRecoveredStoredOffsets(Map<String, Long> storedOffsets) {

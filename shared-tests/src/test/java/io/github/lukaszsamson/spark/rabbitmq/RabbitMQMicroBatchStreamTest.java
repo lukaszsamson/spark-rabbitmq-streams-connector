@@ -1456,6 +1456,39 @@ class RabbitMQMicroBatchStreamTest {
         }
 
         @Test
+        void initialOffsetLatestDoesNotAdvancePastAvailableNowSnapshot() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("startingOffsets", "latest");
+            opts.put("serverSideOffsetTracking", "false");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            SequencedProbeCountingEnvironment env = new SequencedProbeCountingEnvironment(
+                    true,
+                    java.util.List.of(
+                            java.util.List.of(49L),
+                            java.util.List.of(99L)));
+            setPrivateField(stream, "environment", env);
+
+            stream.prepareForTriggerAvailableNow();
+
+            RabbitMQStreamOffset snapshot = (RabbitMQStreamOffset) stream.latestOffset(
+                    new RabbitMQStreamOffset(Map.of("test-stream", 0L)),
+                    ReadLimit.allAvailable());
+            assertThat(snapshot.getStreamOffsets()).containsEntry("test-stream", 50L);
+
+            int queryStatsCallsAfterSnapshot = env.queryStatsCalls;
+            int probeBuilderCallsAfterSnapshot = env.probeBuilderCalls;
+
+            RabbitMQStreamOffset initial = (RabbitMQStreamOffset) stream.initialOffset();
+
+            assertThat(initial.getStreamOffsets()).containsEntry("test-stream", 50L);
+            assertThat(env.queryStatsCalls).isEqualTo(queryStatsCallsAfterSnapshot);
+            assertThat(env.probeBuilderCalls).isEqualTo(probeBuilderCallsAfterSnapshot);
+        }
+
+        @Test
         void probeTailOffsetFromLastMessageHandlesInterruptEmptyPollAndCloseFailure() throws Exception {
             RabbitMQMicroBatchStream stream = createStream(minimalOptions());
 
