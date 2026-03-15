@@ -383,7 +383,9 @@ class RealTimeModeIT extends AbstractRabbitMQIT {
 
         // Verify broker stored the offset
         long storedOffset = queryStoredOffset(consumerName, sourceStream);
-        assertThat(storedOffset).isGreaterThanOrEqualTo(0);
+        assertThat(storedOffset)
+                .as("stored offset should equal last processed offset (39 for 40 messages starting at 0)")
+                .isEqualTo(39L);
     }
 
     @Test

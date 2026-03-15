@@ -1601,6 +1601,175 @@ class BatchReadIT extends AbstractRabbitMQIT {
         }
     }
 
+    // ---- IT-BATCH-OFFSET-001: batch endingOffsets=timestamp ----
+
+    @Test
+    void batchReadWithEndingTimestamp() throws Exception {
+        publishMessages(stream, 50, "early-");
+        Thread.sleep(1_500);
+        long midTimestamp = System.currentTimeMillis();
+        Thread.sleep(1_500);
+        publishMessages(stream, 50, "late-");
+        Thread.sleep(200);
+
+        Dataset<Row> result = spark.read()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("startingOffsets", "earliest")
+                .option("endingOffsets", "timestamp")
+                .option("endingTimestamp", String.valueOf(midTimestamp))
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "io.github.lukaszsamson.spark.rabbitmq.TestAddressResolver")
+                .load();
+
+        long count = result.count();
+        assertThat(count)
+                .as("endingTimestamp should bound the batch read to early messages")
+                .isGreaterThanOrEqualTo(40L)
+                .isLessThanOrEqualTo(60L);
+
+        List<String> values = result.collectAsList().stream()
+                .map(row -> new String((byte[]) row.getAs("value")))
+                .toList();
+        long lateCount = values.stream().filter(v -> v.startsWith("late-")).count();
+        assertThat(lateCount)
+                .as("endingTimestamp should exclude messages published after the timestamp")
+                .isEqualTo(0L);
+    }
+
+    // ---- IT-BATCH-OFFSET-002: mixed start by timestamp, end by offset ----
+
+    @Test
+    void batchReadMixedStartTimestampEndOffset() {
+        publishMessages(stream, 100, "mixed-");
+
+        long startTs = System.currentTimeMillis() - 60_000L;
+
+        Dataset<Row> result = spark.read()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("startingOffsets", "timestamp")
+                .option("startingTimestamp", String.valueOf(startTs))
+                .option("endingOffsets", "offset")
+                .option("endingOffset", "50")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "io.github.lukaszsamson.spark.rabbitmq.TestAddressResolver")
+                .load();
+
+        long count = result.count();
+        assertThat(count)
+                .as("mixed strategies should read from timestamp start to offset 50")
+                .isEqualTo(50L);
+
+        List<Long> offsets = result.collectAsList().stream()
+                .map(row -> (Long) row.getAs("offset"))
+                .sorted()
+                .toList();
+        assertThat(offsets.get(0)).isEqualTo(0L);
+        assertThat(offsets.get(offsets.size() - 1)).isEqualTo(49L);
+    }
+
+    // ---- IT-BATCH-SPLIT-001: minPartitions verifies actual partition count ----
+
+    @Test
+    void batchReadMinPartitionsVerifiesPartitionCount() {
+        publishMessages(stream, 200, "split-");
+
+        Dataset<Row> result = spark.read()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("startingOffsets", "earliest")
+                .option("minPartitions", "4")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "io.github.lukaszsamson.spark.rabbitmq.TestAddressResolver")
+                .load();
+
+        assertThat(result.count()).isEqualTo(200);
+
+        int numPartitions = result.rdd().getNumPartitions();
+        assertThat(numPartitions)
+                .as("minPartitions=4 should result in at least 4 RDD partitions")
+                .isGreaterThanOrEqualTo(4);
+    }
+
+    // ---- IT-BATCH-OFFSET-003: batch startingOffsets=latest returns empty ----
+
+    @Test
+    void batchReadStartingOffsetsLatestReturnsEmpty() {
+        publishMessages(stream, 50, "pre-");
+
+        Dataset<Row> result = spark.read()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("startingOffsets", "latest")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "io.github.lukaszsamson.spark.rabbitmq.TestAddressResolver")
+                .load();
+
+        assertThat(result.count())
+                .as("batch read with startingOffsets=latest should return 0 rows for a static stream")
+                .isEqualTo(0L);
+    }
+
+    // ---- IT-BATCH-METADATA-001: source metadata value mapping from AMQP fields ----
+
+    @Test
+    void batchReadSourceMetadataValueMapping() {
+        // Publish messages with rich AMQP properties
+        try (var producer = testEnv.producerBuilder().stream(stream).build()) {
+            var latch = new java.util.concurrent.CountDownLatch(1);
+            producer.send(
+                    producer.messageBuilder()
+                            .addData("meta-test".getBytes())
+                            .properties()
+                                .creationTime(1234567890000L)
+                                .messageId("test-msg-id")
+                                .correlationId("test-corr-id")
+                                .contentType("text/plain")
+                            .messageBuilder()
+                            .applicationProperties()
+                                .entry("app-key", "app-value")
+                            .messageBuilder()
+                            .build(),
+                    status -> latch.countDown());
+            latch.await(10, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException(e);
+        }
+
+        Dataset<Row> result = spark.read()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", stream)
+                .option("startingOffsets", "earliest")
+                .option("metadataFields", "properties,application_properties")
+                .option("addressResolverClass",
+                        "io.github.lukaszsamson.spark.rabbitmq.TestAddressResolver")
+                .load();
+
+        assertThat(result.count()).isEqualTo(1);
+
+        Row row = result.collectAsList().get(0);
+        // Verify value content
+        assertThat(new String((byte[]) row.getAs("value")))
+                .isEqualTo("meta-test");
+
+        // Verify properties struct is populated (not null)
+        assertThat((Object) row.getAs("properties")).isNotNull();
+
+        // Verify application_properties map is populated
+        assertThat((Object) row.getAs("application_properties")).isNotNull();
+    }
+
     private static Set<String> collectMetricNames(SparkPlan root) {
         LinkedHashSet<String> metricNames = new LinkedHashSet<>();
         scala.collection.Iterator<SparkPlan> nodeIterator = root.collectLeaves().iterator();

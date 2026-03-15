@@ -92,8 +92,8 @@ class BugsReproIT extends AbstractRabbitMQIT {
                 .as("first run should not fail")
                 .isFalse();
         assertThat(phase1Count)
-                .as("first run should consume live messages")
-                .isGreaterThan(0L);
+                .as("first run should consume at least 10 live messages")
+                .isGreaterThanOrEqualTo(10L);
 
         long storedOffset = queryStoredOffset(consumerName, stream);
         assertThat(storedOffset)
@@ -133,8 +133,8 @@ class BugsReproIT extends AbstractRabbitMQIT {
                 .as("restart with same consumer must not fail with stale retained offset")
                 .isFalse();
         assertThat(phase2Count)
-                .as("restart should continue consuming live data")
-                .isGreaterThan(0L);
+                .as("restart should continue consuming at least 10 live messages")
+                .isGreaterThanOrEqualTo(10L);
     }
 
     @Test
@@ -187,8 +187,8 @@ class BugsReproIT extends AbstractRabbitMQIT {
                 .as("failOnDataLoss=false should not fail on stale stored offsets")
                 .isFalse();
         assertThat(count)
-                .as("query should advance to first available and consume new data")
-                .isGreaterThan(0L);
+                .as("query should advance to first available and consume at least 10 messages")
+                .isGreaterThanOrEqualTo(10L);
     }
 
     @Test
@@ -224,8 +224,8 @@ class BugsReproIT extends AbstractRabbitMQIT {
                 .as("short maxWait on active stream should not terminate query with error")
                 .isFalse();
         assertThat(count)
-                .as("active stream should produce rows with maxWaitMs=10000")
-                .isGreaterThan(0L);
+                .as("active stream should produce at least 10 rows with maxWaitMs=10000")
+                .isGreaterThanOrEqualTo(10L);
     }
 
     @Test
@@ -394,8 +394,8 @@ class BugsReproIT extends AbstractRabbitMQIT {
                 .as("SAC timestamp query should not fail")
                 .isFalse();
         assertThat(count)
-                .as("SAC timestamp query should consume rows from live stream")
-                .isGreaterThan(0L);
+                .as("SAC timestamp query should consume at least 10 rows from live stream")
+                .isGreaterThanOrEqualTo(10L);
     }
 
     @Test
@@ -491,8 +491,8 @@ class BugsReproIT extends AbstractRabbitMQIT {
                 .as("phase 1 with SST+timestamp should not fail")
                 .isFalse();
         assertThat(phase1Count)
-                .as("phase 1 should consume rows")
-                .isGreaterThan(0L);
+                .as("phase 1 should consume at least 10 rows")
+                .isGreaterThanOrEqualTo(10L);
     }
 
     private long waitForParquetCountAtLeast(Path outputDir, long minimum, long timeoutMs)
