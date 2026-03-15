@@ -421,7 +421,9 @@ final class RabbitMQScan implements Scan {
         // tail (no messages match). With late binding the range [tail, MAX_VALUE) looks
         // non-empty, preventing empty-range detection at plan time. Resolve eagerly so
         // that startOffset >= endOffset correctly identifies the empty range.
-        if (options.getStartingOffsets() == StartingOffsetsMode.TIMESTAMP) {
+        if (options.getStartingOffsets() == StartingOffsetsMode.TIMESTAMP
+                || options.getMinPartitions() != null
+                || options.getMaxRecordsPerPartition() != null) {
             return resolveLatestOffset(env, stream, stats);
         }
         return Long.MAX_VALUE;
