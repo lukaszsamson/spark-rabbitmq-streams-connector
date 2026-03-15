@@ -11,6 +11,7 @@ import org.apache.spark.sql.streaming.Trigger;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructType;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -27,6 +28,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.TimeUnit;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
 import java.util.stream.Collectors;
@@ -1746,6 +1748,177 @@ class SuperStreamIT extends AbstractRabbitMQIT {
             assertThat(uniqueOffsets)
                     .as("No duplicate offsets in stream " + entry.getKey())
                     .hasSize(offsets.size());
+        }
+    }
+
+    // ---- IT-SS-SPLIT-001: superstream streaming with minPartitions > partition count ----
+
+    @Test
+    void streamingSuperStreamMinPartitionsGreaterThanPartitionCount() throws Exception {
+        for (int p = 0; p < PARTITION_COUNT; p++) {
+            publishMessages(superStream + "-" + p, 30, "split-p" + p + "-");
+        }
+        Thread.sleep(2000);
+
+        Path outputDir = Files.createTempDirectory("spark-output-ss-split-streaming-");
+        Path checkpointDir = Files.createTempDirectory("spark-checkpoint-ss-split-streaming-");
+
+        StreamingQuery query = spark.readStream()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("superstream", superStream)
+                .option("startingOffsets", "earliest")
+                .option("minPartitions", "6")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "io.github.lukaszsamson.spark.rabbitmq.TestAddressResolver")
+                .load()
+                .writeStream()
+                .format("parquet")
+                .option("path", outputDir.toString())
+                .option("checkpointLocation", checkpointDir.toString())
+                .trigger(Trigger.AvailableNow())
+                .start();
+
+        query.awaitTermination(120_000);
+
+        long count = countOutputRows(outputDir);
+        assertThat(count)
+                .as("all 90 messages from 3 partitions should be consumed with minPartitions=6")
+                .isEqualTo(90);
+    }
+
+    // ---- IT-SS-FDL-001: superstream failOnDataLoss=true for truncation ----
+
+    @Test
+    void streamingSuperStreamFailOnDataLossTrueForTruncation() throws Exception {
+        String retainedSuperStream = "test-super-ret-" + UUID.randomUUID().toString().substring(0, 8);
+        createSuperStreamWithRetention(retainedSuperStream, 3, 2_000, 500);
+
+        try {
+            // Warm up to trigger truncation
+            for (int i = 0; i < 20; i++) {
+                publishMessages(retainedSuperStream + "-0", 100, "fdl-warm-" + i + "-");
+                Thread.sleep(60);
+            }
+
+            long firstOffset = waitForTruncation(retainedSuperStream + "-0", 30_000);
+            Assumptions.assumeTrue(firstOffset > 0,
+                    "Truncation did not happen for superstream partition");
+
+            Path outputDir = Files.createTempDirectory("spark-output-ss-fdl-true-");
+            Path checkpointDir = Files.createTempDirectory("spark-checkpoint-ss-fdl-true-");
+
+            assertThatThrownBy(() -> {
+                StreamingQuery q = spark.readStream()
+                        .format("rabbitmq_streams")
+                        .option("endpoints", streamEndpoint())
+                        .option("superstream", retainedSuperStream)
+                        .option("startingOffsets", "offset")
+                        .option("startingOffset", "0")
+                        .option("failOnDataLoss", "true")
+                        .option("metadataFields", "")
+                        .option("addressResolverClass",
+                                "io.github.lukaszsamson.spark.rabbitmq.TestAddressResolver")
+                        .load()
+                        .writeStream()
+                        .format("parquet")
+                        .option("path", outputDir.toString())
+                        .option("checkpointLocation", checkpointDir.toString())
+                        .trigger(Trigger.AvailableNow())
+                        .start();
+                q.awaitTermination(120_000);
+            }).satisfies(ex -> assertThat(ex.getMessage())
+                    .containsIgnoringCase("data loss"));
+        } finally {
+            deleteSuperStream(retainedSuperStream);
+        }
+    }
+
+    // ---- IT-SS-BUDGET-001: maxRecordsPerTrigger budget distribution across partitions ----
+
+    @Test
+    void streamingSuperStreamMaxRecordsBudgetDistribution() throws Exception {
+        // Publish 100 messages to each of the 3 partitions
+        for (int p = 0; p < PARTITION_COUNT; p++) {
+            publishMessages(superStream + "-" + p, 100, "budget-p" + p + "-");
+        }
+        Thread.sleep(2000);
+
+        List<Row> captured = Collections.synchronizedList(new ArrayList<>());
+        Path checkpointDir = Files.createTempDirectory("spark-checkpoint-ss-budget-");
+
+        // maxRecordsPerTrigger=30 with 3 partitions → ~10 per partition per batch
+        StreamingQuery query = spark.readStream()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("superstream", superStream)
+                .option("startingOffsets", "earliest")
+                .option("maxRecordsPerTrigger", "30")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "io.github.lukaszsamson.spark.rabbitmq.TestAddressResolver")
+                .load()
+                .writeStream()
+                .foreachBatch((batch, batchId) -> {
+                    if (batchId <= 2) {
+                        captured.addAll(batch.select("stream", "offset").collectAsList());
+                    }
+                })
+                .option("checkpointLocation", checkpointDir.toString())
+                .trigger(Trigger.AvailableNow())
+                .start();
+
+        query.awaitTermination(120_000);
+
+        // Check first few batches had bounded size
+        assertThat(captured.size())
+                .as("first 3 batches should capture at most 90 records (30 per batch)")
+                .isLessThanOrEqualTo(90);
+
+        // Verify multiple partitions contributed
+        Set<String> streamsInFirstBatches = captured.stream()
+                .map(row -> row.getAs("stream").toString())
+                .collect(Collectors.toSet());
+        assertThat(streamsInFirstBatches.size())
+                .as("budget should be distributed across multiple partition streams")
+                .isGreaterThanOrEqualTo(2);
+    }
+
+    // ---- IT-SS-BATCH-FDL-001: batch superstream deletion with failOnDataLoss=true ----
+
+    @Test
+    void batchSuperStreamDeletionFailOnDataLossTrue() throws Exception {
+        String retainedSuperStream = "test-super-batch-fdl-" + UUID.randomUUID().toString().substring(0, 8);
+        createSuperStreamWithRetention(retainedSuperStream, 3, 2_000, 500);
+
+        try {
+            // Warm up to trigger truncation
+            for (int i = 0; i < 20; i++) {
+                publishMessages(retainedSuperStream + "-0", 100, "batch-fdl-warm-" + i + "-");
+                Thread.sleep(60);
+            }
+
+            long firstOffset = waitForTruncation(retainedSuperStream + "-0", 30_000);
+            Assumptions.assumeTrue(firstOffset > 0,
+                    "Truncation did not happen for superstream partition");
+
+            assertThatThrownBy(() -> spark.read()
+                    .format("rabbitmq_streams")
+                    .option("endpoints", streamEndpoint())
+                    .option("superstream", retainedSuperStream)
+                    .option("startingOffsets", "offset")
+                    .option("startingOffset", "0")
+                    .option("failOnDataLoss", "true")
+                    .option("metadataFields", "")
+                    .option("addressResolverClass",
+                            "io.github.lukaszsamson.spark.rabbitmq.TestAddressResolver")
+                    .load()
+                    .count()
+            ).satisfies(ex -> assertThat(ex.getMessage())
+                    .containsIgnoringCase("data loss"));
+        } finally {
+            deleteSuperStream(retainedSuperStream);
         }
     }
 
