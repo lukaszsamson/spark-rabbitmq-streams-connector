@@ -1829,7 +1829,7 @@ class SuperStreamIT extends AbstractRabbitMQIT {
                         .start();
                 q.awaitTermination(120_000);
             }).satisfies(ex -> assertThat(ex.getMessage())
-                    .containsIgnoringCase("data loss"));
+                    .containsIgnoringCase("data may have been lost"));
         } finally {
             deleteSuperStream(retainedSuperStream);
         }
@@ -1916,7 +1916,7 @@ class SuperStreamIT extends AbstractRabbitMQIT {
                     .load()
                     .count()
             ).satisfies(ex -> assertThat(ex.getMessage())
-                    .containsIgnoringCase("data loss"));
+                    .containsIgnoringCase("data may have been lost"));
         } finally {
             deleteSuperStream(retainedSuperStream);
         }

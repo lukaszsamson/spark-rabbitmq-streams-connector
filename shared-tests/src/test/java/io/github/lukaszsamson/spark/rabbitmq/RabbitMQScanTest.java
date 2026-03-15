@@ -145,6 +145,18 @@ class RabbitMQScanTest {
         }
 
         @Test
+        void resolveEndOffsetLatestIsEagerWhenBatchSplittingRequested() throws Exception {
+            Map<String, String> opts = baseOptions();
+            opts.put("minPartitions", "4");
+            RabbitMQScan scan = new RabbitMQScan(new ConnectorOptions(opts), schema());
+            StreamStats stats = new Stats(0L, false, false, 5L);
+
+            long end = resolveEndOffset(scan, new ProbeTailEnvironment(), "s1", stats);
+
+            assertThat(end).isEqualTo(13L);
+        }
+
+        @Test
         void timestampStartPlanningUsesTimestampProbeOffset() throws Exception {
             Map<String, String> opts = baseOptions();
             opts.put("startingOffsets", "timestamp");

@@ -124,6 +124,8 @@ class BaseRabbitMQMicroBatchStream
     volatile long lastAccumulatedMessageRecords;
     /** Recent per-stream tail probe results used by latestOffset planning. */
     final ConcurrentHashMap<String, CachedTailProbe> latestTailProbeCache = new ConcurrentHashMap<>();
+    /** Streams whose initial latest offset was resolved while empty. */
+    final Set<String> latestStartedOnEmptyStreams = ConcurrentHashMap.newKeySet();
     /** Set once stop() begins to prevent new environment usage during shutdown. */
     final AtomicBoolean stopping = new AtomicBoolean(false);
     /** Guards compound read-modify-write updates on mutable admission-control state. */
@@ -1625,11 +1627,36 @@ class BaseRabbitMQMicroBatchStream
         }
         return switch (options.getStartingOffsets()) {
             case EARLIEST -> resolveFirstAvailable(stream);
-            case LATEST -> queryStreamTailOffsetForLatest(getEnvironment(), stream);
+            case LATEST -> resolveLatestStartingOffset(stream);
             case OFFSET -> options.getStartingOffset();
             case TIMESTAMP -> resolveTimestampStartingOffset(
                     getEnvironment(), stream, options.getStartingTimestamp());
         };
+    }
+
+    private long resolveLatestStartingOffset(String stream) {
+        Environment env = getEnvironment();
+        try {
+            StreamStats stats = env.queryStreamStats(stream);
+            stats.firstOffset();
+            latestStartedOnEmptyStreams.remove(stream);
+            long statsTail = resolveTailOffset(stats);
+            long probedTail = probeTailOffsetForLatestWithCache(env, stream);
+            return Math.max(statsTail, probedTail);
+        } catch (NoOffsetException e) {
+            latestStartedOnEmptyStreams.add(stream);
+            return 0L;
+        } catch (com.rabbitmq.stream.StreamDoesNotExistException e) {
+            if (options.isFailOnDataLoss()) {
+                throw new IllegalStateException(
+                        "Stream '" + stream + "' does not exist. Set failOnDataLoss=false to skip.", e);
+            }
+            LOG.warn("Stream '{}' does not exist, using offset 0 (failOnDataLoss=false)", stream);
+            return 0L;
+        } catch (Exception e) {
+            throw new IllegalStateException(
+                    "Failed to resolve latest starting offset for stream '" + stream + "'", e);
+        }
     }
 
     /**
@@ -1723,9 +1750,43 @@ class BaseRabbitMQMicroBatchStream
     }
 
     private long queryStreamTailOffsetForLatest(Environment env, String stream) {
-        long statsTail = queryStreamTailOffset(env, stream);
+        StreamStats stats;
+        try {
+            stats = env.queryStreamStats(stream);
+        } catch (com.rabbitmq.stream.StreamDoesNotExistException e) {
+            if (options.isFailOnDataLoss()) {
+                throw new IllegalStateException(
+                        "Stream '" + stream + "' does not exist. " +
+                                "It may have been deleted. Set failOnDataLoss=false to skip.", e);
+            }
+            LOG.warn("Stream '{}' does not exist, skipping (failOnDataLoss=false)", stream);
+            latestStartedOnEmptyStreams.remove(stream);
+            return 0L;
+        } catch (Exception e) {
+            throw new IllegalStateException(
+                    "Failed to query stream stats for '" + stream + "'", e);
+        }
+
+        long statsTail = resolveTailOffset(stats);
         long probedTail = probeTailOffsetForLatestWithCache(env, stream);
-        return Math.max(statsTail, probedTail);
+        long resolved = Math.max(statsTail, probedTail);
+
+        if (probedTail == 0L && latestStartedOnEmptyStreams.contains(stream)) {
+            try {
+                stats.firstOffset();
+                resolved = Math.max(resolved, stats.committedChunkId() + 1L);
+            } catch (NoOffsetException e) {
+                return 0L;
+            } catch (RuntimeException e) {
+                LOG.debug("Unable to refine latest tail offset for stream '{}': {}",
+                        stream, e.toString());
+            }
+        }
+
+        if (resolved > 0L) {
+            latestStartedOnEmptyStreams.remove(stream);
+        }
+        return resolved;
     }
 
     private long probeTailOffsetForLatestWithCache(Environment env, String stream) {
