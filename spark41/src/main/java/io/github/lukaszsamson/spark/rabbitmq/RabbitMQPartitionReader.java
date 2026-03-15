@@ -42,7 +42,7 @@ final class RabbitMQPartitionReader extends BaseRabbitMQPartitionReader
         // Lazy initialization: create consumer on first call
         if (consumer == null) {
             try {
-                initConsumer();
+                initConsumerWithRetry();
             } catch (Exception e) {
                 if (!options.isFailOnDataLoss() && isMissingStreamException(e)) {
                     LOG.warn("Unable to initialize consumer for stream '{}' because stream/partition " +

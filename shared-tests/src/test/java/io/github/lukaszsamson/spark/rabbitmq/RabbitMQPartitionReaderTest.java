@@ -149,6 +149,30 @@ class RabbitMQPartitionReaderTest {
         }
 
         @Test
+        void nextRetriesTransientConsumerInitializationFailures() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("pollTimeoutMs", "5");
+            opts.put("maxWaitMs", "50");
+
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 0, 1, new ConnectorOptions(opts));
+            RetryingInitReader reader = new RetryingInitReader(partition, partition.getOptions(), 2);
+
+            BlockingQueue<BaseRabbitMQPartitionReader.QueuedMessage> queue = new LinkedBlockingQueue<>();
+            queue.add(new BaseRabbitMQPartitionReader.QueuedMessage(
+                    CODEC.messageBuilder().addData("a".getBytes()).build(),
+                    0L, 0L, new NoopContext()));
+
+            setPrivateField(reader, "queue", queue);
+
+            assertThat(reader.next()).isTrue();
+            assertThat(reader.initAttempts).isEqualTo(3);
+            assertThat(reader.get().getLong(2)).isEqualTo(0L);
+        }
+
+        @Test
         void nextTimeoutMessageIncludesOffsets() throws Exception {
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
@@ -1706,6 +1730,31 @@ class RabbitMQPartitionReaderTest {
 
         @Override
         public long storedOffset() {
+            return 0L;
+        }
+    }
+
+    private static final class RetryingInitReader extends BaseRabbitMQPartitionReader {
+        private final int failuresBeforeSuccess;
+        private int initAttempts = 0;
+
+        private RetryingInitReader(RabbitMQInputPartition partition, ConnectorOptions options,
+                                   int failuresBeforeSuccess) {
+            super(partition, options);
+            this.failuresBeforeSuccess = failuresBeforeSuccess;
+        }
+
+        @Override
+        void initConsumer() {
+            initAttempts++;
+            if (initAttempts <= failuresBeforeSuccess) {
+                throw new IllegalStateException("Connection is closed");
+            }
+            consumer = new NoopConsumer();
+        }
+
+        @Override
+        long consumerInitRetryDelayMs() {
             return 0L;
         }
     }

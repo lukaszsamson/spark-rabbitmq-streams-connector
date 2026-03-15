@@ -393,6 +393,7 @@ abstract class AbstractRabbitMQIT {
         }
     }
 
+
     void blockRabbitMqPort() {
         try {
             RABBIT.execInContainer("sh", "-c",

@@ -11,6 +11,8 @@ import org.apache.spark.sql.streaming.StreamingQueryProgress;
 import org.apache.spark.sql.streaming.Trigger;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructType;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import static org.apache.spark.sql.functions.col;
 import static org.apache.spark.sql.functions.window;
 import org.junit.jupiter.api.AfterEach;
@@ -44,6 +46,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * Integration tests for Structured Streaming micro-batch source and sink.
  */
 class StreamingIT extends AbstractRabbitMQIT {
+
+    private static final Logger LOG = LoggerFactory.getLogger(StreamingIT.class);
 
     private String sourceStream;
     private String sinkStream;
@@ -1492,19 +1496,20 @@ class StreamingIT extends AbstractRabbitMQIT {
 
     @Test
     void streamingRecoversAfterBrokerRestartDuringRead() throws Exception {
-        publishMessages(sourceStream, 40, "reco-");
-        long preRestartCount = waitForStreamCountAtLeast(sourceStream, 40L, 5_000);
-        assertThat(preRestartCount).isGreaterThanOrEqualTo(40L);
+        publishMessages(sourceStream, 2_000, "reco-");
+        long preRestartCount = waitForStreamCountAtLeast(sourceStream, 2_000L, 15_000);
+        assertThat(preRestartCount).isGreaterThanOrEqualTo(2_000L);
 
         Path outputDir = Files.createTempDirectory("spark-output-retry-read-");
         Path checkpointDir = Files.createTempDirectory("spark-checkpoint-retry-read-");
         EnvironmentPool.getInstance().closeAll();
 
+        java.util.concurrent.CountDownLatch restartGate = new java.util.concurrent.CountDownLatch(1);
         java.util.concurrent.ExecutorService executor = java.util.concurrent.Executors.newSingleThreadExecutor();
         java.util.concurrent.Future<?> stopper = executor.submit(() -> {
-            Thread.sleep(300);
+            restartGate.await(30, TimeUnit.SECONDS);
             stopRabbitMqApp();
-            Thread.sleep(300);
+            Thread.sleep(2_000);
             startRabbitMqApp();
             return null;
         });
@@ -1515,6 +1520,7 @@ class StreamingIT extends AbstractRabbitMQIT {
                 .option("stream", sourceStream)
                 .option("startingOffsets", "earliest")
                 .option("pollTimeoutMs", "300")
+                .option("recoveryBackOffDelayPolicy", "PT1S")
                 .option("serverSideOffsetTracking", "false")
                 .option("metadataFields", "")
                 .option("addressResolverClass",
@@ -1527,23 +1533,33 @@ class StreamingIT extends AbstractRabbitMQIT {
                 .trigger(Trigger.AvailableNow())
                 .start();
 
-        query.awaitTermination(120_000);
-        stopper.get(5, TimeUnit.SECONDS);
-        executor.shutdownNow();
+        try {
+            waitForQueryToStartProcessing(query, 15_000);
+            restartGate.countDown();
+            query.awaitTermination(120_000);
+            stopper.get(20, TimeUnit.SECONDS);
+        } finally {
+            try {
+                startRabbitMqApp();
+            } catch (RuntimeException e) {
+                LOG.debug("Broker restart cleanup skipped: {}", e.getMessage());
+            }
+            executor.shutdownNow();
+        }
 
         List<Row> rows = spark.read().schema(MINIMAL_OUTPUT_SCHEMA)
                 .parquet(outputDir.toString())
                 .collectAsList();
-        assertThat(rows).hasSize(40);
+        assertThat(rows).hasSize(2_000);
 
-        // Verify no gaps — all 40 messages present with contiguous offsets
+        // Verify no gaps after recovery.
         List<Long> offsets = rows.stream()
                 .map(row -> (Long) row.getAs("offset"))
                 .sorted()
                 .toList();
-        assertThat(offsets).hasSize(40);
+        assertThat(offsets).hasSize(2_000);
         assertThat(offsets.get(0)).isEqualTo(0L);
-        assertThat(offsets.get(offsets.size() - 1)).isEqualTo(39L);
+        assertThat(offsets.get(offsets.size() - 1)).isEqualTo(1_999L);
 
         EnvironmentPool.getInstance().closeAll();
     }
@@ -1551,19 +1567,20 @@ class StreamingIT extends AbstractRabbitMQIT {
     @Test
     void streamingNamedConsumerRecoversAfterBrokerRestart() throws Exception {
         String consumerName = "it-named-recovery-" + System.currentTimeMillis();
-        publishMessages(sourceStream, 45, "named-reco-");
-        long preRestartCount = waitForStreamCountAtLeast(sourceStream, 45L, 5_000);
-        assertThat(preRestartCount).isGreaterThanOrEqualTo(45L);
+        publishMessages(sourceStream, 2_000, "named-reco-");
+        long preRestartCount = waitForStreamCountAtLeast(sourceStream, 2_000L, 15_000);
+        assertThat(preRestartCount).isGreaterThanOrEqualTo(2_000L);
 
         Path outputDir = Files.createTempDirectory("spark-output-named-retry-read-");
         Path checkpointDir = Files.createTempDirectory("spark-checkpoint-named-retry-read-");
         EnvironmentPool.getInstance().closeAll();
 
+        java.util.concurrent.CountDownLatch restartGate = new java.util.concurrent.CountDownLatch(1);
         java.util.concurrent.ExecutorService executor = java.util.concurrent.Executors.newSingleThreadExecutor();
         java.util.concurrent.Future<?> stopper = executor.submit(() -> {
-            Thread.sleep(300);
+            restartGate.await(30, TimeUnit.SECONDS);
             stopRabbitMqApp();
-            Thread.sleep(300);
+            Thread.sleep(2_000);
             startRabbitMqApp();
             return null;
         });
@@ -1575,6 +1592,7 @@ class StreamingIT extends AbstractRabbitMQIT {
                 .option("startingOffsets", "earliest")
                 .option("consumerName", consumerName)
                 .option("pollTimeoutMs", "300")
+                .option("recoveryBackOffDelayPolicy", "PT1S")
                 .option("serverSideOffsetTracking", "true")
                 .option("metadataFields", "")
                 .option("addressResolverClass",
@@ -1587,16 +1605,26 @@ class StreamingIT extends AbstractRabbitMQIT {
                 .trigger(Trigger.AvailableNow())
                 .start();
 
-        query.awaitTermination(120_000);
-        stopper.get(5, TimeUnit.SECONDS);
-        executor.shutdownNow();
+        try {
+            waitForQueryToStartProcessing(query, 15_000);
+            restartGate.countDown();
+            query.awaitTermination(120_000);
+            stopper.get(20, TimeUnit.SECONDS);
+        } finally {
+            try {
+                startRabbitMqApp();
+            } catch (RuntimeException e) {
+                LOG.debug("Broker restart cleanup skipped: {}", e.getMessage());
+            }
+            executor.shutdownNow();
+        }
 
         List<Row> rows = spark.read().schema(MINIMAL_OUTPUT_SCHEMA)
                 .parquet(outputDir.toString())
                 .collectAsList();
-        assertThat(rows).hasSize(45);
+        assertThat(rows).hasSize(2_000);
         assertThat(rows.stream().map(r -> (Long) r.getAs("offset")).collect(Collectors.toSet()))
-                .hasSize(45);
+                .hasSize(2_000);
         assertThat(hasStoredOffset(consumerName, sourceStream)).isTrue();
 
         publishMessages(sourceStream, 12, "named-reco-next-");
@@ -3126,6 +3154,24 @@ class StreamingIT extends AbstractRabbitMQIT {
         return spark.read().schema(MINIMAL_OUTPUT_SCHEMA)
                 .parquet(outputDir.toString())
                 .collectAsList();
+    }
+
+    private void waitForQueryToStartProcessing(StreamingQuery query, long timeoutMs)
+            throws InterruptedException {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        String lastMessage = null;
+        while (System.currentTimeMillis() < deadline) {
+            if (!query.isActive()) {
+                throw new AssertionError("Query terminated before broker restart was triggered");
+            }
+            lastMessage = query.status().message();
+            if (lastMessage != null && lastMessage.contains("Processing new data")) {
+                return;
+            }
+            Thread.sleep(100);
+        }
+        throw new AssertionError("Query did not start processing within " + timeoutMs
+                + "ms; last status=" + lastMessage);
     }
 
     private List<Row> readAllValuesFromStream(String stream) {

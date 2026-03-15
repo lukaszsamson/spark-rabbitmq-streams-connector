@@ -38,6 +38,7 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
      *  cold-start consumer setup (new environment, address resolution, etc.). */
     static final long EXECUTOR_TAIL_PROBE_WAIT_MS = 5_000L;
     private static final long CLOSED_CHECK_INTERVAL_MS = 100L;
+    private static final long CONSUMER_INIT_RETRY_WINDOW_MS = 10_000L;
     private static final long MIN_TAIL_PROBE_CACHE_WINDOW_MS = 25L;
     private static final long MAX_TAIL_PROBE_CACHE_WINDOW_MS = 250L;
     private static final long MIN_STATS_TAIL_CACHE_WINDOW_MS = 25L;
@@ -121,7 +122,7 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
         // Lazy initialization: create consumer on first call
         if (consumer == null) {
             try {
-                initConsumer();
+                initConsumerWithRetry();
             } catch (Exception e) {
                 if (!options.isFailOnDataLoss() && isMissingStreamException(e)) {
                     LOG.warn("Unable to initialize consumer for stream '{}' because stream/partition " +
@@ -514,6 +515,108 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
 
         LOG.info("Opened consumer for stream '{}' with offsets [{}, {})",
                 stream, startOffset, endOffset);
+    }
+
+    void initConsumerWithRetry() throws Exception {
+        long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(
+                Math.min(options.getMaxWaitMs(), CONSUMER_INIT_RETRY_WINDOW_MS));
+        int attempt = 0;
+        while (true) {
+            resetConsumerInitState();
+            try {
+                initConsumer();
+                return;
+            } catch (Exception e) {
+                attempt++;
+                if (!isTransientConsumerInitFailure(e)
+                        || System.nanoTime() >= deadlineNanos
+                        || closeCalled.get()) {
+                    throw e;
+                }
+                LOG.warn("Transient failure initializing consumer for stream '{}' on attempt {}; "
+                                + "retrying after {}ms: {}",
+                        stream, attempt, consumerInitRetryDelayMs(), e.getMessage());
+                cleanupAfterFailedConsumerInit();
+                sleepBeforeConsumerInitRetry();
+            }
+        }
+    }
+
+    long consumerInitRetryDelayMs() {
+        return Math.min(Math.max(options.getPollTimeoutMs(), 100L), 1_000L);
+    }
+
+    void sleepBeforeConsumerInitRetry() throws InterruptedException {
+        Thread.sleep(consumerInitRetryDelayMs());
+    }
+
+    void resetConsumerInitState() {
+        consumerClosed.set(false);
+        consumerError.set(null);
+    }
+
+    void cleanupAfterFailedConsumerInit() {
+        try {
+            if (consumer != null) {
+                consumer.close();
+            }
+        } catch (Exception closeError) {
+            LOG.debug("Error closing partially initialized consumer for stream '{}'", stream, closeError);
+        } finally {
+            consumer = null;
+        }
+
+        if (pooledEnvironment) {
+            try {
+                EnvironmentPool.getInstance().release(options);
+            } catch (RuntimeException releaseError) {
+                LOG.debug("Error releasing pooled environment after init failure for stream '{}'",
+                        stream, releaseError);
+            }
+            pooledEnvironment = false;
+            environment = null;
+            return;
+        }
+
+        try {
+            if (environment != null) {
+                environment.close();
+            }
+        } catch (Exception closeError) {
+            LOG.debug("Error closing environment after init failure for stream '{}'", stream, closeError);
+        } finally {
+            environment = null;
+        }
+    }
+
+    boolean isTransientConsumerInitFailure(Throwable failure) {
+        Throwable current = failure;
+        while (current != null) {
+            String message = current.getMessage();
+            if (message != null) {
+                String lowerMessage = message.toLowerCase(java.util.Locale.ROOT);
+                if (lowerMessage.contains("connection is closed")
+                        || lowerMessage.contains("locator not available")
+                        || lowerMessage.contains("connection reset")
+                        || lowerMessage.contains("connection refused")
+                        || lowerMessage.contains("broken pipe")) {
+                    return true;
+                }
+            }
+            if (current instanceof java.net.ConnectException
+                    || current instanceof java.net.SocketException
+                    || current instanceof java.util.concurrent.TimeoutException) {
+                return true;
+            }
+            String simpleName = current.getClass().getSimpleName();
+            if ("LocatorNotAvailableException".equals(simpleName)
+                    || "ConnectionStreamException".equals(simpleName)
+                    || "TimeoutStreamException".equals(simpleName)) {
+                return true;
+            }
+            current = current.getCause();
+        }
+        return false;
     }
 
     int resolveEffectiveInitialCredits() {
