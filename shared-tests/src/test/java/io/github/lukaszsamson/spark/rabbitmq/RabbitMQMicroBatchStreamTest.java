@@ -947,6 +947,22 @@ class RabbitMQMicroBatchStreamTest {
         }
 
         @Test
+        @Tag("spark4x")
+        void readMinRowsProcessesAfterDelayExpiryEvenWhenThresholdIsNotMet() throws Exception {
+            RabbitMQMicroBatchStream stream = createStream(minimalOptions());
+            RabbitMQStreamOffset start = new RabbitMQStreamOffset(Map.of("s1", 10L));
+            Map<String, Long> tail = Map.of("s1", 15L);
+
+            Map<String, Long> delayed = stream.handleReadMinRowsCore(100L, 50L, start.getStreamOffsets(), tail);
+            assertThat(delayed).isEqualTo(start.getStreamOffsets());
+
+            Thread.sleep(80L);
+
+            Map<String, Long> released = stream.handleReadMinRowsCore(100L, 50L, start.getStreamOffsets(), tail);
+            assertThat(released).isEqualTo(tail);
+        }
+
+        @Test
         void latestOffsetSeedsNewSuperStreamPartitionsFromEarliestOffset() throws Exception {
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
