@@ -7,7 +7,7 @@
     <parent>
         <groupId>io.github.lukaszsamson</groupId>
         <artifactId>spark-rabbitmq-streams-connector-parent</artifactId>
-        <version>0.1.0</version>
+        <version>0.2.0-SNAPSHOT</version>
     </parent>
 
     <artifactId>spark-rabbitmq-streams-connector-spark35</artifactId>
