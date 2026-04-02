@@ -14,6 +14,11 @@
     <name>Sparkling Rabbit - Spark 3.5 Tests</name>
     <description>Runs shared unit tests against Spark 3.5</description>
 
+    <properties>
+        <maven.install.skip>true</maven.install.skip>
+        <maven.deploy.skip>true</maven.deploy.skip>
+    </properties>
+
     <dependencies>
         <dependency>
             <groupId>io.github.lukaszsamson</groupId>

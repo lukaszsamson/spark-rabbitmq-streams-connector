@@ -14,6 +14,12 @@
     <name>Sparkling Rabbit - Core</name>
     <description>Core library for RabbitMQ Streams Spark connector (no Spark dependency)</description>
 
+    <properties>
+        <!-- Internal module, shaded into spark* artifacts -->
+        <maven.install.skip>true</maven.install.skip>
+        <maven.deploy.skip>true</maven.deploy.skip>
+    </properties>
+
     <dependencies>
         <dependency>
             <groupId>com.rabbitmq</groupId>

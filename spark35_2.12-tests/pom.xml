@@ -16,6 +16,8 @@
 
     <properties>
         <scala.binary.version>2.12</scala.binary.version>
+        <maven.install.skip>true</maven.install.skip>
+        <maven.deploy.skip>true</maven.deploy.skip>
     </properties>
 
     <dependencies>

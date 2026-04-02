@@ -14,6 +14,11 @@
     <name>Sparkling Rabbit - Shared Tests</name>
     <description>Shared unit tests for Spark 4.0/4.1 modules</description>
 
+    <properties>
+        <maven.install.skip>true</maven.install.skip>
+        <maven.deploy.skip>true</maven.deploy.skip>
+    </properties>
+
     <dependencies>
         <dependency>
             <groupId>io.github.lukaszsamson</groupId>
