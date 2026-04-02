@@ -6,7 +6,7 @@
 
     <groupId>io.github.lukaszsamson</groupId>
     <artifactId>spark-rabbitmq-streams-connector-parent</artifactId>
-    <version>0.1.0-SNAPSHOT</version>
+    <version>0.1.0</version>
     <packaging>pom</packaging>
 
     <name>Sparkling Rabbit - Parent</name>
@@ -284,6 +284,16 @@
                         <configuration>
                             <publishingServerId>central</publishingServerId>
                             <tokenAuth>true</tokenAuth>
+                            <excludeArtifacts>
+                                <excludeArtifact>spark-rabbitmq-streams-connector-core</excludeArtifact>
+                                <excludeArtifact>spark-rabbitmq-streams-connector-spark-shared</excludeArtifact>
+                                <excludeArtifact>spark-rabbitmq-streams-connector-shared-tests</excludeArtifact>
+                                <excludeArtifact>spark-rabbitmq-streams-connector-spark35-tests</excludeArtifact>
+                                <excludeArtifact>spark-rabbitmq-streams-connector-spark35_2.12-tests</excludeArtifact>
+                                <excludeArtifact>spark-rabbitmq-streams-connector-spark40-tests</excludeArtifact>
+                                <excludeArtifact>spark-rabbitmq-streams-connector-spark41-tests</excludeArtifact>
+                                <excludeArtifact>spark-rabbitmq-streams-connector-it-tests</excludeArtifact>
+                            </excludeArtifacts>
                         </configuration>
                     </plugin>
                 </plugins>
