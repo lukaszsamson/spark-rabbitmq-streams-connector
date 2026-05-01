@@ -15,6 +15,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.*;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -36,6 +37,8 @@ final class RabbitMQScan implements Scan {
     private static final Logger LOG = LoggerFactory.getLogger(RabbitMQScan.class);
     private static final long TAIL_PROBE_TIMEOUT_MS = 1_500L;
     private static final long MIN_TIMESTAMP_PROBE_TIMEOUT_MS = 250L;
+    private static final long CHUNK_DRAIN_IDLE_MS = 50L;
+    private static final long RESOLVER_DRAIN_TIMEOUT_MS = 5_000L;
     private static final int TAIL_PROBE_EXECUTOR_PARALLELISM = Math.max(
             1,
             Math.min(Runtime.getRuntime().availableProcessors(),
@@ -217,13 +220,52 @@ final class RabbitMQScan implements Scan {
         for (String stream : streams) {
             futures.put(stream, rangeResolverExecutor().submit(() -> resolveStreamOffsetRange(env, stream)));
         }
-        for (Map.Entry<String, Future<long[]>> entry : futures.entrySet()) {
-            long[] range = awaitResolvedRange(entry.getKey(), entry.getValue());
-            if (range != null) {
-                ranges.put(entry.getKey(), range);
+        try {
+            for (Map.Entry<String, Future<long[]>> entry : futures.entrySet()) {
+                long[] range = awaitResolvedRange(entry.getKey(), entry.getValue());
+                if (range != null) {
+                    ranges.put(entry.getKey(), range);
+                }
+            }
+            return ranges;
+        } catch (RuntimeException | Error fail) {
+            // A resolver failed; cancel and drain the rest before the outer finally
+            // releases the Environment back to the pool, so in-flight tasks do not
+            // continue using an Environment that may then be closed by eviction.
+            cancelAndDrainPendingResolvers(futures);
+            throw fail;
+        }
+    }
+
+    private static void cancelAndDrainPendingResolvers(Map<String, Future<long[]>> futures) {
+        for (Future<long[]> future : futures.values()) {
+            if (!future.isDone()) {
+                future.cancel(true);
             }
         }
-        return ranges;
+        long deadlineNanos = System.nanoTime()
+                + TimeUnit.MILLISECONDS.toNanos(RESOLVER_DRAIN_TIMEOUT_MS);
+        for (Map.Entry<String, Future<long[]>> entry : futures.entrySet()) {
+            Future<long[]> future = entry.getValue();
+            if (future.isDone()) {
+                continue;
+            }
+            long remainingNanos = deadlineNanos - System.nanoTime();
+            if (remainingNanos <= 0) {
+                LOG.debug("Range resolver for stream '{}' did not terminate within {} ms after cancel; "
+                                + "abandoning to avoid blocking planning",
+                        entry.getKey(), RESOLVER_DRAIN_TIMEOUT_MS);
+                continue;
+            }
+            try {
+                future.get(remainingNanos, TimeUnit.NANOSECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            } catch (CancellationException | ExecutionException | TimeoutException ignored) {
+                // Best-effort wait for cancellation; the original failure is what we propagate.
+            }
+        }
     }
 
     private long[] awaitResolvedRange(String stream, Future<long[]> future) {
@@ -440,9 +482,15 @@ final class RabbitMQScan implements Scan {
 
     /**
      * Resolve an ending offset by timestamp using a probe consumer.
-     * Finds the first offset at or after the given timestamp, then returns it as an
-     * exclusive end offset. If no messages exist at/after the timestamp, returns the
-     * stream tail (all available data is before the timestamp).
+     * Finds the first chunk at or after the given timestamp, drains the rest of that
+     * chunk, then returns {@code maxObservedOffset + 1} as the exclusive end. Draining
+     * matters because the broker delivers a whole chunk; if we returned the chunk's
+     * first offset, messages later in the same chunk that fall <em>before</em> the
+     * timestamp would be incorrectly excluded. With this approach the boundary is
+     * chunk-granular on the upper side instead — a few messages past the timestamp may
+     * be included, which is the documented chunk-boundary behavior.
+     * If no messages exist at/after the timestamp, returns the stream tail
+     * (all available data is before the timestamp).
      */
     private long resolveTimestampEndingOffset(Environment env, String stream, long timestamp) {
         BlockingQueue<Long> observedOffsets = new LinkedBlockingQueue<>();
@@ -461,11 +509,18 @@ final class RabbitMQScan implements Scan {
 
             Long observed = observedOffsets.poll(timestampProbeTimeoutMs(), TimeUnit.MILLISECONDS);
             if (observed != null) {
-                // The broker returns the first chunk at/after the timestamp.
-                // Use the observed offset as the exclusive end (messages before this
-                // timestamp are included). Note: chunk-granularity boundary may include
-                // a few messages slightly past the target timestamp.
-                return observed;
+                long maxObserved = observed;
+                // Drain the rest of the matching chunk. With a single chunk's worth of
+                // initial credit the broker delivers all messages of that chunk in rapid
+                // succession; once the queue is briefly idle the chunk is drained.
+                Long next;
+                while ((next = observedOffsets.poll(
+                        CHUNK_DRAIN_IDLE_MS, TimeUnit.MILLISECONDS)) != null) {
+                    if (next > maxObserved) {
+                        maxObserved = next;
+                    }
+                }
+                return maxObserved + 1L;
             }
             // No messages at/after timestamp: all data is before the cutoff.
             // Use stream tail as ending offset (include everything).

@@ -18,6 +18,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -108,6 +109,32 @@ class RabbitMQScanTest {
             assertThat(ranges).hasSize(4);
             assertThat(env.maxConcurrent()).isGreaterThan(1);
             assertThat(ranges.get("s1")).containsExactly(10L, 100L);
+        }
+
+        @Test
+        void resolveOffsetRangesCancelsPendingResolversWhenOneFails() throws Exception {
+            // When one resolver fails, the others must be cancelled and observed to
+            // terminate before the call returns. Otherwise the outer pool.release()
+            // would run while tasks are still using the Environment.
+            Map<String, String> opts = baseOptions();
+            opts.put("endingOffsets", "offset");
+            opts.put("endingOffset", "100");
+            RabbitMQScan scan = new RabbitMQScan(new ConnectorOptions(opts), schema());
+            FailFirstThenBlockEnvironment env = new FailFirstThenBlockEnvironment();
+
+            // Order matters: "fail" must be iterated first so its exception triggers
+            // cancel-and-drain on the still-running "blocking" resolver. With the
+            // opposite order, the main thread would block on "blocking".get() and
+            // never reach the catch path under test.
+            assertThatThrownBy(() -> resolveOffsetRanges(scan, env,
+                    List.of("fail", "blocking")))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("Failed to query stream stats");
+
+            // Slow resolver must have terminated and observed interruption (cancel(true)
+            // during drain delivered an interrupt that the running task saw).
+            assertThat(env.blockingTaskEnded(5_000L)).isTrue();
+            assertThat(env.blockingTaskObservedInterrupt()).isTrue();
         }
 
         @Test
@@ -230,13 +257,37 @@ class RabbitMQScanTest {
             opts.put("pollTimeoutMs", "1000");
             RabbitMQScan scan = new RabbitMQScan(new ConnectorOptions(opts), schema());
 
+            // Single observed offset: exclusive end is observed + 1 so the matching
+            // message itself is included.
             Long end = resolveTimestampEndingOffsetIfSupported(scan,
                     new DelayedProbeEnvironment(400L, new Stats(0L, false, false, 99L), 17L),
                     "s1", 1700000000000L);
             if (end == null) {
                 return;
             }
-            assertThat(end).isEqualTo(17L);
+            assertThat(end).isEqualTo(18L);
+        }
+
+        @Test
+        void timestampEndPlanningDrainsMatchingChunkSoEarlierMessagesAreIncluded() throws Exception {
+            // Broker delivers the whole chunk that contains the matching timestamp.
+            // The exclusive end must be past the chunk's last offset, otherwise messages
+            // earlier in that chunk (whose timestamp is < endingTimestamp) would be
+            // excluded.
+            Map<String, String> opts = baseOptions();
+            opts.put("endingOffsets", "timestamp");
+            opts.put("endingTimestamp", "1700000000000");
+            opts.put("pollTimeoutMs", "1000");
+            RabbitMQScan scan = new RabbitMQScan(new ConnectorOptions(opts), schema());
+
+            Long end = resolveTimestampEndingOffsetIfSupported(scan,
+                    new DelayedProbeEnvironment(50L, new Stats(0L, false, false, 99L),
+                            10L, 11L, 12L, 13L, 14L, 15L, 16L, 17L, 18L, 19L),
+                    "s1", 1700000000000L);
+            if (end == null) {
+                return;
+            }
+            assertThat(end).isEqualTo(20L);
         }
 
         @Test
@@ -251,7 +302,7 @@ class RabbitMQScanTest {
             long end = resolveEndOffset(scan,
                     new DelayedProbeEnvironment(0L, new Stats(0L, false, false, 99L), 17L),
                     "s1", stats);
-            assertThat(end).isEqualTo(17L);
+            assertThat(end).isEqualTo(18L);
         }
 
         @Test
@@ -412,6 +463,98 @@ class RabbitMQScanTest {
         @Override
         public StreamStats queryStreamStats(String stream) {
             throw new StreamDoesNotExistException(streamMode ? stream : "partition");
+        }
+
+        @Override
+        public StreamCreator streamCreator() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void deleteStream(String stream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void deleteSuperStream(String superStream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void storeOffset(String reference, String stream, long offset) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public boolean streamExists(String stream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public ProducerBuilder producerBuilder() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public ConsumerBuilder consumerBuilder() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void close() {
+        }
+    }
+
+    private static final class FailFirstThenBlockEnvironment implements Environment {
+        private final AtomicBoolean blockingTaskObservedInterrupt = new AtomicBoolean(false);
+        private final CountDownLatch blockingStarted = new CountDownLatch(1);
+        private final CountDownLatch blockingEnded = new CountDownLatch(1);
+
+        @Override
+        public StreamStats queryStreamStats(String stream) {
+            if ("fail".equals(stream)) {
+                // Wait until the slow resolver has actually started before throwing.
+                // Otherwise cancel(true) would only flip the queued task to CANCELLED
+                // without interrupting any running thread, defeating the test.
+                try {
+                    if (!blockingStarted.await(10, TimeUnit.SECONDS)) {
+                        throw new IllegalStateException(
+                                "Blocking resolver never started; executor saturated?");
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                throw new RuntimeException("connection failed");
+            }
+            // "blocking" stream: spin until interrupted.
+            blockingStarted.countDown();
+            try {
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(60);
+                while (System.nanoTime() < deadline) {
+                    if (Thread.currentThread().isInterrupted()) {
+                        blockingTaskObservedInterrupt.set(true);
+                        return new Stats(0L, false, false, 0L);
+                    }
+                    try {
+                        Thread.sleep(20L);
+                    } catch (InterruptedException e) {
+                        blockingTaskObservedInterrupt.set(true);
+                        Thread.currentThread().interrupt();
+                        return new Stats(0L, false, false, 0L);
+                    }
+                }
+                return new Stats(0L, false, false, 0L);
+            } finally {
+                blockingEnded.countDown();
+            }
+        }
+
+        boolean blockingTaskObservedInterrupt() {
+            return blockingTaskObservedInterrupt.get();
+        }
+
+        boolean blockingTaskEnded(long timeoutMs) throws InterruptedException {
+            return blockingEnded.await(timeoutMs, TimeUnit.MILLISECONDS);
         }
 
         @Override
