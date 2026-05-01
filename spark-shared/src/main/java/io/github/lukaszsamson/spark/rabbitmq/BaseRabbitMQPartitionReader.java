@@ -74,6 +74,12 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
     long lastStatsTailNanos = -1L;
     long lastStatsTailOffset = -1L;
 
+    enum TerminationDecision {
+        CONTINUE,
+        COMPLETE,
+        THROW
+    }
+
     // Task-level metric counters
     volatile long recordsRead = 0;
     volatile long payloadBytesRead = 0;
@@ -186,70 +192,41 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
                             "Consumer for stream '" + stream + "' closed before reaching target end offset "
                                     + endOffset + ". Last emitted offset: " + lastEmittedOffset);
                 }
-                // With broker-side filtering, not all offsets in [start, end) are delivered.
-                // Timestamp-seek split can also legitimately have no in-range rows when the
-                // resolved broker seek position is already past this split's end.
-                // If the stream tail has already reached this split's end, we can terminate.
-                boolean brokerFilterConfigured = isBrokerFilterConfigured();
-                boolean timestampStart = isTimestampConfiguredStartingOffset();
-                boolean canTerminateOnEmpty = brokerFilterConfigured || timestampStart;
-                if (canTerminateOnEmpty && hasStreamTailReachedPlannedEnd()) {
+                if (canCompleteEmptyPlannedRange() && hasStreamTailReachedPlannedEnd()) {
                     finished = true;
                     return false;
                 }
                 totalWaitMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - waitStartNanos);
                 if (totalWaitMs >= maxWaitMs) {
-                    if (options.isSingleActiveConsumer()
-                            && singleActiveConsumerStateKnown.get()
-                            && !singleActiveConsumerActive.get()) {
-                        LOG.debug("Single active consumer is inactive for stream '{}'; " +
-                                        "completing split without timeout failure",
-                                stream);
+                    boolean sacInactive = isSingleActiveConsumerKnownInactive();
+                    boolean plannedEndReached = canCompleteEmptyPlannedRange()
+                            && hasStreamTailReachedPlannedEnd();
+                    boolean dataLossProven = isPlannedRangeNoLongerReachableDueToDataLoss();
+                    TerminationDecision decision = decideTermination(
+                            true, dataLossProven, plannedEndReached, sacInactive);
+                    if (decision == TerminationDecision.COMPLETE) {
+                        if (dataLossProven) {
+                            LOG.warn("Reached maxWaitMs={} on stream '{}' and planned range [{}, {}) is no longer " +
+                                            "reachable after data loss/recreation; completing split because failOnDataLoss=false",
+                                    maxWaitMs, stream, startOffset, endOffset);
+                            dataLoss++;
+                        } else {
+                            LOG.warn("Reached maxWaitMs={} while reading filtered/timestamp stream '{}'; " +
+                                            "tail indicates planned end reached at lastObservedOffset={} for endOffset={}",
+                                    maxWaitMs, stream, lastObservedOffset, endOffset);
+                        }
                         finished = true;
                         return false;
                     }
-                    if (brokerFilterConfigured && hasStreamTailReachedPlannedEnd()) {
-                        LOG.warn("Reached maxWaitMs={} while reading filtered stream '{}'; " +
-                                        "tail indicates planned end reached at lastObservedOffset={} for endOffset={}",
-                                maxWaitMs, stream, lastObservedOffset, endOffset);
-                        finished = true;
-                        return false;
+                    if (sacInactive) {
+                        throw new IOException(
+                                "Single active consumer for stream '" + stream
+                                        + "' is currently inactive; retrying the task may attach to the active consumer");
                     }
-                    if (!options.isFailOnDataLoss() && isPlannedRangeNoLongerReachableDueToDataLoss()) {
-                        LOG.warn("Reached maxWaitMs={} on stream '{}' and planned range [{}, {}) is no longer " +
-                                        "reachable after data loss/recreation; completing split because failOnDataLoss=false",
-                                maxWaitMs, stream, startOffset, endOffset);
-                        dataLoss++;
-                        finished = true;
-                        return false;
-                    }
-                    if (!options.isFailOnDataLoss()
-                            && endOffset > 0
-                            && lastObservedOffset >= endOffset - 2) {
-                        LOG.warn("Reached maxWaitMs={} on stream '{}' near planned end; " +
-                                        "completing split because failOnDataLoss=false " +
-                                        "(lastObservedOffset={}, planned endOffset={})",
-                                maxWaitMs, stream, lastObservedOffset, endOffset);
-                        finished = true;
-                        return false;
-                    }
-                    if (!options.isFailOnDataLoss()
-                            && lastObservedOffset < startOffset
-                            && isStreamTailBelowPlannedEnd()) {
-                        LOG.warn("Reached maxWaitMs={} on stream '{}' with no in-range progress and tail below " +
-                                        "planned end; completing split because failOnDataLoss=false " +
-                                        "(startOffset={}, planned endOffset={})",
-                                maxWaitMs, stream, startOffset, endOffset);
-                        finished = true;
-                        return false;
-                    }
-                    if (!options.isFailOnDataLoss() && lastObservedOffset < startOffset) {
-                        LOG.warn("Reached maxWaitMs={} on stream '{}' without in-range progress; " +
-                                        "completing split because failOnDataLoss=false " +
-                                        "(startOffset={}, planned endOffset={})",
-                                maxWaitMs, stream, startOffset, endOffset);
-                        finished = true;
-                        return false;
+                    if (dataLossProven && options.isFailOnDataLoss()) {
+                        throw new IOException(
+                                "Planned range [" + startOffset + ", " + endOffset + ") for stream '"
+                                        + stream + "' is no longer reachable due to data loss/recreation");
                     }
                     throw new IOException(
                             "Timed out waiting for messages from stream '" + stream +
@@ -464,8 +441,7 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
 
         // Configure filtering if specified
         if (options.getFilterValues() != null && !options.getFilterValues().isEmpty()) {
-            MessagePostFilter brokerPostFilter = postFilter;
-            if (brokerPostFilter == null) {
+            if (postFilter == null) {
                 LOG.warn("Broker-side filter configured on stream '{}' without deterministic " +
                                 "client post-filter. Bloom-filter false positives may be emitted. " +
                                 "Configure '{}' or '{}' to enable deterministic filtering.",
@@ -477,17 +453,7 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
                     .values(options.getFilterValues().toArray(new String[0]))
                     .matchUnfiltered(options.isFilterMatchUnfiltered())
                     // RabbitMQ stream client requires both filter values and post-filter logic.
-                    .postFilter(msg -> {
-                        if (brokerPostFilter == null) {
-                            return true;
-                        }
-                        boolean accepted = brokerPostFilter.accept(toMessageView(msg));
-                        if (!accepted && options.isFilterWarningOnMismatch()) {
-                            LOG.warn("Post-filter dropped message on stream '{}' in broker callback",
-                                    stream);
-                        }
-                        return accepted;
-                    })
+                    .postFilter(msg -> true)
                     .builder();
         }
 
@@ -703,6 +669,13 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
             context.processed();
             return;
         }
+        if (shouldDropByPostFilter(message)) {
+            if (context.offset() > lastObservedOffset) {
+                lastObservedOffset = context.offset();
+            }
+            context.processed();
+            return;
+        }
         try {
             // Enqueue with a bounded timeout. context.processed() is NOT called
             // here — it is deferred to the pull side (next()) so that credits
@@ -722,6 +695,17 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
                     new IOException("Interrupted while enqueuing message at offset "
                             + context.offset() + " on stream '" + stream + "'", e));
         }
+    }
+
+    boolean shouldDropByPostFilter(Message message) {
+        if (!isBrokerFilterConfigured() || postFilter == null) {
+            return false;
+        }
+        boolean accepted = postFilter.accept(toMessageView(message));
+        if (!accepted && options.isFilterWarningOnMismatch()) {
+            LOG.warn("Post-filter dropped message on stream '{}' in enqueue callback", stream);
+        }
+        return !accepted;
     }
 
     void handleStartOffsetOutOfRange(long firstAvailable) {
@@ -767,7 +751,7 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
             return OffsetSpecification.offset(lastEmittedOffset + 1);
         }
         if (lastObservedOffset >= 0) {
-            return OffsetSpecification.offset(lastObservedOffset + 1);
+            return OffsetSpecification.offset(Math.max(startOffset, lastObservedOffset + 1));
         }
         return subscriptionOffsetSpec != null ? subscriptionOffsetSpec : configuredOffsetSpec;
     }
@@ -786,6 +770,35 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
     boolean isTimestampConfiguredStartingOffset() {
         return useConfiguredStartingOffset
                 && options.getStartingOffsets() == StartingOffsetsMode.TIMESTAMP;
+    }
+
+    boolean canCompleteEmptyPlannedRange() {
+        return isBrokerFilterConfigured() || isTimestampConfiguredStartingOffset();
+    }
+
+    boolean isSingleActiveConsumerKnownInactive() {
+        return options.isSingleActiveConsumer()
+                && singleActiveConsumerStateKnown.get()
+                && !singleActiveConsumerActive.get();
+    }
+
+    TerminationDecision decideTermination(
+            boolean timedOut,
+            boolean dataLossProven,
+            boolean plannedEndReached,
+            boolean sacInactive) {
+        if (dataLossProven) {
+            return options.isFailOnDataLoss()
+                    ? TerminationDecision.THROW
+                    : TerminationDecision.COMPLETE;
+        }
+        if (plannedEndReached) {
+            return TerminationDecision.COMPLETE;
+        }
+        if (sacInactive || timedOut) {
+            return TerminationDecision.THROW;
+        }
+        return TerminationDecision.CONTINUE;
     }
 
     boolean shouldDetectOffsetGapsAfterConsumerClosure() {
@@ -865,19 +878,6 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
                 return true;
             }
             LOG.debug("Unable to validate data-loss reachability for stream '{}': {}",
-                    stream, e.getMessage());
-            return false;
-        }
-    }
-
-    boolean isStreamTailBelowPlannedEnd() {
-        try {
-            long statsTail = queryStreamTailOffsetFromStatsWithCache();
-            long probedTail = probeLastMessageOffset();
-            long tail = Math.max(statsTail, probedTail);
-            return tail < endOffset - 1;
-        } catch (Exception e) {
-            LOG.debug("Unable to validate stream tail for reachability on '{}': {}",
                     stream, e.getMessage());
             return false;
         }

@@ -64,6 +64,12 @@ final class RabbitMQPartitionReader extends BaseRabbitMQPartitionReader
                 return RecordStatus.newStatusWithoutArrivalTime(false);
             }
 
+            if ((lastEmittedOffset >= 0 && lastEmittedOffset >= endOffset - 1)
+                    || (lastObservedOffset >= 0 && lastObservedOffset >= endOffset - 1)) {
+                finished = true;
+                return RecordStatus.newStatusWithoutArrivalTime(false);
+            }
+
             // Check for consumer errors
             Throwable error = consumerError.get();
             if (error != null) {
@@ -72,6 +78,29 @@ final class RabbitMQPartitionReader extends BaseRabbitMQPartitionReader
 
             long remainingMs = TimeUnit.NANOSECONDS.toMillis(deadlineNanos - System.nanoTime());
             if (remainingMs <= 0) {
+                boolean plannedEndReached = canCompleteEmptyPlannedRange()
+                        && hasStreamTailReachedPlannedEnd();
+                boolean dataLossProven = isPlannedRangeNoLongerReachableDueToDataLoss();
+                boolean sacInactive = isSingleActiveConsumerKnownInactive();
+                TerminationDecision decision = decideTermination(
+                        false, dataLossProven, plannedEndReached, sacInactive);
+                if (decision == TerminationDecision.COMPLETE) {
+                    if (dataLossProven) {
+                        dataLoss++;
+                    }
+                    finished = true;
+                    return RecordStatus.newStatusWithoutArrivalTime(false);
+                }
+                if (sacInactive) {
+                    throw new IOException(
+                            "Single active consumer for stream '" + stream
+                                    + "' is currently inactive; retrying the task may attach to the active consumer");
+                }
+                if (dataLossProven && options.isFailOnDataLoss()) {
+                    throw new IOException(
+                            "Planned range [" + startOffset + ", " + endOffset + ") for stream '"
+                                    + stream + "' is no longer reachable due to data loss/recreation");
+                }
                 return RecordStatus.newStatusWithoutArrivalTime(false);
             }
 
@@ -94,7 +123,10 @@ final class RabbitMQPartitionReader extends BaseRabbitMQPartitionReader
                     return RecordStatus.newStatusWithoutArrivalTime(false);
                 }
                 if (consumerClosed.get()) {
-                    if (!options.isFailOnDataLoss() && isPlannedRangeNoLongerReachableDueToDataLoss()) {
+                    boolean dataLossProven = isPlannedRangeNoLongerReachableDueToDataLoss();
+                    TerminationDecision decision = decideTermination(
+                            false, dataLossProven, false, false);
+                    if (decision == TerminationDecision.COMPLETE) {
                         LOG.warn("Consumer for stream '{}' closed and planned range [{}, {}) is no longer " +
                                         "reachable; completing split because failOnDataLoss=false",
                                 stream, startOffset, endOffset);
@@ -102,13 +134,28 @@ final class RabbitMQPartitionReader extends BaseRabbitMQPartitionReader
                         finished = true;
                         return RecordStatus.newStatusWithoutArrivalTime(false);
                     }
+                    if (dataLossProven && options.isFailOnDataLoss()) {
+                        throw new IOException(
+                                "Planned range [" + startOffset + ", " + endOffset + ") for stream '"
+                                        + stream + "' is no longer reachable due to data loss/recreation");
+                    }
                     throw new IOException(
                             "Consumer for stream '" + stream + "' closed while waiting for data");
+                }
+                if (canCompleteEmptyPlannedRange() && hasStreamTailReachedPlannedEnd()) {
+                    finished = true;
+                    return RecordStatus.newStatusWithoutArrivalTime(false);
                 }
                 continue;
             }
 
-            // Credit flow: notify that this message has been consumed
+            // Stop at end offset (exclusive) without granting additional credit.
+            if (qm.offset() >= endOffset) {
+                finished = true;
+                return RecordStatus.newStatusWithoutArrivalTime(false);
+            }
+
+            // Credit flow: notify that this message has been consumed.
             qm.context().processed();
 
             if (qm.offset() > lastObservedOffset) {

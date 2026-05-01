@@ -18,6 +18,9 @@ import java.util.concurrent.LinkedBlockingQueue;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 
 /**
  * Unit tests for the SupportsRealTimeMode and SupportsRealTimeRead
@@ -479,6 +482,55 @@ class RealTimeModeTest {
             // Verify the row is available
             InternalRow row = reader.get();
             assertThat(row).isNotNull();
+        }
+
+        @Test
+        void nextWithTimeoutStopsAtEndOffset() throws Exception {
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 0, 5, minimalOptions());
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(
+                    partition, partition.getOptions());
+
+            BlockingQueue<RabbitMQPartitionReader.QueuedMessage> queue = new LinkedBlockingQueue<>();
+            MessageHandler.Context boundaryContext = mock(MessageHandler.Context.class);
+            queue.add(new RabbitMQPartitionReader.QueuedMessage(
+                    CODEC.messageBuilder().addData("boundary".getBytes()).build(),
+                    5L, 0L, boundaryContext));
+
+            setPrivateField(reader, "consumer", new NoopConsumer());
+            setPrivateField(reader, "queue", queue);
+
+            SupportsRealTimeRead.RecordStatus status = reader.nextWithTimeout(5000L);
+            assertThat(status.hasRecord()).isFalse();
+            verify(boundaryContext, times(0)).processed();
+        }
+
+        @Test
+        void nextWithTimeoutFailsRetryablyWhenSingleActiveConsumerIsInactive() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("singleActiveConsumer", "true");
+            opts.put("consumerName", "consumer-a");
+            opts.put("pollTimeoutMs", "5");
+            ConnectorOptions options = new ConnectorOptions(opts);
+
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 0, 100, options);
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(
+                    partition, partition.getOptions());
+
+            setPrivateField(reader, "consumer", new NoopConsumer());
+            setPrivateField(reader, "queue", new LinkedBlockingQueue<>());
+            setPrivateField(reader, "singleActiveConsumerStateKnown",
+                    new java.util.concurrent.atomic.AtomicBoolean(true));
+            setPrivateField(reader, "singleActiveConsumerActive",
+                    new java.util.concurrent.atomic.AtomicBoolean(false));
+
+            assertThatThrownBy(() -> reader.nextWithTimeout(20L))
+                    .isInstanceOf(IOException.class)
+                    .hasMessageContaining("Single active consumer")
+                    .hasMessageContaining("inactive");
         }
 
         @Test
