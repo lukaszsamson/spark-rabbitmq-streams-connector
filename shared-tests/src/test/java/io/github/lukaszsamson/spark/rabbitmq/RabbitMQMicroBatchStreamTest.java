@@ -295,7 +295,7 @@ class RabbitMQMicroBatchStreamTest {
         }
 
         @Test
-        void initialOffsetTimestampProbeFailureFailsFastInsteadOfFallingBackToEarliest()
+        void initialOffsetTimestampProbeFailureFailsFast()
                 throws Exception {
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
@@ -328,6 +328,29 @@ class RabbitMQMicroBatchStreamTest {
             assertThatThrownBy(stream::initialOffset)
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessageContaining("consumerName is explicitly configured");
+        }
+
+        @Test
+        void initialOffsetExplicitConsumerNameInterruptedLookupFallsBackToStartingOffsets()
+                throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("consumerName", "explicit");
+            opts.put("startingOffsets", "offset");
+            opts.put("startingOffset", "7");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            setPrivateField(stream, "environment", new StoredOffsetWithStatsEnvironment(
+                    Map.of("test-stream", 99L), Map.of("test-stream", 0L)));
+            Thread.currentThread().interrupt();
+            try {
+                RabbitMQStreamOffset offset = (RabbitMQStreamOffset) stream.initialOffset();
+                assertThat(offset.getStreamOffsets()).containsEntry("test-stream", 7L);
+                assertThat(Thread.currentThread().isInterrupted()).isTrue();
+            } finally {
+                Thread.interrupted(); // Clear interrupt status
+            }
         }
 
         @Test
@@ -448,6 +471,55 @@ class RabbitMQMicroBatchStreamTest {
 
             RabbitMQStreamOffset offset = (RabbitMQStreamOffset) stream.initialOffset();
             assertThat(offset.getStreamOffsets()).containsEntry("test-stream", 121L);
+        }
+
+        @Test
+        void initialOffsetLatestIsStableAcrossRepeatedCalls() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("startingOffsets", "latest");
+            opts.put("serverSideOffsetTracking", "false");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            SequencedProbeCountingEnvironment env = new SequencedProbeCountingEnvironment(
+                    true,
+                    java.util.List.of(
+                            java.util.List.of(49L),
+                            java.util.List.of(99L)));
+            setPrivateField(stream, "environment", env);
+
+            RabbitMQStreamOffset first = (RabbitMQStreamOffset) stream.initialOffset();
+            int queryStatsCallsAfterFirst = env.queryStatsCalls;
+            int probeBuilderCallsAfterFirst = env.probeBuilderCalls;
+            RabbitMQStreamOffset second = (RabbitMQStreamOffset) stream.initialOffset();
+
+            assertThat(first.getStreamOffsets()).containsEntry("test-stream", 50L);
+            assertThat(second).isEqualTo(first);
+            assertThat(env.queryStatsCalls).isEqualTo(queryStatsCallsAfterFirst);
+            assertThat(env.probeBuilderCalls).isEqualTo(probeBuilderCallsAfterFirst);
+        }
+
+        @Test
+        void initialOffsetTimestampIgnoresRecoveredStoredOffsetBeforeFirstAvailable()
+                throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("startingOffsets", "timestamp");
+            opts.put("startingTimestamp", "1700000000000");
+            opts.put("startingOffsetsByTimestampStrategy", "latest");
+            opts.put("consumerName", "timestamp-consumer");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            setPrivateField(stream, "environment", new StoredOffsetWithStatsEnvironment(
+                    Map.of("test-stream", 0L),
+                    Map.of("test-stream", 100L)));
+
+            RabbitMQStreamOffset offset = (RabbitMQStreamOffset) stream.initialOffset();
+            assertThat(offset.getStreamOffsets().get("test-stream"))
+                    .as("timestamp mode should ignore stale recovered offsets and fallback")
+                    .isGreaterThanOrEqualTo(100L);
         }
 
         @Test
@@ -590,6 +662,31 @@ class RabbitMQMicroBatchStreamTest {
             }
             assertThat(seen).containsEntry("s1", new long[]{10L, 100L});
             assertThat(seen).containsEntry("new-stream", new long[]{0L, 50L});
+        }
+
+        @Test
+        void planInputPartitionsLoadsCheckpointFallbackOnlyOnceForMultipleMissingStreams()
+                throws Exception {
+            Map<String, String> optsMap = new LinkedHashMap<>();
+            optsMap.put("endpoints", "localhost:5552");
+            optsMap.put("superstream", "super");
+            ConnectorOptions opts = new ConnectorOptions(optsMap);
+            var schema = RabbitMQStreamTable.buildSourceSchema(opts.getMetadataFields());
+            CheckpointFallbackCountingMicroBatchStream stream =
+                    new CheckpointFallbackCountingMicroBatchStream(
+                            opts,
+                            schema,
+                            "/tmp/checkpoint",
+                            java.util.List.of("s1", "s2"),
+                            Map.of("s1", 2L, "s2", 3L));
+            setPrivateField(stream, "environment", new FirstOffsetEnvironment(0L));
+
+            InputPartition[] partitions = stream.planInputPartitions(
+                    new RabbitMQStreamOffset(Map.of()),
+                    new RabbitMQStreamOffset(Map.of("s1", 10L, "s2", 11L)));
+
+            assertThat(partitions).hasSize(2);
+            assertThat(stream.checkpointLoadCalls()).isEqualTo(1);
         }
 
         @Test
@@ -850,39 +947,56 @@ class RabbitMQMicroBatchStreamTest {
         }
 
         @Test
-        void latestOffsetUsesConfiguredStartForStreamsMissingFromCheckpoint() throws Exception {
+        @Tag("spark4x")
+        void readMinRowsProcessesAfterDelayExpiryEvenWhenThresholdIsNotMet() throws Exception {
+            RabbitMQMicroBatchStream stream = createStream(minimalOptions());
+            RabbitMQStreamOffset start = new RabbitMQStreamOffset(Map.of("s1", 10L));
+            Map<String, Long> tail = Map.of("s1", 15L);
+
+            Map<String, Long> delayed = stream.handleReadMinRowsCore(100L, 50L, start.getStreamOffsets(), tail);
+            assertThat(delayed).isEqualTo(start.getStreamOffsets());
+
+            Thread.sleep(80L);
+
+            Map<String, Long> released = stream.handleReadMinRowsCore(100L, 50L, start.getStreamOffsets(), tail);
+            assertThat(released).isEqualTo(tail);
+        }
+
+        @Test
+        void latestOffsetSeedsNewSuperStreamPartitionsFromEarliestOffset() throws Exception {
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
             opts.put("superstream", "super");
-            opts.put("startingOffsets", "offset");
-            opts.put("startingOffset", "5");
+            opts.put("startingOffsets", "latest");
 
             RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            setPrivateField(stream, "environment", new FirstOffsetEnvironment(2L));
             setPrivateField(stream, "availableNowSnapshot", Map.of("s1", 10L, "s2", 4L));
 
             RabbitMQStreamOffset start = new RabbitMQStreamOffset(Map.of("s1", 10L));
-            Offset latest = stream.latestOffset(start, ReadLimit.allAvailable());
+            Offset latest = stream.latestOffset(start, ReadLimit.maxRows(1));
 
             assertThat(latest).isNotSameAs(start);
             assertThat(((RabbitMQStreamOffset) latest).getStreamOffsets())
                     .containsEntry("s1", 10L)
-                    .containsEntry("s2", 5L);
+                    .containsEntry("s2", 3L);
         }
 
         @Test
-        void latestOffsetWithMissingStartInSingleStreamModeUsesZeroAsEffectiveStart() throws Exception {
-            // For non-super-stream mode, a missing start offset is SKIPPED from effectiveStartMap.
-            // The read-limit budget is then applied with effective start = 0 (default),
-            // so the returned end offset is 0 + budget = 500, not configured_start + budget.
+        void latestOffsetWithMissingStartInSingleStreamModeReturnsExpandedStableOffsetWhenNoData()
+                throws Exception {
+            // If the missing start resolves to the current stable tail, latestOffset should
+            // still expand the source offset to include the known stream. This preserves the
+            // no-new-data behavior expected by direct micro-batch callers and integration tests.
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
             opts.put("stream", "test-stream");
             opts.put("startingOffsets", "offset");
-            opts.put("startingOffset", "100");
+            opts.put("startingOffset", "500");
             opts.put("maxRecordsPerTrigger", "500");
 
             RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
-            setPrivateField(stream, "availableNowSnapshot", Map.of("test-stream", 1000L));
+            setPrivateField(stream, "availableNowSnapshot", Map.of("test-stream", 500L));
 
             RabbitMQStreamOffset resumedStart = new RabbitMQStreamOffset(Map.of());
             RabbitMQStreamOffset latest = (RabbitMQStreamOffset) stream.latestOffset(
@@ -892,10 +1006,10 @@ class RabbitMQMicroBatchStreamTest {
         }
 
         @Test
-        void latestOffsetMissingStartInNonSuperStreamIsSkippedAndEffectiveStartIsZero() throws Exception {
-            // For non-super-stream mode, a missing start offset in the start map is SKIPPED
-            // (not backfilled from initialOffsets). The read-limit budget is applied with
-            // effective start = 0 (default), so end = 0 + budget = 20, not 100 + budget.
+        void latestOffsetMissingStartInNonSuperStreamIgnoresTailAndStaysAtStart() throws Exception {
+            // Even if initialOffsets are available, a non-super-stream query with a missing
+            // checkpoint/start entry must stay at the stable start offset instead of advancing
+            // from a synthetic default and risking checkpoint-only progress.
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
             opts.put("stream", "test-stream");
@@ -909,7 +1023,32 @@ class RabbitMQMicroBatchStreamTest {
             RabbitMQStreamOffset latest = (RabbitMQStreamOffset) stream.latestOffset(
                     start, ReadLimit.maxRows(20));
 
-            assertThat(latest.getStreamOffsets()).containsEntry("test-stream", 20L);
+            assertThat(latest).isEqualTo(start);
+        }
+
+        @Test
+        void latestOffsetLoadsCheckpointFallbackOnlyOnceForMultipleMissingStreams() throws Exception {
+            Map<String, String> optsMap = new LinkedHashMap<>();
+            optsMap.put("endpoints", "localhost:5552");
+            optsMap.put("superstream", "super");
+            ConnectorOptions opts = new ConnectorOptions(optsMap);
+            var schema = RabbitMQStreamTable.buildSourceSchema(opts.getMetadataFields());
+            CheckpointFallbackCountingMicroBatchStream stream =
+                    new CheckpointFallbackCountingMicroBatchStream(
+                            opts,
+                            schema,
+                            "/tmp/checkpoint",
+                            java.util.List.of("s1", "s2"),
+                            Map.of("s1", 2L, "s2", 3L));
+            setPrivateField(stream, "availableNowSnapshot", Map.of("s1", 10L, "s2", 11L));
+
+            RabbitMQStreamOffset latest = (RabbitMQStreamOffset) stream.latestOffset(
+                    new RabbitMQStreamOffset(Map.of()), ReadLimit.allAvailable());
+
+            assertThat(latest.getStreamOffsets())
+                    .containsEntry("s1", 10L)
+                    .containsEntry("s2", 11L);
+            assertThat(stream.checkpointLoadCalls()).isEqualTo(1);
         }
 
         @Test
@@ -971,6 +1110,43 @@ class RabbitMQMicroBatchStreamTest {
         }
 
         @Test
+        void resolveStartingOffsetTimestampWithoutMatchFailsByDefault() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("startingOffsets", "timestamp");
+            opts.put("startingTimestamp", "4102444800000");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            setPrivateField(stream, "environment",
+                    new TimestampStartEnvironment(10L, java.util.List.of()));
+
+            assertThatThrownBy(stream::initialOffset)
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasRootCauseMessage(
+                            "No offset matched the requested starting timestamp 4102444800000 "
+                                    + "for stream 'test-stream'. Set "
+                                    + "'startingOffsetsByTimestampStrategy=latest' to fall back to tail.");
+        }
+
+        @Test
+        void resolveStartingOffsetTimestampWithoutMatchUsesTailWhenStrategyLatest() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("startingOffsets", "timestamp");
+            opts.put("startingTimestamp", "4102444800000");
+            opts.put("startingOffsetsByTimestampStrategy", "latest");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            setPrivateField(stream, "environment",
+                    new TimestampStartEnvironment(10L, java.util.List.of()));
+
+            RabbitMQStreamOffset offset = (RabbitMQStreamOffset) stream.initialOffset();
+            assertThat(offset.getStreamOffsets()).containsEntry("test-stream", 11L);
+        }
+
+        @Test
         void latestOffsetUsesBothStatsAndProbeAndCachesProbeResult() throws Exception {
             // latestOffset calls both queryStreamStats and probeTailOffsetFromLastMessage,
             // takes max(statsTail, probedTail). The probe result is cached for ~1s so a
@@ -1009,6 +1185,71 @@ class RabbitMQMicroBatchStreamTest {
             // stats tail = 10+1 = 11, probe tail = 14+1 = 15, max = 15 > start(11) -> new data
             assertThat(latest.getStreamOffsets()).containsEntry("test-stream", 15L);
             assertThat(env.probeBuilderCalls).isEqualTo(1);
+        }
+
+        @Test
+        void latestOffsetRetriesSlowProbeWhenStatsTailIsStale() throws Exception {
+            RabbitMQMicroBatchStream stream = createStream(minimalOptions());
+            SequencedProbeCountingEnvironment env = new SequencedProbeCountingEnvironment(
+                    true,
+                    java.util.List.of(java.util.List.of(49L)),
+                    java.util.List.of(400L));
+            setPrivateField(stream, "environment", env);
+
+            RabbitMQStreamOffset start = new RabbitMQStreamOffset(Map.of("test-stream", 0L));
+            RabbitMQStreamOffset latest =
+                    (RabbitMQStreamOffset) stream.latestOffset(start, ReadLimit.allAvailable());
+
+            assertThat(latest.getStreamOffsets()).containsEntry("test-stream", 50L);
+            assertThat(env.queryStatsCalls).isEqualTo(2);
+            assertThat(env.probeBuilderCalls).isEqualTo(2);
+        }
+
+        @Test
+        void latestOffsetDoesNotCacheFailedProbeResults() throws Exception {
+            RabbitMQMicroBatchStream stream = createStream(minimalOptions());
+            SequencedProbeCountingEnvironment env = new SequencedProbeCountingEnvironment(
+                    true,
+                    java.util.List.of(
+                            java.util.List.of(),
+                            java.util.List.of(),
+                            java.util.List.of(),
+                            java.util.List.of(49L)));
+            setPrivateField(stream, "environment", env);
+
+            RabbitMQStreamOffset start = new RabbitMQStreamOffset(Map.of("test-stream", 0L));
+            RabbitMQStreamOffset first =
+                    (RabbitMQStreamOffset) stream.latestOffset(start, ReadLimit.allAvailable());
+            setPrivateField(stream, "latestOffsetInvocationCache", null);
+            RabbitMQStreamOffset second =
+                    (RabbitMQStreamOffset) stream.latestOffset(start, ReadLimit.allAvailable());
+
+            assertThat(first.getStreamOffsets()).containsEntry("test-stream", 0L);
+            assertThat(second.getStreamOffsets()).containsEntry("test-stream", 50L);
+            assertThat(env.queryStatsCalls).isEqualTo(3);
+            assertThat(env.probeBuilderCalls).isEqualTo(4);
+        }
+
+        @Test
+        void latestOffsetNeverRegressesBelowStartWhenStatsTailIsStaleAndProbeFails() throws Exception {
+            RabbitMQMicroBatchStream stream = createStream(minimalOptions());
+            SequencedProbeCountingEnvironment env = new SequencedProbeCountingEnvironment(
+                    true,
+                    java.util.List.of(
+                            java.util.List.of(),
+                            java.util.List.of(),
+                            java.util.List.of()));
+            setPrivateField(stream, "environment", env);
+
+            RabbitMQStreamOffset start = new RabbitMQStreamOffset(Map.of("test-stream", 50L));
+            RabbitMQStreamOffset latest =
+                    (RabbitMQStreamOffset) stream.latestOffset(start, ReadLimit.allAvailable());
+
+            assertThat(latest.getStreamOffsets()).containsEntry("test-stream", 50L);
+            assertThat(((RabbitMQStreamOffset) stream.reportLatestOffset()).getStreamOffsets())
+                    .containsEntry("test-stream", 50L);
+            assertThat(env.queryStatsCalls).isEqualTo(2);
+            assertThat(env.probeBuilderCalls).isEqualTo(3);
         }
 
         @Test
@@ -1054,6 +1295,87 @@ class RabbitMQMicroBatchStreamTest {
                         .containsEntry("s2", 10L)
                         .containsEntry("s3", 10L);
                 assertThat(env.maxConcurrentStatsQueries()).isGreaterThan(1);
+            } finally {
+                stream.stop();
+            }
+        }
+
+        @Test
+        void perTriggerStatsCacheDedupesWithinLatestOffsetAndPlanInputPartitions()
+                throws Exception {
+            // CLAUDE-8 fix: StreamStatsCache deduplicates queryStreamStats within a single
+            // call. Within latestOffset, the tail lookup and failOnDataLoss=false start
+            // revalidation share one RPC per stream. Within planInputPartitions the
+            // per-stream validation loop also shares one RPC per stream. The cache is
+            // cleared between latestOffset and planInputPartitions so retention churn that
+            // advances firstOffset between the two phases is still observed.
+            //
+            // For three streams in one trigger we therefore expect at most 2 × N = 6
+            // stats RPCs (N for latestOffset's tail probe, N for planInputPartitions's
+            // revalidation), instead of the 3N main would issue (latestOffset's tail probe
+            // + latestOffset's failOnDataLoss revalidation + planInputPartitions's
+            // revalidation, all separately).
+            Map<String, String> optsMap = new LinkedHashMap<>();
+            optsMap.put("endpoints", "localhost:5552");
+            optsMap.put("superstream", "super");
+            optsMap.put("failOnDataLoss", "false");
+            ConnectorOptions opts = new ConnectorOptions(optsMap);
+            var schema = RabbitMQStreamTable.buildSourceSchema(opts.getMetadataFields());
+            BaseRabbitMQMicroBatchStream stream = new ForcedStreamsMicroBatchStream(
+                    opts, schema, "/tmp/checkpoint", java.util.List.of("s1", "s2", "s3"));
+            ProbeCountingEnvironment env =
+                    new ProbeCountingEnvironment(10L, java.util.List.of(14L));
+            setPrivateField(stream, "environment", env);
+
+            try {
+                RabbitMQStreamOffset start = new RabbitMQStreamOffset(
+                        Map.of("s1", 0L, "s2", 0L, "s3", 0L));
+                RabbitMQStreamOffset end = (RabbitMQStreamOffset) stream.latestOffset(
+                        start, ReadLimit.allAvailable());
+                stream.planInputPartitions(start, end);
+
+                // Trigger 1 with fresh data: 3 RPCs from latestOffset (tail probe,
+                // reused for failOnDataLoss revalidation via cache) + 3 RPCs from
+                // planInputPartitions (cleared cache, fresh stats per stream).
+                assertThat(env.queryStatsCalls).isEqualTo(6);
+            } finally {
+                stream.stop();
+            }
+        }
+
+        @Test
+        void planInputPartitionsRefetchesStatsAfterCacheClearForRetentionFreshness()
+                throws Exception {
+            // Stream C compromise: validateStartOffset within planInputPartitions is
+            // intentionally NOT served from the latestOffset-time stats cache. Real
+            // retention churn can advance firstOffset between latestOffset and
+            // planInputPartitions; a stale snapshot would let validateStartOffset return
+            // an already-truncated start, producing partition ranges no longer reachable
+            // on the broker. This test pins that contract: planInputPartitions must
+            // re-query stats (one RPC per stream) regardless of what latestOffset cached.
+            Map<String, String> optsMap = new LinkedHashMap<>();
+            optsMap.put("endpoints", "localhost:5552");
+            optsMap.put("superstream", "super");
+            optsMap.put("failOnDataLoss", "false");
+            ConnectorOptions opts = new ConnectorOptions(optsMap);
+            var schema = RabbitMQStreamTable.buildSourceSchema(opts.getMetadataFields());
+            BaseRabbitMQMicroBatchStream stream = new ForcedStreamsMicroBatchStream(
+                    opts, schema, "/tmp/checkpoint", java.util.List.of("s1", "s2", "s3"));
+            ProbeCountingEnvironment env =
+                    new ProbeCountingEnvironment(10L, java.util.List.of(14L));
+            setPrivateField(stream, "environment", env);
+
+            try {
+                RabbitMQStreamOffset start = new RabbitMQStreamOffset(
+                        Map.of("s1", 0L, "s2", 0L, "s3", 0L));
+                RabbitMQStreamOffset end = (RabbitMQStreamOffset) stream.latestOffset(
+                        start, ReadLimit.allAvailable());
+                int afterLatestOffset = env.queryStatsCalls;
+                stream.planInputPartitions(start, end);
+                // planInputPartitions issues exactly N fresh RPCs (one per stream)
+                // — the cache cleared at function entry forces revalidation against
+                // the current firstOffset.
+                assertThat(env.queryStatsCalls - afterLatestOffset).isEqualTo(3);
             } finally {
                 stream.stop();
             }
@@ -1228,6 +1550,39 @@ class RabbitMQMicroBatchStreamTest {
 
             assertThat(env.probeBuilderCalls).isEqualTo(2);
             assertThat(env.queryStatsCalls).isEqualTo(3);
+        }
+
+        @Test
+        void initialOffsetLatestDoesNotAdvancePastAvailableNowSnapshot() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("startingOffsets", "latest");
+            opts.put("serverSideOffsetTracking", "false");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            SequencedProbeCountingEnvironment env = new SequencedProbeCountingEnvironment(
+                    true,
+                    java.util.List.of(
+                            java.util.List.of(49L),
+                            java.util.List.of(99L)));
+            setPrivateField(stream, "environment", env);
+
+            stream.prepareForTriggerAvailableNow();
+
+            RabbitMQStreamOffset snapshot = (RabbitMQStreamOffset) stream.latestOffset(
+                    new RabbitMQStreamOffset(Map.of("test-stream", 0L)),
+                    ReadLimit.allAvailable());
+            assertThat(snapshot.getStreamOffsets()).containsEntry("test-stream", 50L);
+
+            int queryStatsCallsAfterSnapshot = env.queryStatsCalls;
+            int probeBuilderCallsAfterSnapshot = env.probeBuilderCalls;
+
+            RabbitMQStreamOffset initial = (RabbitMQStreamOffset) stream.initialOffset();
+
+            assertThat(initial.getStreamOffsets()).containsEntry("test-stream", 50L);
+            assertThat(env.queryStatsCalls).isEqualTo(queryStatsCallsAfterSnapshot);
+            assertThat(env.probeBuilderCalls).isEqualTo(probeBuilderCallsAfterSnapshot);
         }
 
         @Test
@@ -1861,7 +2216,6 @@ class RabbitMQMicroBatchStreamTest {
                     "maxOffsetsBehindLatest",
                     "avgOffsetsBehindLatest");
         }
-
         @Test
         void metricsUseTailOffsetsWhenAvailable() throws Exception {
             RabbitMQMicroBatchStream stream = createStream(minimalOptions());
@@ -1923,6 +2277,20 @@ class RabbitMQMicroBatchStreamTest {
         }
 
         @Test
+        void latestOffsetAfterStopReturnsCachedOffsetWithoutBrokerAccess() throws Exception {
+            RabbitMQMicroBatchStream stream = createStream(minimalOptions());
+            setPrivateField(stream, "cachedLatestOffset",
+                    new RabbitMQStreamOffset(Map.of("test-stream", 9L)));
+
+            stream.stop();
+
+            RabbitMQStreamOffset latest = (RabbitMQStreamOffset) stream.latestOffset(
+                    new RabbitMQStreamOffset(Map.of("test-stream", 9L)),
+                    ReadLimit.allAvailable());
+            assertThat(latest.getStreamOffsets()).containsEntry("test-stream", 9L);
+        }
+
+        @Test
         void streamModeUsesSingleThreadBrokerExecutor() throws Exception {
             RabbitMQMicroBatchStream stream = createStream(minimalOptions());
             try {
@@ -1947,6 +2315,36 @@ class RabbitMQMicroBatchStreamTest {
             } finally {
                 stream.stop();
             }
+        }
+    }
+
+    @Nested
+    class StreamIdentity {
+
+        @Test
+        void equivalentStreamsCompareEqualForProgressLookups() {
+            RabbitMQMicroBatchStream first = createStream(minimalOptions(), "/tmp/cp-progress");
+            RabbitMQMicroBatchStream second = createStream(minimalOptions(), "/tmp/cp-progress");
+
+            Map<SparkDataStream, Long> progressBySource = new HashMap<>();
+            progressBySource.put(first, 42L);
+
+            assertThat(second).isEqualTo(first);
+            assertThat(second.hashCode()).isEqualTo(first.hashCode());
+            assertThat(progressBySource.get(second)).isEqualTo(42L);
+        }
+
+        @Test
+        void streamsWithDifferentRawOptionsDoNotCompareEqual() {
+            RabbitMQMicroBatchStream first = createStream(minimalOptions(), "/tmp/cp-progress");
+
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "another-stream");
+            ConnectorOptions differentOptions = new ConnectorOptions(opts);
+            RabbitMQMicroBatchStream second = createStream(differentOptions, "/tmp/cp-progress");
+
+            assertThat(second).isNotEqualTo(first);
         }
     }
 
@@ -2292,6 +2690,84 @@ class RabbitMQMicroBatchStreamTest {
         }
     }
 
+    private static final class SequencedProbeCountingEnvironment implements com.rabbitmq.stream.Environment {
+        private final boolean committedOffsetUnavailable;
+        private final java.util.List<java.util.List<Long>> probeOffsetsByAttempt;
+        private final java.util.List<Long> probeInitialDelayMsByAttempt;
+        private int queryStatsCalls = 0;
+        private int probeBuilderCalls = 0;
+
+        private SequencedProbeCountingEnvironment(
+                boolean committedOffsetUnavailable,
+                java.util.List<java.util.List<Long>> probeOffsetsByAttempt) {
+            this(committedOffsetUnavailable, probeOffsetsByAttempt, java.util.List.of());
+        }
+
+        private SequencedProbeCountingEnvironment(
+                boolean committedOffsetUnavailable,
+                java.util.List<java.util.List<Long>> probeOffsetsByAttempt,
+                java.util.List<Long> probeInitialDelayMsByAttempt) {
+            this.committedOffsetUnavailable = committedOffsetUnavailable;
+            this.probeOffsetsByAttempt = probeOffsetsByAttempt;
+            this.probeInitialDelayMsByAttempt = probeInitialDelayMsByAttempt;
+        }
+
+        @Override
+        public com.rabbitmq.stream.StreamCreator streamCreator() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void deleteStream(String stream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void deleteSuperStream(String superStream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public com.rabbitmq.stream.StreamStats queryStreamStats(String stream) {
+            queryStatsCalls++;
+            if (committedOffsetUnavailable) {
+                return new NoCommittedOffsetStreamStats();
+            }
+            return new FixedStreamStats(0L);
+        }
+
+        @Override
+        public void storeOffset(String reference, String stream, long offset) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public boolean streamExists(String stream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public com.rabbitmq.stream.ProducerBuilder producerBuilder() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public com.rabbitmq.stream.ConsumerBuilder consumerBuilder() {
+            int attempt = probeBuilderCalls++;
+            java.util.List<Long> offsets = attempt < probeOffsetsByAttempt.size()
+                    ? probeOffsetsByAttempt.get(attempt)
+                    : probeOffsetsByAttempt.get(probeOffsetsByAttempt.size() - 1);
+            long initialDelayMs = attempt < probeInitialDelayMsByAttempt.size()
+                    ? probeInitialDelayMsByAttempt.get(attempt)
+                    : 0L;
+            return new FixedOffsetProbeConsumerBuilder(offsets, initialDelayMs);
+        }
+
+        @Override
+        public void close() {
+        }
+    }
+
     private static final class ForcedStreamsMicroBatchStream extends BaseRabbitMQMicroBatchStream {
         private final java.util.List<String> forcedStreams;
 
@@ -2331,6 +2807,39 @@ class RabbitMQMicroBatchStreamTest {
             int current = Math.min(index, discoveries.size() - 1);
             index++;
             return discoveries.get(current);
+        }
+    }
+
+    private static final class CheckpointFallbackCountingMicroBatchStream
+            extends BaseRabbitMQMicroBatchStream {
+        private final java.util.List<String> forcedStreams;
+        private final Map<String, Long> checkpointOffsets;
+        private int checkpointLoadCalls;
+
+        private CheckpointFallbackCountingMicroBatchStream(
+                ConnectorOptions options,
+                org.apache.spark.sql.types.StructType schema,
+                String checkpointLocation,
+                java.util.List<String> forcedStreams,
+                Map<String, Long> checkpointOffsets) {
+            super(options, schema, checkpointLocation);
+            this.forcedStreams = forcedStreams;
+            this.checkpointOffsets = checkpointOffsets;
+        }
+
+        @Override
+        synchronized java.util.List<String> discoverStreams() {
+            return forcedStreams;
+        }
+
+        @Override
+        synchronized Map<String, Long> loadCommittedOffsetsFromCheckpoint() {
+            checkpointLoadCalls++;
+            return checkpointOffsets;
+        }
+
+        int checkpointLoadCalls() {
+            return checkpointLoadCalls;
         }
     }
 

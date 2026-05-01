@@ -7,12 +7,17 @@
     <parent>
         <groupId>io.github.lukaszsamson</groupId>
         <artifactId>spark-rabbitmq-streams-connector-parent</artifactId>
-        <version>0.1.0-SNAPSHOT</version>
+        <version>0.2.0-SNAPSHOT</version>
     </parent>
 
     <artifactId>spark-rabbitmq-streams-connector-shared-tests</artifactId>
     <name>Sparkling Rabbit - Shared Tests</name>
     <description>Shared unit tests for Spark 4.0/4.1 modules</description>
+
+    <properties>
+        <maven.install.skip>true</maven.install.skip>
+        <maven.deploy.skip>true</maven.deploy.skip>
+    </properties>
 
     <dependencies>
         <dependency>

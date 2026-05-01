@@ -1,6 +1,7 @@
 package io.github.lukaszsamson.spark.rabbitmq;
 
 import java.util.EnumSet;
+import java.util.Collections;
 import java.util.Locale;
 import java.util.Set;
 
@@ -19,7 +20,8 @@ public enum MetadataField {
     ROUTING_KEY("routing_key");
 
     /** All metadata fields (the default set). */
-    public static final Set<MetadataField> ALL = EnumSet.allOf(MetadataField.class);
+    public static final Set<MetadataField> ALL =
+            Collections.unmodifiableSet(EnumSet.allOf(MetadataField.class));
 
     private final String fieldName;
 

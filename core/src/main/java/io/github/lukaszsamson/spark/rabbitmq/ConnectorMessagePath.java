@@ -1,11 +1,15 @@
 package io.github.lukaszsamson.spark.rabbitmq;
 
 import java.util.Locale;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Path parsing and extraction for {@link ConnectorMessageView}.
  */
 public final class ConnectorMessagePath {
+
+    private static final Map<String, ParsedPath> PARSED_PATH_CACHE = new ConcurrentHashMap<>();
 
     private ConnectorMessagePath() {}
 
@@ -17,7 +21,11 @@ public final class ConnectorMessagePath {
     }
 
     public static String extract(ConnectorMessageView message, String path) {
-        ParsedPath parsed = parse(path, "path");
+        if (path == null) {
+            throw new IllegalArgumentException("'path' must not be null");
+        }
+        ParsedPath parsed = PARSED_PATH_CACHE.computeIfAbsent(path,
+                value -> parse(value, "path"));
         return switch (parsed.root) {
             case APPLICATION_PROPERTIES -> message.getApplicationProperties().get(parsed.field);
             case MESSAGE_ANNOTATIONS -> message.getMessageAnnotations().get(parsed.field);

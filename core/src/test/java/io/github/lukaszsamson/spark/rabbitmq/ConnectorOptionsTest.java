@@ -332,6 +332,22 @@ class ConnectorOptionsTest {
         }
 
         @Test
+        void startingOffsetsByTimestampStrategyDefaultsToError() {
+            var opts = new ConnectorOptions(minimalStreamOptions());
+            assertThat(opts.getStartingOffsetsByTimestampStrategy())
+                    .isEqualTo(StartingOffsetsByTimestampStrategy.ERROR);
+        }
+
+        @Test
+        void parsesStartingOffsetsByTimestampStrategyLatest() {
+            var map = minimalStreamOptions();
+            map.put("startingOffsetsByTimestampStrategy", "latest");
+            var opts = new ConnectorOptions(map);
+            assertThat(opts.getStartingOffsetsByTimestampStrategy())
+                    .isEqualTo(StartingOffsetsByTimestampStrategy.LATEST);
+        }
+
+        @Test
         void parsesStartingOffsetsByTimestampWithEscapedBackslashBeforeQuote() {
             var map = minimalStreamOptions();
             map.put("startingOffsetsByTimestamp", "{\"a\\\\\":1,\"x\":2}");
@@ -366,6 +382,16 @@ class ConnectorOptionsTest {
                     .isInstanceOf(IllegalArgumentException.class)
                     .hasMessageContaining("startingOffsets")
                     .hasMessageContaining("bogus");
+        }
+
+        @Test
+        void rejectsInvalidStartingOffsetsByTimestampStrategy() {
+            var map = minimalStreamOptions();
+            map.put("startingOffsetsByTimestampStrategy", "boom");
+            assertThatThrownBy(() -> new ConnectorOptions(map))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("startingOffsetsByTimestampStrategy")
+                    .hasMessageContaining("boom");
         }
 
         @Test
@@ -1244,6 +1270,16 @@ class ConnectorOptionsTest {
         }
 
         @Test
+        void allowsMinOffsetsPerTriggerHigherThanMaxRecordsPerTrigger() {
+            var map = minimalStreamOptions();
+            map.put("minOffsetsPerTrigger", "999999");
+            map.put("maxRecordsPerTrigger", "500");
+            map.put("maxTriggerDelay", "15s");
+            var opts = new ConnectorOptions(map);
+            assertThatCode(opts::validateForSource).doesNotThrowAnyException();
+        }
+
+        @Test
         void rejectsNonPositiveMinPartitions() {
             var map = minimalStreamOptions();
             map.put("minPartitions", "0");
@@ -1321,6 +1357,17 @@ class ConnectorOptionsTest {
             assertThatThrownBy(opts::validateForSource)
                     .isInstanceOf(IllegalArgumentException.class)
                     .hasMessageContaining("initialCredits");
+        }
+
+        @Test
+        void rejectsSingleInitialCreditWithHalfProcessedFlowStrategy() {
+            var map = minimalStreamOptions();
+            map.put("initialCredits", "1");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateForSource)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("initialCredits")
+                    .hasMessageContaining(">= 2");
         }
 
         @Test
@@ -1490,6 +1537,7 @@ class ConnectorOptionsTest {
         @Test
         void rejectsNegativeStartingOffsetsByTimestampEntry() {
             var map = minimalStreamOptions();
+            map.put("startingOffsets", "timestamp");
             map.put("startingOffsetsByTimestamp", "{\"orders\":-1}");
             var opts = new ConnectorOptions(map);
             assertThatThrownBy(opts::validateForSource)
@@ -1502,6 +1550,7 @@ class ConnectorOptionsTest {
         @Test
         void rejectsNegativeEndingOffsetsByTimestampEntry() {
             var map = minimalStreamOptions();
+            map.put("endingOffsets", "timestamp");
             map.put("endingOffsetsByTimestamp", "{\"orders\":-1}");
             var opts = new ConnectorOptions(map);
             assertThatThrownBy(opts::validateForSource)
@@ -1587,7 +1636,7 @@ class ConnectorOptionsTest {
 
         @Test
         void rejectsCustomRoutingWithoutPartitionerClass() {
-            var map = minimalStreamOptions();
+            var map = minimalSuperStreamOptions();
             map.put("routingStrategy", "custom");
             var opts = new ConnectorOptions(map);
             assertThatThrownBy(opts::validateForSink)
@@ -1599,7 +1648,7 @@ class ConnectorOptionsTest {
 
         @Test
         void acceptsCustomRoutingWithPartitionerClass() {
-            var map = minimalStreamOptions();
+            var map = minimalSuperStreamOptions();
             map.put("routingStrategy", "custom");
             map.put("partitionerClass", TestRoutingStrategy.class.getName());
             var opts = new ConnectorOptions(map);
@@ -1686,7 +1735,7 @@ class ConnectorOptionsTest {
 
         @Test
         void rejectsInvalidPartitionerClassNotFound() {
-            var map = minimalStreamOptions();
+            var map = minimalSuperStreamOptions();
             map.put("routingStrategy", "custom");
             map.put("partitionerClass", "com.nonexistent.Router");
             var opts = new ConnectorOptions(map);
@@ -1747,7 +1796,7 @@ class ConnectorOptionsTest {
 
         @Test
         void rejectsPartitionerClassWrongType() {
-            var map = minimalStreamOptions();
+            var map = minimalSuperStreamOptions();
             map.put("routingStrategy", "custom");
             map.put("partitionerClass", "java.lang.String");
             var opts = new ConnectorOptions(map);

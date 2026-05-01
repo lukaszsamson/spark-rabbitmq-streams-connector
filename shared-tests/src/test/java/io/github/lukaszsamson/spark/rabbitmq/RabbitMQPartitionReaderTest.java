@@ -149,6 +149,30 @@ class RabbitMQPartitionReaderTest {
         }
 
         @Test
+        void nextRetriesTransientConsumerInitializationFailures() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("pollTimeoutMs", "5");
+            opts.put("maxWaitMs", "50");
+
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 0, 1, new ConnectorOptions(opts));
+            RetryingInitReader reader = new RetryingInitReader(partition, partition.getOptions(), 2);
+
+            BlockingQueue<BaseRabbitMQPartitionReader.QueuedMessage> queue = new LinkedBlockingQueue<>();
+            queue.add(new BaseRabbitMQPartitionReader.QueuedMessage(
+                    CODEC.messageBuilder().addData("a".getBytes()).build(),
+                    0L, 0L, new NoopContext()));
+
+            setPrivateField(reader, "queue", queue);
+
+            assertThat(reader.next()).isTrue();
+            assertThat(reader.initAttempts).isEqualTo(3);
+            assertThat(reader.get().getLong(2)).isEqualTo(0L);
+        }
+
+        @Test
         void nextTimeoutMessageIncludesOffsets() throws Exception {
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
@@ -908,7 +932,7 @@ class RabbitMQPartitionReaderTest {
         }
 
         @Test
-        void resolveOffsetSpecUsesTimestampForInitialTimestampBatch() throws Exception {
+        void resolveOffsetSpecUsesPlannedOffsetForInitialTimestampBatch() throws Exception {
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
             opts.put("stream", "test-stream");
@@ -916,15 +940,15 @@ class RabbitMQPartitionReaderTest {
             opts.put("startingTimestamp", "1700000000000");
 
             RabbitMQInputPartition partition = new RabbitMQInputPartition(
-                    "test-stream", 0, 100, new ConnectorOptions(opts), true);
+                    "test-stream", 42, 100, new ConnectorOptions(opts), true);
             RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
 
             OffsetSpecification spec = resolveOffsetSpec(reader);
-            assertThat(spec).isEqualTo(OffsetSpecification.timestamp(1700000000000L));
+            assertThat(spec).isEqualTo(OffsetSpecification.offset(42));
         }
 
         @Test
-        void resolveOffsetSpecUsesPerStreamTimestampWhenGlobalTimestampMissing() throws Exception {
+        void resolveOffsetSpecUsesPlannedOffsetWhenPerStreamTimestampConfigured() throws Exception {
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
             opts.put("stream", "test-stream");
@@ -932,11 +956,11 @@ class RabbitMQPartitionReaderTest {
             opts.put("startingOffsetsByTimestamp", "{\"test-stream\":1700000001234}");
 
             RabbitMQInputPartition partition = new RabbitMQInputPartition(
-                    "test-stream", 0, 100, new ConnectorOptions(opts), true);
+                    "test-stream", 77, 100, new ConnectorOptions(opts), true);
             RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
 
             OffsetSpecification spec = resolveOffsetSpec(reader);
-            assertThat(spec).isEqualTo(OffsetSpecification.timestamp(1700000001234L));
+            assertThat(spec).isEqualTo(OffsetSpecification.offset(77));
         }
 
         @Test
@@ -1572,11 +1596,11 @@ class RabbitMQPartitionReaderTest {
     class FlowCredits {
 
         @Test
-        void computeEffectiveInitialCreditsScalesToFinitePlannedRange() {
+        void computeEffectiveInitialCreditsRespectsConfiguredValue() {
             int effective = BaseRabbitMQPartitionReader.computeEffectiveInitialCredits(
                     10, 10_000, 100L, 600L);
 
-            assertThat(effective).isEqualTo(500);
+            assertThat(effective).isEqualTo(10);
         }
 
         @Test
@@ -1590,7 +1614,7 @@ class RabbitMQPartitionReaderTest {
         @Test
         void computeEffectiveInitialCreditsCapsToQueueCapacity() {
             int effective = BaseRabbitMQPartitionReader.computeEffectiveInitialCredits(
-                    10, 250, 0L, 2_000L);
+                    1000, 250, 0L, 2_000L);
 
             assertThat(effective).isEqualTo(250);
         }
@@ -1706,6 +1730,31 @@ class RabbitMQPartitionReaderTest {
 
         @Override
         public long storedOffset() {
+            return 0L;
+        }
+    }
+
+    private static final class RetryingInitReader extends BaseRabbitMQPartitionReader {
+        private final int failuresBeforeSuccess;
+        private int initAttempts = 0;
+
+        private RetryingInitReader(RabbitMQInputPartition partition, ConnectorOptions options,
+                                   int failuresBeforeSuccess) {
+            super(partition, options);
+            this.failuresBeforeSuccess = failuresBeforeSuccess;
+        }
+
+        @Override
+        void initConsumer() {
+            initAttempts++;
+            if (initAttempts <= failuresBeforeSuccess) {
+                throw new IllegalStateException("Connection is closed");
+            }
+            consumer = new NoopConsumer();
+        }
+
+        @Override
+        long consumerInitRetryDelayMs() {
             return 0L;
         }
     }

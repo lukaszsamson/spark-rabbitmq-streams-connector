@@ -7,7 +7,7 @@
     <parent>
         <groupId>io.github.lukaszsamson</groupId>
         <artifactId>spark-rabbitmq-streams-connector-parent</artifactId>
-        <version>0.1.0-SNAPSHOT</version>
+        <version>0.2.0-SNAPSHOT</version>
     </parent>
 
     <artifactId>spark-rabbitmq-streams-connector-spark40</artifactId>
@@ -78,7 +78,13 @@
                 <executions>
                     <execution>
                         <id>unshaded-jar</id>
-                        <phase>package</phase>
+                        <!--
+                            Bind to process-classes (instead of package) so that
+                            `mvn test -pl <module> -am` builds this classifier
+                            artifact in time for downstream test modules to
+                            resolve it via the reactor (Maven MDEP-98).
+                        -->
+                        <phase>process-classes</phase>
                         <goals>
                             <goal>jar</goal>
                         </goals>
@@ -129,14 +135,6 @@
                                 <relocation>
                                     <pattern>com.swiftmq</pattern>
                                     <shadedPattern>${shading.prefix}.com.swiftmq</shadedPattern>
-                                </relocation>
-                                <relocation>
-                                    <pattern>org.xerial.snappy</pattern>
-                                    <shadedPattern>${shading.prefix}.org.xerial.snappy</shadedPattern>
-                                </relocation>
-                                <relocation>
-                                    <pattern>com.github.luben.zstd</pattern>
-                                    <shadedPattern>${shading.prefix}.com.github.luben.zstd</shadedPattern>
                                 </relocation>
                                 <relocation>
                                     <pattern>net.jpountz</pattern>

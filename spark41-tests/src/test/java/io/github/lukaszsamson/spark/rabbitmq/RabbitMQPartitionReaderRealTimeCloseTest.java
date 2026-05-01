@@ -1,15 +1,19 @@
 package io.github.lukaszsamson.spark.rabbitmq;
 
 import com.rabbitmq.stream.Consumer;
+import com.rabbitmq.stream.Message;
+import com.rabbitmq.stream.MessageHandler;
 import org.apache.spark.sql.connector.read.streaming.SupportsRealTimeRead.RecordStatus;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Field;
+import java.util.concurrent.BlockingQueue;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
 
 class RabbitMQPartitionReaderRealTimeCloseTest {
 
@@ -37,9 +41,42 @@ class RabbitMQPartitionReaderRealTimeCloseTest {
         assertThat(status.hasRecord()).isFalse();
     }
 
+    @Test
+    void nextWithTimeoutAdvancesObservedOffsetForPreStartSkippedRecords() throws Exception {
+        RabbitMQPartitionReader reader = newReader(10L, 100L);
+        setPrivateField(reader, "consumer", new NoopConsumer());
+
+        BlockingQueue<BaseRabbitMQPartitionReader.QueuedMessage> queue = queue(reader);
+        queue.add(queuedMessage(2L));
+        queue.add(queuedMessage(9L));
+
+        RecordStatus status = reader.nextWithTimeout(20L);
+        assertThat(status.hasRecord()).isFalse();
+        assertThat((long) getPrivateField(reader, "lastObservedOffset")).isEqualTo(9L);
+    }
+
+    @Test
+    void nextWithTimeoutAdvancesObservedOffsetForDeduplicatedRecords() throws Exception {
+        RabbitMQPartitionReader reader = newReader(0L, 100L);
+        setPrivateField(reader, "consumer", new NoopConsumer());
+        setPrivateField(reader, "lastEmittedOffset", 15L);
+        setPrivateField(reader, "lastObservedOffset", 14L);
+
+        BlockingQueue<BaseRabbitMQPartitionReader.QueuedMessage> queue = queue(reader);
+        queue.add(queuedMessage(15L));
+
+        RecordStatus status = reader.nextWithTimeout(20L);
+        assertThat(status.hasRecord()).isFalse();
+        assertThat((long) getPrivateField(reader, "lastObservedOffset")).isEqualTo(15L);
+    }
+
     private static RabbitMQPartitionReader newReader() {
+        return newReader(0L, 100L);
+    }
+
+    private static RabbitMQPartitionReader newReader(long startOffset, long endOffset) {
         RabbitMQInputPartition partition = new RabbitMQInputPartition(
-                "test-stream", 0, 100, minimalOptions());
+                "test-stream", startOffset, endOffset, minimalOptions());
         return new RabbitMQPartitionReader(partition, partition.getOptions());
     }
 
@@ -75,6 +112,19 @@ class RabbitMQPartitionReaderRealTimeCloseTest {
             }
         }
         throw new NoSuchFieldException(fieldName);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static BlockingQueue<BaseRabbitMQPartitionReader.QueuedMessage> queue(
+            RabbitMQPartitionReader reader) throws Exception {
+        return (BlockingQueue<BaseRabbitMQPartitionReader.QueuedMessage>)
+                getPrivateField(reader, "queue");
+    }
+
+    private static BaseRabbitMQPartitionReader.QueuedMessage queuedMessage(long offset) {
+        Message message = mock(Message.class);
+        MessageHandler.Context context = mock(MessageHandler.Context.class);
+        return new BaseRabbitMQPartitionReader.QueuedMessage(message, offset, 0L, context);
     }
 
     private static final class NoopConsumer implements Consumer {

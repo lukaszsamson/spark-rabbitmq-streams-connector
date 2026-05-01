@@ -7,7 +7,7 @@
     <parent>
         <groupId>io.github.lukaszsamson</groupId>
         <artifactId>spark-rabbitmq-streams-connector-parent</artifactId>
-        <version>0.1.0-SNAPSHOT</version>
+        <version>0.2.0-SNAPSHOT</version>
     </parent>
 
     <artifactId>spark-rabbitmq-streams-connector-spark35_2.12-tests</artifactId>
@@ -16,6 +16,8 @@
 
     <properties>
         <scala.binary.version>2.12</scala.binary.version>
+        <maven.install.skip>true</maven.install.skip>
+        <maven.deploy.skip>true</maven.deploy.skip>
     </properties>
 
     <dependencies>

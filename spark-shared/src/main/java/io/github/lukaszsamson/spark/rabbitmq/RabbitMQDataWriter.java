@@ -55,6 +55,8 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
     private final AtomicLong lastConfirmationFailureCode = new AtomicLong(-1L);
     private final Object confirmMonitor = new Object();
     private final AtomicBoolean closeCalled = new AtomicBoolean(false);
+    private final AtomicReference<SendConfirmTracker> activeSendConfirmTracker =
+            new AtomicReference<>();
 
     // Deduplication: monotonic publishing ID
     private long nextPublishingId = -1;
@@ -124,9 +126,15 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
                 }
                 builder.publishingId(explicitPublishingId);
                 if (nextPublishingId >= 0) {
+                    if (explicitPublishingId == Long.MAX_VALUE) {
+                        throw new IOException("Publishing ID space exhausted (reached Long.MAX_VALUE)");
+                    }
                     nextPublishingId = explicitPublishingId + 1;
                 }
             } else if (nextPublishingId >= 0) {
+                if (nextPublishingId == Long.MAX_VALUE) {
+                    throw new IOException("Publishing ID space exhausted (reached Long.MAX_VALUE)");
+                }
                 builder.publishingId(nextPublishingId++);
             }
             Message message = converter.convert(record, builder);
@@ -140,38 +148,51 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
                 }
             }
 
-            // Track outstanding confirms
+            // Track at least one outstanding confirm; superstream routing can fan a
+            // logical row out to multiple partition streams.
+            SendConfirmTracker sendConfirmTracker = new SendConfirmTracker();
             outstandingConfirms.incrementAndGet();
             long sendStartNanos = System.nanoTime();
 
             // Send with confirmation handler
             try {
+                activeSendConfirmTracker.set(sendConfirmTracker);
                 producer.send(message, confirmationStatus -> {
                     long elapsedMs = TimeUnit.NANOSECONDS.toMillis(
                             System.nanoTime() - sendStartNanos);
                     writeLatencyMs.addAndGet(Math.max(0L, elapsedMs));
-                    if (!confirmationStatus.isConfirmed()) {
+                    if (sendConfirmTracker.reconcileConfirmation()) {
+                        if (!confirmationStatus.isConfirmed()) {
+                            confirmationFailureCount.incrementAndGet();
+                            lastConfirmationFailureCode.set(confirmationStatus.getCode());
+                            publishErrors.incrementAndGet();
+                            sendError.compareAndSet(null,
+                                    new IOException("Message confirmation failed with code " +
+                                            confirmationStatus.getCode() +
+                                            " on partition " + partitionId));
+                        } else {
+                            publishConfirms.incrementAndGet();
+                        }
+                    } else if (!confirmationStatus.isConfirmed()) {
                         confirmationFailureCount.incrementAndGet();
                         lastConfirmationFailureCode.set(confirmationStatus.getCode());
-                        publishErrors.incrementAndGet();
                         sendError.compareAndSet(null,
                                 new IOException("Message confirmation failed with code " +
                                         confirmationStatus.getCode() +
                                         " on partition " + partitionId));
-                    } else {
-                        publishConfirms.incrementAndGet();
                     }
                     synchronized (confirmMonitor) {
-                        long remaining = outstandingConfirms.decrementAndGet();
+                        long remaining = outstandingConfirms.get();
                         if (remaining == 0 || sendError.get() != null) {
                             confirmMonitor.notifyAll();
                         }
                     }
                 });
             } catch (Exception e) {
-                outstandingConfirms.decrementAndGet();
-                publishErrors.incrementAndGet();
+                sendConfirmTracker.reconcilePendingAsErrors();
                 throw new IOException("Failed to send message on partition " + partitionId, e);
+            } finally {
+                activeSendConfirmTracker.compareAndSet(sendConfirmTracker, null);
             }
 
             // Track metrics
@@ -270,6 +291,8 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
             }
         } catch (Exception e) {
             LOG.warn("Error closing producer for partition {}", partitionId, e);
+        } finally {
+            reconcileRequestedCloseOutstandingConfirms();
         }
         if (pooledEnvironment) {
             EnvironmentPool.getInstance().release(options);
@@ -372,12 +395,34 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
                     LOG.warn("Producer for partition {} is recovering ({}->{})",
                             partitionId, from, to);
                 } else if (to == Resource.State.CLOSED) {
-                    LOG.warn("Producer for partition {} has closed ({}->{})",
-                            partitionId, from, to);
-                    sendError.compareAndSet(null,
-                            new IOException("Producer closed unexpectedly on partition " + partitionId));
-                    synchronized (confirmMonitor) {
-                        confirmMonitor.notifyAll();
+                    long unreconciled = reconcileOutstandingConfirmsAsErrors();
+                    if (closeCalled.get()) {
+                        if (unreconciled > 0) {
+                            LOG.debug("Producer for partition {} closed after requested close " +
+                                            "with {} unreconciled confirms ({}->{})",
+                                    partitionId, unreconciled, from, to);
+                            sendError.compareAndSet(null,
+                                    new IOException("Producer closed with " + unreconciled +
+                                            " unconfirmed messages on partition " + partitionId));
+                            synchronized (confirmMonitor) {
+                                confirmMonitor.notifyAll();
+                            }
+                        } else {
+                            LOG.debug("Producer for partition {} closed after requested close ({}->{})",
+                                    partitionId, from, to);
+                        }
+                    } else {
+                        LOG.warn("Producer for partition {} has closed ({}->{})",
+                                partitionId, from, to);
+                        if (unreconciled > 0) {
+                            LOG.warn("Producer for partition {} closed with {} unreconciled confirms",
+                                    partitionId, unreconciled);
+                        }
+                        sendError.compareAndSet(null,
+                                new IOException("Producer closed unexpectedly on partition " + partitionId));
+                        synchronized (confirmMonitor) {
+                            confirmMonitor.notifyAll();
+                        }
                     }
                 } else {
                     LOG.debug("Producer for partition {} state change: {}->{}",
@@ -395,7 +440,12 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
 
             // Initialize dedup publishing ID
             if (derivedName != null) {
-                nextPublishingId = epochId >= 0 ? 0L : producer.getLastPublishingId() + 1;
+                long lastId = producer.getLastPublishingId();
+                if (lastId == Long.MAX_VALUE && epochId < 0) {
+                    throw new IllegalStateException(
+                            "Producer '" + derivedName + "' has exhausted publishing ID space");
+                }
+                nextPublishingId = epochId >= 0 ? 0L : lastId + 1;
                 LOG.info("Dedup enabled for partition {} with producer '{}', starting publishingId={}",
                         partitionId, derivedName, nextPublishingId);
             }
@@ -486,7 +536,20 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
                     routing.hash().producerBuilder();
                 }
             }
-            case KEY -> routing.key().producerBuilder();
+            case KEY -> {
+                java.util.concurrent.ConcurrentMap<String, java.util.List<String>> routesByKey =
+                        new java.util.concurrent.ConcurrentHashMap<>();
+                routing.strategy((message, metadata) -> {
+                    String routingKey = extractRoutingKey(message);
+                    if (routingKey == null || routingKey.isEmpty()) {
+                        throw new IllegalStateException(missingRoutingKeyErrorMessage());
+                    }
+                    java.util.List<String> routes = routesByKey.computeIfAbsent(
+                            routingKey, metadata::route);
+                    addExpectedConfirms(routes.size());
+                    return routes;
+                }).producerBuilder();
+            }
             case CUSTOM -> {
                 ConnectorRoutingStrategy customStrategy = ExtensionLoader.load(
                         options.getPartitionerClass(),
@@ -494,14 +557,104 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
                         ConnectorOptions.PARTITIONER_CLASS);
                 routing.strategy((message, metadata) -> {
                     ConnectorMessageView messageView = toMessageView(message);
-                    return customStrategy.route(
+                    java.util.List<String> routes = customStrategy.route(
                             messageView,
                             new ConnectorRoutingMetadataView(metadata));
+                    addExpectedConfirms(routes.size());
+                    return routes;
                 }).producerBuilder();
             }
         }
 
         return builder;
+    }
+
+    private void addExpectedConfirms(int expectedConfirmCount) {
+        SendConfirmTracker sendConfirmTracker = activeSendConfirmTracker.get();
+        if (sendConfirmTracker != null && expectedConfirmCount > 1) {
+            long additionalConfirms = expectedConfirmCount - 1L;
+            sendConfirmTracker.addExpectedConfirms(additionalConfirms);
+            outstandingConfirms.addAndGet(additionalConfirms);
+        }
+    }
+
+    private void reconcileRequestedCloseOutstandingConfirms() {
+        long unreconciled = reconcileOutstandingConfirmsAsErrors();
+        if (unreconciled > 0) {
+            LOG.debug("Producer for partition {} requested close reconciled {} outstanding confirms as errors",
+                    partitionId, unreconciled);
+            sendError.compareAndSet(null,
+                    new IOException("Producer closed with " + unreconciled +
+                            " unconfirmed messages on partition " + partitionId));
+            synchronized (confirmMonitor) {
+                confirmMonitor.notifyAll();
+            }
+        }
+    }
+
+    private boolean reconcileOutstandingConfirm() {
+        while (true) {
+            long current = outstandingConfirms.get();
+            if (current <= 0) {
+                return false;
+            }
+            if (outstandingConfirms.compareAndSet(current, current - 1)) {
+                return true;
+            }
+        }
+    }
+
+    private long reconcileOutstandingConfirmsAsErrors() {
+        return reconcileOutstandingConfirmsAsErrors(Long.MAX_VALUE);
+    }
+
+    private long reconcileOutstandingConfirmsAsErrors(long maxCount) {
+        if (maxCount <= 0) {
+            return 0;
+        }
+        while (true) {
+            long current = outstandingConfirms.get();
+            if (current <= 0) {
+                return 0;
+            }
+            long unreconciled = Math.min(current, maxCount);
+            if (outstandingConfirms.compareAndSet(current, current - unreconciled)) {
+                publishErrors.addAndGet(unreconciled);
+                return unreconciled;
+            }
+        }
+    }
+
+    private final class SendConfirmTracker {
+        private final AtomicLong pendingConfirms = new AtomicLong(1);
+
+        void addExpectedConfirms(long additionalConfirms) {
+            pendingConfirms.addAndGet(additionalConfirms);
+        }
+
+        boolean reconcileConfirmation() {
+            if (!claimPendingConfirm()) {
+                return false;
+            }
+            return reconcileOutstandingConfirm();
+        }
+
+        long reconcilePendingAsErrors() {
+            long pending = pendingConfirms.getAndSet(0);
+            return reconcileOutstandingConfirmsAsErrors(pending);
+        }
+
+        private boolean claimPendingConfirm() {
+            while (true) {
+                long current = pendingConfirms.get();
+                if (current <= 0) {
+                    return false;
+                }
+                if (pendingConfirms.compareAndSet(current, current - 1)) {
+                    return true;
+                }
+            }
+        }
     }
 
     /**

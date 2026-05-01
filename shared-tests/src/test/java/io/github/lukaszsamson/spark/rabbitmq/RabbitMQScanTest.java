@@ -64,6 +64,20 @@ class RabbitMQScanTest {
         }
 
         @Test
+        void toBatchSuperStreamOperationalFailureFailsEvenWhenFailOnDataLossFalse() {
+            Map<String, String> opts = baseOptions();
+            opts.remove("stream");
+            opts.put("superstream", "super");
+            opts.put("failOnDataLoss", "false");
+            RabbitMQScan scan = new RabbitMQScan(new ConnectorOptions(opts), schema());
+
+            assertThatThrownBy(() ->
+                    resolveStreamOffsetRange(scan, new QueryFailureEnvironment(), "partition"))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("Failed to query stream stats");
+        }
+
+        @Test
         void discoverSuperStreamEmptyPartitionsRespectsFailOnDataLoss() {
             Map<String, String> opts = baseOptions();
             opts.remove("stream");
@@ -131,6 +145,18 @@ class RabbitMQScanTest {
         }
 
         @Test
+        void resolveEndOffsetLatestIsEagerWhenBatchSplittingRequested() throws Exception {
+            Map<String, String> opts = baseOptions();
+            opts.put("minPartitions", "4");
+            RabbitMQScan scan = new RabbitMQScan(new ConnectorOptions(opts), schema());
+            StreamStats stats = new Stats(0L, false, false, 5L);
+
+            long end = resolveEndOffset(scan, new ProbeTailEnvironment(), "s1", stats);
+
+            assertThat(end).isEqualTo(13L);
+        }
+
+        @Test
         void timestampStartPlanningUsesTimestampProbeOffset() throws Exception {
             Map<String, String> opts = baseOptions();
             opts.put("startingOffsets", "timestamp");
@@ -169,9 +195,7 @@ class RabbitMQScanTest {
         }
 
         @Test
-        void timestampStartPlanningWithoutMatchingRecordThrows() {
-            // When startingOffsets=timestamp but no records match the timestamp,
-            // the planner throws instead of silently returning an empty range.
+        void timestampStartPlanningWithoutMatchingRecordFailsByDefault() {
             Map<String, String> opts = baseOptions();
             opts.put("startingOffsets", "timestamp");
             opts.put("startingTimestamp", "4102444800000"); // 2100-01-01T00:00:00Z
@@ -181,7 +205,21 @@ class RabbitMQScanTest {
                     new DelayedProbeEnvironment(0L, new Stats(10L, false, false, 99L)),
                     "s1"))
                     .isInstanceOf(IllegalStateException.class)
-                    .hasMessageContaining("Failed to resolve timestamp start offset");
+                    .hasMessageContaining("No offset matched");
+        }
+
+        @Test
+        void timestampStartPlanningWithoutMatchingRecordUsesTailWhenStrategyLatest() {
+            Map<String, String> opts = baseOptions();
+            opts.put("startingOffsets", "timestamp");
+            opts.put("startingTimestamp", "4102444800000"); // 2100-01-01T00:00:00Z
+            opts.put("startingOffsetsByTimestampStrategy", "latest");
+            RabbitMQScan scan = new RabbitMQScan(new ConnectorOptions(opts), schema());
+
+            long[] range = resolveStreamOffsetRange(scan,
+                    new DelayedProbeEnvironment(0L, new Stats(10L, false, false, 99L)),
+                    "s1");
+            assertThat(range).isNull();
         }
 
         @Test
@@ -204,6 +242,7 @@ class RabbitMQScanTest {
         @Test
         void timestampEndPlanningUsesPerStreamTimestampOverride() throws Exception {
             Map<String, String> opts = baseOptions();
+            opts.put("endingOffsets", "timestamp");
             opts.put("endingOffsetsByTimestamp", "{\"s1\":1700000000000}");
             opts.put("pollTimeoutMs", "1000");
             RabbitMQScan scan = new RabbitMQScan(new ConnectorOptions(opts), schema());
@@ -373,6 +412,52 @@ class RabbitMQScanTest {
         @Override
         public StreamStats queryStreamStats(String stream) {
             throw new StreamDoesNotExistException(streamMode ? stream : "partition");
+        }
+
+        @Override
+        public StreamCreator streamCreator() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void deleteStream(String stream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void deleteSuperStream(String superStream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void storeOffset(String reference, String stream, long offset) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public boolean streamExists(String stream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public ProducerBuilder producerBuilder() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public ConsumerBuilder consumerBuilder() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void close() {
+        }
+    }
+
+    private static final class QueryFailureEnvironment implements Environment {
+        @Override
+        public StreamStats queryStreamStats(String stream) {
+            throw new RuntimeException("connection failed");
         }
 
         @Override

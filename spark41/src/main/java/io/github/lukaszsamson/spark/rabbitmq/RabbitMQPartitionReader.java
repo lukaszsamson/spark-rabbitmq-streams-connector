@@ -42,7 +42,7 @@ final class RabbitMQPartitionReader extends BaseRabbitMQPartitionReader
         // Lazy initialization: create consumer on first call
         if (consumer == null) {
             try {
-                initConsumer();
+                initConsumerWithRetry();
             } catch (Exception e) {
                 if (!options.isFailOnDataLoss() && isMissingStreamException(e)) {
                     LOG.warn("Unable to initialize consumer for stream '{}' because stream/partition " +
@@ -111,6 +111,10 @@ final class RabbitMQPartitionReader extends BaseRabbitMQPartitionReader
             // Credit flow: notify that this message has been consumed
             qm.context().processed();
 
+            if (qm.offset() > lastObservedOffset) {
+                lastObservedOffset = qm.offset();
+            }
+
             // Skip messages before start offset
             if (qm.offset() < startOffset) {
                 continue;
@@ -119,10 +123,6 @@ final class RabbitMQPartitionReader extends BaseRabbitMQPartitionReader
             // De-dup on reconnection: skip already-emitted offsets
             if (qm.offset() <= lastEmittedOffset) {
                 continue;
-            }
-
-            if (qm.offset() > lastObservedOffset) {
-                lastObservedOffset = qm.offset();
             }
 
             if (shouldSkipByTimestamp(qm.chunkTimestampMillis())) {

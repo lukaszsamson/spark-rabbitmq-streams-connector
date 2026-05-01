@@ -38,6 +38,7 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
      *  cold-start consumer setup (new environment, address resolution, etc.). */
     static final long EXECUTOR_TAIL_PROBE_WAIT_MS = 5_000L;
     private static final long CLOSED_CHECK_INTERVAL_MS = 100L;
+    private static final long CONSUMER_INIT_RETRY_WINDOW_MS = 10_000L;
     private static final long MIN_TAIL_PROBE_CACHE_WINDOW_MS = 25L;
     private static final long MAX_TAIL_PROBE_CACHE_WINDOW_MS = 250L;
     private static final long MIN_STATS_TAIL_CACHE_WINDOW_MS = 25L;
@@ -62,10 +63,10 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
 
     boolean pooledEnvironment = false;
     volatile Environment environment;
-    Consumer consumer;
-    InternalRow currentRow;
-    long lastEmittedOffset = -1;
-    long lastObservedOffset = -1;
+    volatile Consumer consumer;
+    volatile InternalRow currentRow;
+    volatile long lastEmittedOffset = -1;
+    volatile long lastObservedOffset = -1;
     boolean filteredTailReached = false;
     volatile boolean finished = false;
     long lastTailProbeNanos = -1L;
@@ -74,9 +75,9 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
     long lastStatsTailOffset = -1L;
 
     // Task-level metric counters
-    long recordsRead = 0;
-    long payloadBytesRead = 0;
-    long estimatedWireBytesRead = 0;
+    volatile long recordsRead = 0;
+    volatile long payloadBytesRead = 0;
+    volatile long estimatedWireBytesRead = 0;
     long pollWaitMs = 0;
     long offsetOutOfRange = 0;
     long dataLoss = 0;
@@ -121,7 +122,7 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
         // Lazy initialization: create consumer on first call
         if (consumer == null) {
             try {
-                initConsumer();
+                initConsumerWithRetry();
             } catch (Exception e) {
                 if (!options.isFailOnDataLoss() && isMissingStreamException(e)) {
                     LOG.warn("Unable to initialize consumer for stream '{}' because stream/partition " +
@@ -260,9 +261,6 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
                 continue;
             }
 
-            // Reset wait timer on message receipt
-            totalWaitMs = 0;
-            waitStartNanos = System.nanoTime();
 
             if (consumerClosed.get()
                     && shouldDetectOffsetGapsAfterConsumerClosure()
@@ -294,6 +292,10 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
             // providing natural backpressure when the pull side is slow.
             qm.context().processed();
 
+            if (qm.offset() > lastObservedOffset) {
+                lastObservedOffset = qm.offset();
+            }
+
             // Skip messages before start offset (can happen with timestamp-based starting)
             if (qm.offset() < startOffset) {
                 continue;
@@ -302,10 +304,6 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
             // De-dup on reconnection: skip already-emitted offsets
             if (qm.offset() <= lastEmittedOffset) {
                 continue;
-            }
-
-            if (qm.offset() > lastObservedOffset) {
-                lastObservedOffset = qm.offset();
             }
 
             if (shouldSkipByTimestamp(qm.chunkTimestampMillis())) {
@@ -333,6 +331,7 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
             return;
         }
         finished = true;
+        queue.clear(); // Immediately unblock Netty callback
         // Report actual message sizes for running average estimation.
         // Prefer Spark accumulators (driver-visible across executors); fall back to JVM-local tracker.
         if (messageSizeBytesAccumulator != null && messageSizeRecordsAccumulator != null) {
@@ -415,6 +414,10 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
 
         OffsetSpecification offsetSpec = resolveOffsetSpec();
         int effectiveInitialCredits = resolveEffectiveInitialCredits();
+        LOG.debug("Initializing consumer for stream '{}' with planned range [{}, {}), "
+                        + "offsetSpec={}, useConfiguredStartingOffset={}, initialCredits={}",
+                stream, startOffset, endOffset, offsetSpec, useConfiguredStartingOffset,
+                effectiveInitialCredits);
 
         ConsumerBuilder builder = environment.consumerBuilder()
                 .stream(stream)
@@ -488,10 +491,132 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
                     .builder();
         }
 
-        consumer = builder.build();
+        try {
+            consumer = builder.build();
+        } catch (NullPointerException e) {
+            // Workaround for rabbitmq-stream-java-client bug where Client.subscribe returns null
+            // when the connection is closed or stream is deleted concurrently, causing an NPE in
+            // ConsumersCoordinator$ClientSubscriptionsManager.add.
+            boolean isSubscribeResponseBug = e.getMessage() != null && e.getMessage().contains("subscribeResponse");
+            if (!isSubscribeResponseBug) {
+                for (StackTraceElement element : e.getStackTrace()) {
+                    if (element.getClassName().contains("ConsumersCoordinator$ClientSubscriptionsManager")
+                            && element.getMethodName().equals("add")) {
+                        isSubscribeResponseBug = true;
+                        break;
+                    }
+                }
+            }
+            if (isSubscribeResponseBug) {
+                throw new StreamDoesNotExistException(stream);
+            }
+            throw e;
+        }
 
         LOG.info("Opened consumer for stream '{}' with offsets [{}, {})",
                 stream, startOffset, endOffset);
+    }
+
+    void initConsumerWithRetry() throws Exception {
+        long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(
+                Math.min(options.getMaxWaitMs(), CONSUMER_INIT_RETRY_WINDOW_MS));
+        int attempt = 0;
+        while (true) {
+            resetConsumerInitState();
+            try {
+                initConsumer();
+                return;
+            } catch (Exception e) {
+                attempt++;
+                if (!isTransientConsumerInitFailure(e)
+                        || System.nanoTime() >= deadlineNanos
+                        || closeCalled.get()) {
+                    throw e;
+                }
+                LOG.warn("Transient failure initializing consumer for stream '{}' on attempt {}; "
+                                + "retrying after {}ms: {}",
+                        stream, attempt, consumerInitRetryDelayMs(), e.getMessage());
+                cleanupAfterFailedConsumerInit();
+                sleepBeforeConsumerInitRetry();
+            }
+        }
+    }
+
+    long consumerInitRetryDelayMs() {
+        return Math.min(Math.max(options.getPollTimeoutMs(), 100L), 1_000L);
+    }
+
+    void sleepBeforeConsumerInitRetry() throws InterruptedException {
+        Thread.sleep(consumerInitRetryDelayMs());
+    }
+
+    void resetConsumerInitState() {
+        consumerClosed.set(false);
+        consumerError.set(null);
+    }
+
+    void cleanupAfterFailedConsumerInit() {
+        try {
+            if (consumer != null) {
+                consumer.close();
+            }
+        } catch (Exception closeError) {
+            LOG.debug("Error closing partially initialized consumer for stream '{}'", stream, closeError);
+        } finally {
+            consumer = null;
+        }
+
+        if (pooledEnvironment) {
+            try {
+                EnvironmentPool.getInstance().release(options);
+            } catch (RuntimeException releaseError) {
+                LOG.debug("Error releasing pooled environment after init failure for stream '{}'",
+                        stream, releaseError);
+            }
+            pooledEnvironment = false;
+            environment = null;
+            return;
+        }
+
+        try {
+            if (environment != null) {
+                environment.close();
+            }
+        } catch (Exception closeError) {
+            LOG.debug("Error closing environment after init failure for stream '{}'", stream, closeError);
+        } finally {
+            environment = null;
+        }
+    }
+
+    boolean isTransientConsumerInitFailure(Throwable failure) {
+        Throwable current = failure;
+        while (current != null) {
+            String message = current.getMessage();
+            if (message != null) {
+                String lowerMessage = message.toLowerCase(java.util.Locale.ROOT);
+                if (lowerMessage.contains("connection is closed")
+                        || lowerMessage.contains("locator not available")
+                        || lowerMessage.contains("connection reset")
+                        || lowerMessage.contains("connection refused")
+                        || lowerMessage.contains("broken pipe")) {
+                    return true;
+                }
+            }
+            if (current instanceof java.net.ConnectException
+                    || current instanceof java.net.SocketException
+                    || current instanceof java.util.concurrent.TimeoutException) {
+                return true;
+            }
+            String simpleName = current.getClass().getSimpleName();
+            if ("LocatorNotAvailableException".equals(simpleName)
+                    || "ConnectionStreamException".equals(simpleName)
+                    || "TimeoutStreamException".equals(simpleName)) {
+                return true;
+            }
+            current = current.getCause();
+        }
+        return false;
     }
 
     int resolveEffectiveInitialCredits() {
@@ -515,6 +640,11 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
         long committedChunkFallback = 0;
         try {
             StreamStats stats = env.queryStreamStats(stream);
+            try {
+                stats.firstOffset();
+            } catch (NoOffsetException e) {
+                return 0L; // Stream is genuinely empty, bypass probe
+            }
             statsTail = BaseRabbitMQMicroBatchStream.resolveTailOffset(stats);
             // Keep committedChunkId()+1 as a last-resort fallback for batch reads.
             // resolveTailOffset intentionally omits +1 to avoid overshoot in streaming,
@@ -565,18 +695,7 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
             long endOffset) {
         int configured = Math.max(1, configuredInitialCredits);
         int capacity = Math.max(1, queueCapacity);
-        if (endOffset <= startOffset || endOffset == Long.MAX_VALUE) {
-            return Math.min(configured, capacity);
-        }
-
-        long plannedRange = endOffset - startOffset;
-        long boundedRange = Math.min((long) capacity, plannedRange);
-        if (boundedRange <= 0L) {
-            return Math.min(configured, capacity);
-        }
-
-        long effective = Math.max(configured, boundedRange);
-        return (int) Math.min(capacity, Math.min(Integer.MAX_VALUE, effective));
+        return Math.min(configured, capacity);
     }
 
     void enqueueFromCallback(MessageHandler.Context context, Message message) {
@@ -618,9 +737,9 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
     }
 
     OffsetSpecification resolveOffsetSpec() {
-        if (useConfiguredStartingOffset && options.getStartingOffsets() == StartingOffsetsMode.TIMESTAMP) {
-            return OffsetSpecification.timestamp(resolveStartingTimestampForStream());
-        }
+        // Spark already plans split ranges from resolved numeric offsets. Seeking by
+        // timestamp here forces the executor to replay historical backlog just to skip
+        // to startOffset, which can starve bounded micro-batches in SAC/SST live streams.
         return OffsetSpecification.offset(startOffset);
     }
 

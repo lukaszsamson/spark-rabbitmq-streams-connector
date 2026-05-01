@@ -6,7 +6,7 @@
 
     <groupId>io.github.lukaszsamson</groupId>
     <artifactId>spark-rabbitmq-streams-connector-parent</artifactId>
-    <version>0.1.0-SNAPSHOT</version>
+    <version>0.2.0-SNAPSHOT</version>
     <packaging>pom</packaging>
 
     <name>Sparkling Rabbit - Parent</name>
@@ -29,9 +29,8 @@
 
     <developers>
         <developer>
-            <name>RabbitMQ Team</name>
-            <organization>Łukasz Samson</organization>
-            <organizationUrl>https://github.com/lukaszsamson</organizationUrl>
+            <name>Łukasz Samson</name>
+            <url>https://github.com/lukaszsamson</url>
         </developer>
     </developers>
 
@@ -258,6 +257,10 @@
                                 </goals>
                             </execution>
                         </executions>
+                        <configuration>
+                            <!-- Some modules have only package-private classes -->
+                            <failOnError>false</failOnError>
+                        </configuration>
                     </plugin>
                     <plugin>
                         <groupId>org.apache.maven.plugins</groupId>
@@ -274,9 +277,24 @@
                         </executions>
                     </plugin>
                     <plugin>
-                        <groupId>org.apache.maven.plugins</groupId>
-                        <artifactId>maven-deploy-plugin</artifactId>
-                        <version>${maven-deploy-plugin.version}</version>
+                        <groupId>org.sonatype.central</groupId>
+                        <artifactId>central-publishing-maven-plugin</artifactId>
+                        <version>0.7.0</version>
+                        <extensions>true</extensions>
+                        <configuration>
+                            <publishingServerId>central</publishingServerId>
+                            <tokenAuth>true</tokenAuth>
+                            <excludeArtifacts>
+                                <excludeArtifact>spark-rabbitmq-streams-connector-core</excludeArtifact>
+                                <excludeArtifact>spark-rabbitmq-streams-connector-spark-shared</excludeArtifact>
+                                <excludeArtifact>spark-rabbitmq-streams-connector-shared-tests</excludeArtifact>
+                                <excludeArtifact>spark-rabbitmq-streams-connector-spark35-tests</excludeArtifact>
+                                <excludeArtifact>spark-rabbitmq-streams-connector-spark35_2.12-tests</excludeArtifact>
+                                <excludeArtifact>spark-rabbitmq-streams-connector-spark40-tests</excludeArtifact>
+                                <excludeArtifact>spark-rabbitmq-streams-connector-spark41-tests</excludeArtifact>
+                                <excludeArtifact>spark-rabbitmq-streams-connector-it-tests</excludeArtifact>
+                            </excludeArtifacts>
+                        </configuration>
                     </plugin>
                 </plugins>
             </build>

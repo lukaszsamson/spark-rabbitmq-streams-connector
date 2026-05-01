@@ -162,7 +162,8 @@ final class RabbitMQMicroBatchStream extends BaseRabbitMQMicroBatchStream
     Map<String, Long> applyReadLimit(
             Map<String, Long> startOffsets,
             Map<String, Long> tailOffsets,
-            ReadLimit limit) {
+            ReadLimit limit,
+            long rotation) {
 
         if (limit instanceof ReadAllAvailable) {
             return tailOffsets;
@@ -170,7 +171,7 @@ final class RabbitMQMicroBatchStream extends BaseRabbitMQMicroBatchStream
 
         if (limit instanceof ReadMaxRows maxRows) {
             return ReadLimitBudget.distributeRecordBudget(
-                    startOffsets, tailOffsets, maxRows.maxRows());
+                    startOffsets, tailOffsets, maxRows.maxRows(), rotation);
         }
 
         if (limit instanceof ReadMinRows minRows) {
@@ -181,14 +182,15 @@ final class RabbitMQMicroBatchStream extends BaseRabbitMQMicroBatchStream
 
         if (limit instanceof ReadMaxBytes maxBytes) {
             return ReadLimitBudget.distributeByteBudget(
-                    startOffsets, tailOffsets, maxBytes.maxBytes(), estimatedMessageSize);
+                    startOffsets, tailOffsets, maxBytes.maxBytes(),
+                    currentEstimatedMessageSize(), rotation);
         }
 
         if (limit instanceof CompositeReadLimit composite) {
             Map<String, Long> result = tailOffsets;
             for (ReadLimit component : composite.getReadLimits()) {
                 Map<String, Long> componentEnd = applyReadLimit(
-                        startOffsets, tailOffsets, component);
+                        startOffsets, tailOffsets, component, rotation);
                 result = ReadLimitBudget.mostRestrictive(result, componentEnd);
             }
             return result;

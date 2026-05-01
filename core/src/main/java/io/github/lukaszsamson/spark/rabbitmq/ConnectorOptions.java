@@ -64,6 +64,8 @@ public final class ConnectorOptions implements Serializable {
     public static final String STARTING_OFFSET = "startingOffset";
     public static final String STARTING_TIMESTAMP = "startingTimestamp";
     public static final String STARTING_OFFSETS_BY_TIMESTAMP = "startingOffsetsByTimestamp";
+    public static final String STARTING_OFFSETS_BY_TIMESTAMP_STRATEGY =
+            "startingOffsetsByTimestampStrategy";
     public static final String ENDING_OFFSETS = "endingOffsets";
     public static final String ENDING_OFFSET = "endingOffset";
     public static final String ENDING_TIMESTAMP = "endingTimestamp";
@@ -112,6 +114,11 @@ public final class ConnectorOptions implements Serializable {
     // Resource management
     public static final String ENVIRONMENT_IDLE_TIMEOUT_MS = "environmentIdleTimeoutMs";
 
+    private static final Set<String> SENSITIVE_OPTION_KEYS = Set.of(
+            PASSWORD.toLowerCase(Locale.ROOT),
+            TLS_TRUSTSTORE_PASSWORD.toLowerCase(Locale.ROOT),
+            TLS_KEYSTORE_PASSWORD.toLowerCase(Locale.ROOT));
+
     // ---- Default values ----
 
     public static final String DEFAULT_METADATA_FIELDS =
@@ -120,6 +127,9 @@ public final class ConnectorOptions implements Serializable {
     public static final boolean DEFAULT_TLS = false;
     public static final boolean DEFAULT_TLS_TRUST_ALL = false;
     public static final StartingOffsetsMode DEFAULT_STARTING_OFFSETS = StartingOffsetsMode.EARLIEST;
+    public static final StartingOffsetsByTimestampStrategy
+            DEFAULT_STARTING_OFFSETS_BY_TIMESTAMP_STRATEGY =
+            StartingOffsetsByTimestampStrategy.ERROR;
     public static final EndingOffsetsMode DEFAULT_ENDING_OFFSETS = EndingOffsetsMode.LATEST;
     public static final boolean DEFAULT_FILTER_MATCH_UNFILTERED = false;
     public static final boolean DEFAULT_FILTER_WARNING_ON_MISMATCH = true;
@@ -138,6 +148,8 @@ public final class ConnectorOptions implements Serializable {
     public static final long DEFAULT_ENVIRONMENT_IDLE_TIMEOUT_MS = 60_000L;
 
     // ---- Parsed fields ----
+
+    private final Map<String, String> normalizedOptions;
 
     // Common
     private final String endpoints;
@@ -182,6 +194,7 @@ public final class ConnectorOptions implements Serializable {
     private final Long startingOffset;
     private final Long startingTimestamp;
     private final Map<String, Long> startingOffsetsByTimestamp;
+    private final StartingOffsetsByTimestampStrategy startingOffsetsByTimestampStrategy;
     private final EndingOffsetsMode endingOffsets;
     private final Long endingOffset;
     private final Long endingTimestamp;
@@ -238,6 +251,7 @@ public final class ConnectorOptions implements Serializable {
      * @param options raw option map (typically from Spark's CaseInsensitiveStringMap)
      */
     public ConnectorOptions(Map<String, String> options) {
+        this.normalizedOptions = normalizeOptions(options);
         // Common
         this.endpoints = getString(options, ENDPOINTS);
         this.uris = getString(options, URIS);
@@ -286,6 +300,10 @@ public final class ConnectorOptions implements Serializable {
         this.startingTimestamp = getLong(options, STARTING_TIMESTAMP);
         this.startingOffsetsByTimestamp = parseJsonLongMap(
                 getString(options, STARTING_OFFSETS_BY_TIMESTAMP));
+        this.startingOffsetsByTimestampStrategy = parseEnum(
+                options, STARTING_OFFSETS_BY_TIMESTAMP_STRATEGY,
+                StartingOffsetsByTimestampStrategy::fromString,
+                DEFAULT_STARTING_OFFSETS_BY_TIMESTAMP_STRATEGY);
         this.endingOffsets = parseEnum(options, ENDING_OFFSETS,
                 EndingOffsetsMode::fromString, DEFAULT_ENDING_OFFSETS);
         this.endingOffset = getLong(options, ENDING_OFFSET);
@@ -355,6 +373,34 @@ public final class ConnectorOptions implements Serializable {
         // Resource management
         this.environmentIdleTimeoutMs = getLongPrimitive(options, ENVIRONMENT_IDLE_TIMEOUT_MS,
                 DEFAULT_ENVIRONMENT_IDLE_TIMEOUT_MS);
+    }
+
+    /**
+     * Returns a canonicalized, case-insensitive view of the original raw options.
+     *
+     * <p>Keys are lowercased using {@link Locale#ROOT} and sorted to provide a stable identity
+     * surface for Spark progress bookkeeping across stream instance re-creation (for example when
+     * using Spark Connect).
+     */
+    public Map<String, String> getNormalizedOptions() {
+        return normalizedOptions;
+    }
+
+    /**
+     * Stable, non-sensitive option summary suitable for logging and source descriptions.
+     */
+    public String progressDescription() {
+        StringBuilder out = new StringBuilder();
+        normalizedOptions.forEach((key, value) -> {
+            if (SENSITIVE_OPTION_KEYS.contains(key)) {
+                return;
+            }
+            if (out.length() > 0) {
+                out.append(", ");
+            }
+            out.append(key).append('=').append(value);
+        });
+        return out.toString();
     }
 
     // ---- Validation ----
@@ -501,6 +547,10 @@ public final class ConnectorOptions implements Serializable {
             throw new IllegalArgumentException(
                     "'" + FILTER_VALUE_PATH + "' is not applicable to source reads");
         }
+        if (filterValueExtractorClass != null && !filterValueExtractorClass.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "'" + FILTER_VALUE_EXTRACTOR_CLASS + "' is not applicable to source reads");
+        }
         if (compressionCodecFactoryClass != null && !compressionCodecFactoryClass.isEmpty()) {
             throw new IllegalArgumentException(
                     "'" + COMPRESSION_CODEC_FACTORY_CLASS + "' is not applicable to source reads");
@@ -520,6 +570,12 @@ public final class ConnectorOptions implements Serializable {
                     "'" + STARTING_TIMESTAMP + "' or '" + STARTING_OFFSETS_BY_TIMESTAMP +
                             "' is required when '" + STARTING_OFFSETS + "' is 'timestamp'");
         }
+        if (startingOffsets != StartingOffsetsMode.TIMESTAMP
+                && startingOffsetsByTimestamp != null && !startingOffsetsByTimestamp.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "'" + STARTING_OFFSETS_BY_TIMESTAMP + "' is only supported when '" +
+                            STARTING_OFFSETS + "' is 'timestamp'");
+        }
         // endingOffsets=offset requires endingOffset
         if (endingOffsets == EndingOffsetsMode.OFFSET && endingOffset == null) {
             throw new IllegalArgumentException(
@@ -533,6 +589,12 @@ public final class ConnectorOptions implements Serializable {
             throw new IllegalArgumentException(
                     "'" + ENDING_TIMESTAMP + "' or '" + ENDING_OFFSETS_BY_TIMESTAMP +
                             "' is required when '" + ENDING_OFFSETS + "' is 'timestamp'");
+        }
+        if (endingOffsets != EndingOffsetsMode.TIMESTAMP
+                && endingOffsetsByTimestamp != null && !endingOffsetsByTimestamp.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "'" + ENDING_OFFSETS_BY_TIMESTAMP + "' is only supported when '" +
+                            ENDING_OFFSETS + "' is 'timestamp'");
         }
         // Numeric range checks
         if (startingOffset != null && startingOffset < 0) {
@@ -588,13 +650,6 @@ public final class ConnectorOptions implements Serializable {
             throw new IllegalArgumentException(
                     "'" + MIN_OFFSETS_PER_TRIGGER + "' must be > 0, got: " + minOffsetsPerTrigger);
         }
-        if (minOffsetsPerTrigger != null && maxRecordsPerTrigger != null
-                && minOffsetsPerTrigger > maxRecordsPerTrigger) {
-            throw new IllegalArgumentException(
-                    "The value of " + MIN_OFFSETS_PER_TRIGGER + "(" + minOffsetsPerTrigger +
-                            ") is higher than the " + MAX_RECORDS_PER_TRIGGER + "(" +
-                            maxRecordsPerTrigger + ")");
-        }
         if (maxBytesPerTrigger != null && maxBytesPerTrigger <= 0) {
             throw new IllegalArgumentException(
                     "'" + MAX_BYTES_PER_TRIGGER + "' must be > 0, got: " + maxBytesPerTrigger);
@@ -632,6 +687,12 @@ public final class ConnectorOptions implements Serializable {
         if (initialCredits <= 0) {
             throw new IllegalArgumentException(
                     "'" + INITIAL_CREDITS + "' must be > 0, got: " + initialCredits);
+        }
+        if (initialCredits == 1) {
+            throw new IllegalArgumentException(
+                    "'" + INITIAL_CREDITS + "' must be >= 2 when using the connector's "
+                            + "creditWhenHalfMessagesProcessed flow strategy; got: "
+                            + initialCredits);
         }
         if (queueCapacity <= 0) {
             throw new IllegalArgumentException(
@@ -680,8 +741,19 @@ public final class ConnectorOptions implements Serializable {
             }
         }
 
+        if (!isSuperStreamMode()) {
+            if (routingStrategy != DEFAULT_ROUTING_STRATEGY) {
+                throw new IllegalArgumentException(
+                        "'" + ROUTING_STRATEGY + "' is only valid for superstream sink mode");
+            }
+            if (partitionerClass != null && !partitionerClass.isEmpty()) {
+                throw new IllegalArgumentException(
+                        "'" + PARTITIONER_CLASS + "' is only valid for superstream sink mode");
+            }
+        }
+
         // routingStrategy=custom requires partitionerClass
-        if (routingStrategy == RoutingStrategyType.CUSTOM) {
+        if (isSuperStreamMode() && routingStrategy == RoutingStrategyType.CUSTOM) {
             if (partitionerClass == null || partitionerClass.isEmpty()) {
                 throw new IllegalArgumentException(
                         "'" + PARTITIONER_CLASS + "' is required when '" + ROUTING_STRATEGY +
@@ -829,6 +901,9 @@ public final class ConnectorOptions implements Serializable {
     public Long getStartingOffset() { return startingOffset; }
     public Long getStartingTimestamp() { return startingTimestamp; }
     public Map<String, Long> getStartingOffsetsByTimestamp() { return startingOffsetsByTimestamp; }
+    public StartingOffsetsByTimestampStrategy getStartingOffsetsByTimestampStrategy() {
+        return startingOffsetsByTimestampStrategy;
+    }
     public EndingOffsetsMode getEndingOffsets() { return endingOffsets; }
     public Long getEndingOffset() { return endingOffset; }
     public Long getEndingTimestamp() { return endingTimestamp; }
@@ -1138,5 +1213,20 @@ public final class ConnectorOptions implements Serializable {
                 .map(String::trim)
                 .filter(s -> !s.isEmpty())
                 .toList();
+    }
+
+    private static Map<String, String> normalizeOptions(Map<String, String> options) {
+        TreeMap<String, String> normalized = new TreeMap<>();
+        if (options == null) {
+            return Collections.emptyMap();
+        }
+        for (Map.Entry<String, String> entry : options.entrySet()) {
+            String key = entry.getKey();
+            if (key == null || key.isBlank()) {
+                continue;
+            }
+            normalized.put(key.toLowerCase(Locale.ROOT), entry.getValue());
+        }
+        return Collections.unmodifiableMap(normalized);
     }
 }

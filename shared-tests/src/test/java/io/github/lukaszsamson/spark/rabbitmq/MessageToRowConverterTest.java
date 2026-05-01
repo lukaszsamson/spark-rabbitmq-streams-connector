@@ -490,5 +490,137 @@ class MessageToRowConverterTest {
             assertThat(MessageToRowConverter.microsToMillis(1_000_000L)).isEqualTo(1000L);
             assertThat(MessageToRowConverter.microsToMillis(999L)).isEqualTo(0L);
         }
+
+        @Test
+        void millisToMicrosBoundaryDoesNotOverflow() {
+            long boundary = Long.MAX_VALUE / 1000L;
+            assertThat(MessageToRowConverter.millisToMicros(boundary))
+                    .isEqualTo(boundary * 1000L);
+        }
+
+        @Test
+        void millisToMicrosSaturatesAtMaxOnOverflow() {
+            assertThat(MessageToRowConverter.millisToMicros(Long.MAX_VALUE))
+                    .isEqualTo(Long.MAX_VALUE);
+        }
+
+        @Test
+        void millisToMicrosSaturatesAtMinOnNegativeOverflow() {
+            assertThat(MessageToRowConverter.millisToMicros(Long.MIN_VALUE))
+                    .isEqualTo(Long.MIN_VALUE);
+        }
+
+        @Test
+        void safeMillisToMicrosReturnsNullOnOverflow() {
+            assertThat(MessageToRowConverter.safeMillisToMicros(Long.MAX_VALUE)).isNull();
+            assertThat(MessageToRowConverter.safeMillisToMicros(Long.MIN_VALUE)).isNull();
+        }
+
+        @Test
+        void safeMillisToMicrosBoundaryReturnsValue() {
+            long boundary = Long.MAX_VALUE / 1000L;
+            assertThat(MessageToRowConverter.safeMillisToMicros(boundary))
+                    .isEqualTo(boundary * 1000L);
+        }
+
+        @Test
+        void overflowingChunkTimestampSaturates() {
+            var converter = new MessageToRowConverter(EnumSet.noneOf(MetadataField.class));
+            Message msg = mockMessage(new byte[0]);
+            InternalRow row = converter.convert(msg, "s", 0, Long.MAX_VALUE);
+            assertThat(row.getLong(3)).isEqualTo(Long.MAX_VALUE);
+        }
+
+        @Test
+        void overflowingOptionalCreationTimeBecomesNull() {
+            var converter = new MessageToRowConverter(EnumSet.of(MetadataField.CREATION_TIME));
+            Message msg = mockMessage(new byte[0]);
+            Properties props = mock(Properties.class);
+            when(props.getCreationTime()).thenReturn(Long.MAX_VALUE);
+            when(msg.getProperties()).thenReturn(props);
+
+            InternalRow row = converter.convert(msg, "s", 0, CHUNK_TS_MILLIS);
+            assertThat(row.isNullAt(4)).isTrue();
+        }
+
+        @Test
+        void overflowingPropertiesCreationTimeBecomesNull() {
+            Properties props = mock(Properties.class);
+            when(props.getCreationTime()).thenReturn(Long.MAX_VALUE);
+            when(props.getAbsoluteExpiryTime()).thenReturn(Long.MAX_VALUE);
+            when(props.getGroupSequence()).thenReturn(-1L);
+
+            InternalRow propsRow = MessageToRowConverter.convertProperties(props);
+            assertThat(propsRow.isNullAt(8)).isTrue(); // absolute_expiry_time
+            assertThat(propsRow.isNullAt(9)).isTrue(); // creation_time
+        }
+    }
+
+    // ========================================================================
+    // Deterministic value coercion
+    // ========================================================================
+
+    @Nested
+    class ValueCoercion {
+
+        @Test
+        void byteArrayCoercesToBase64() {
+            byte[] bytes = {0x01, 0x02, 0x03};
+            String result = MessageToRowConverter.coerceValueToString(bytes);
+            assertThat(result).isEqualTo(Base64.getEncoder().encodeToString(bytes));
+        }
+
+        @Test
+        void uuidCoercesToCanonicalString() {
+            UUID uuid = UUID.fromString("12345678-1234-1234-1234-123456789abc");
+            assertThat(MessageToRowConverter.coerceValueToString(uuid))
+                    .isEqualTo("12345678-1234-1234-1234-123456789abc");
+        }
+
+        @Test
+        void numberAndBooleanUseToString() {
+            assertThat(MessageToRowConverter.coerceValueToString(42)).isEqualTo("42");
+            assertThat(MessageToRowConverter.coerceValueToString(true)).isEqualTo("true");
+        }
+
+        @Test
+        void stringPassesThrough() {
+            assertThat(MessageToRowConverter.coerceValueToString("hello")).isEqualTo("hello");
+        }
+
+        @Test
+        void nullStaysNull() {
+            assertThat(MessageToRowConverter.coerceValueToString(null)).isNull();
+        }
+
+        @Test
+        void applicationPropertiesByteArrayIsBase64() {
+            var converter = new MessageToRowConverter(
+                    EnumSet.of(MetadataField.APPLICATION_PROPERTIES));
+            Message msg = mockMessage(new byte[0]);
+            byte[] payload = {(byte) 0xCA, (byte) 0xFE, (byte) 0xBA, (byte) 0xBE};
+            Map<String, Object> appProps = new LinkedHashMap<>();
+            appProps.put("blob", payload);
+            when(msg.getApplicationProperties()).thenReturn(appProps);
+
+            InternalRow row = converter.convert(msg, "s", 0, CHUNK_TS_MILLIS);
+            ArrayBasedMapData mapData = (ArrayBasedMapData) row.getMap(4);
+            assertThat(mapData.valueArray().getUTF8String(0).toString())
+                    .isEqualTo(Base64.getEncoder().encodeToString(payload));
+        }
+
+        @Test
+        void routingKeyByteArrayIsBase64() {
+            var converter = new MessageToRowConverter(EnumSet.of(MetadataField.ROUTING_KEY));
+            Message msg = mockMessage(new byte[0]);
+            byte[] keyBytes = {0x01, 0x02};
+            Map<String, Object> appProps = new LinkedHashMap<>();
+            appProps.put("routing_key", keyBytes);
+            when(msg.getApplicationProperties()).thenReturn(appProps);
+
+            InternalRow row = converter.convert(msg, "s", 0, CHUNK_TS_MILLIS);
+            assertThat(row.getUTF8String(4).toString())
+                    .isEqualTo(Base64.getEncoder().encodeToString(keyBytes));
+        }
     }
 }

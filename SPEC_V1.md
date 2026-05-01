@@ -372,6 +372,8 @@ Type coercion notes:
 - `startingOffsets` (earliest|latest|offset|timestamp)
 - `startingOffset` (long; used when startingOffsets=offset)
 - `startingTimestamp` (epoch millis >= 0; used when startingOffsets=timestamp)
+- `startingOffsetsByTimestamp` (JSON map stream->epoch millis >= 0; per-stream override when startingOffsets=timestamp)
+- `startingOffsetsByTimestampStrategy` (error|latest; default `error`, Kafka-compatible behavior when no message exists at/after timestamp)
 - `endingOffsets` (latest|offset|timestamp)
 - `endingOffset` (long; used when endingOffsets=offset)
 - `endingTimestamp` (epoch millis >= 0; used when endingOffsets=timestamp)

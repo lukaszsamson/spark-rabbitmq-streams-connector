@@ -22,7 +22,8 @@ public final class ReadLimitBudget {
 
     /**
      * Distribute a record budget evenly across non-empty streams, capped by each
-     * stream's available offset span.
+     * stream's available offset span. Equivalent to
+     * {@link #distributeRecordBudget(Map, Map, long, long)} with {@code rotation = 0}.
      *
      * @param startOffsets  stream → start offset (inclusive)
      * @param tailOffsets   stream → tail offset (exclusive)
@@ -34,6 +35,21 @@ public final class ReadLimitBudget {
             Map<String, Long> startOffsets,
             Map<String, Long> tailOffsets,
             long budget) {
+        return distributeRecordBudget(startOffsets, tailOffsets, budget, 0L);
+    }
+
+    /**
+     * Distribute a record budget evenly across non-empty streams, capped by each
+     * stream's available offset span. Allocation order is rotated by
+     * {@code rotation mod eligible.size()} so that callers passing an
+     * incrementing trigger counter avoid starving the tail of the eligible
+     * list when {@code budget < count} or when {@code budget % count != 0}.
+     */
+    public static Map<String, Long> distributeRecordBudget(
+            Map<String, Long> startOffsets,
+            Map<String, Long> tailOffsets,
+            long budget,
+            long rotation) {
 
         if (budget <= 0) {
             return new LinkedHashMap<>(startOffsets);
@@ -61,7 +77,7 @@ public final class ReadLimitBudget {
         }
 
         // Even allocation across streams, capped by available range spans.
-        Map<String, Long> allocated = allocateEvenlyWithCaps(pending, budget);
+        Map<String, Long> allocated = allocateEvenlyWithCaps(pending, budget, rotation);
 
         // Compute end offsets
         Map<String, Long> endOffsets = new LinkedHashMap<>();
@@ -77,22 +93,33 @@ public final class ReadLimitBudget {
 
     /**
      * Distribute a byte budget by converting bytes to a record budget and applying
-     * the same even-per-stream capped distribution as record budgets.
-     *
-     * @param startOffsets          stream → start offset (inclusive)
-     * @param tailOffsets           stream → tail offset (exclusive)
-     * @param byteBudget            max bytes to allow
-     * @param estimatedMessageSize  estimated bytes per message
-     * @return stream → end offset (exclusive)
+     * the same even-per-stream capped distribution as record budgets. Equivalent
+     * to {@link #distributeByteBudget(Map, Map, long, int, long)} with
+     * {@code rotation = 0}.
      */
     public static Map<String, Long> distributeByteBudget(
             Map<String, Long> startOffsets,
             Map<String, Long> tailOffsets,
             long byteBudget,
             int estimatedMessageSize) {
+        return distributeByteBudget(startOffsets, tailOffsets, byteBudget,
+                estimatedMessageSize, 0L);
+    }
+
+    /**
+     * Distribute a byte budget by converting bytes to a record budget and applying
+     * the same rotated even-per-stream capped distribution as
+     * {@link #distributeRecordBudget(Map, Map, long, long)}.
+     */
+    public static Map<String, Long> distributeByteBudget(
+            Map<String, Long> startOffsets,
+            Map<String, Long> tailOffsets,
+            long byteBudget,
+            int estimatedMessageSize,
+            long rotation) {
 
         long recordBudget = Math.max(1, byteBudget / Math.max(1, estimatedMessageSize));
-        return distributeRecordBudget(startOffsets, tailOffsets, recordBudget);
+        return distributeRecordBudget(startOffsets, tailOffsets, recordBudget, rotation);
     }
 
     /**
@@ -115,10 +142,14 @@ public final class ReadLimitBudget {
     /**
      * Allocate budget evenly across entries, capped by their per-entry capacities.
      *
-     * <p>Streams are processed in insertion order for deterministic tie-breaking.
+     * <p>Streams are processed in insertion order for deterministic tie-breaking,
+     * but the start of the iteration is rotated by {@code rotation mod size} so
+     * that successive callers passing an incrementing rotation distribute the
+     * remainder (and any sub-eligible-size budget) round-robin across all
+     * streams instead of always favoring the first {@code remainder} entries.
      */
     static Map<String, Long> allocateEvenlyWithCaps(
-            Map<String, Long> capacity, long budget) {
+            Map<String, Long> capacity, long budget, long rotation) {
 
         Map<String, Long> allocation = new LinkedHashMap<>();
         for (String stream : capacity.keySet()) {
@@ -137,14 +168,19 @@ public final class ReadLimitBudget {
 
         long remaining = budget;
         while (remaining > 0 && !eligible.isEmpty()) {
-            long baseShare = remaining / eligible.size();
-            long remainder = remaining % eligible.size();
+            int size = eligible.size();
+            long baseShare = remaining / size;
+            long remainder = remaining % size;
+            int rot = (int) Math.floorMod(rotation, (long) size);
 
             if (baseShare == 0) {
-                for (String stream : eligible) {
+                // Hand out one record at a time starting from the rotated index
+                // so streams further down the eligible list also get a turn.
+                for (int j = 0; j < size; j++) {
                     if (remaining == 0) {
                         break;
                     }
+                    String stream = eligible.get((j + rot) % size);
                     long used = allocation.getOrDefault(stream, 0L);
                     long cap = Math.max(0L, capacity.getOrDefault(stream, 0L) - used);
                     if (cap <= 0) {
@@ -158,7 +194,7 @@ public final class ReadLimitBudget {
 
             long spent = 0;
             List<String> nextEligible = new ArrayList<>();
-            for (int i = 0; i < eligible.size(); i++) {
+            for (int i = 0; i < size; i++) {
                 String stream = eligible.get(i);
                 long used = allocation.getOrDefault(stream, 0L);
                 long cap = Math.max(0L, capacity.getOrDefault(stream, 0L) - used);
@@ -166,7 +202,8 @@ public final class ReadLimitBudget {
                     continue;
                 }
 
-                long requested = baseShare + (i < remainder ? 1 : 0);
+                int distFromRotatedStart = (int) Math.floorMod((long) i - rot, (long) size);
+                long requested = baseShare + (distFromRotatedStart < remainder ? 1 : 0);
                 long granted = Math.min(requested, cap);
                 allocation.put(stream, used + granted);
                 spent += granted;
@@ -186,99 +223,4 @@ public final class ReadLimitBudget {
         return allocation;
     }
 
-    /**
-     * Allocate a budget proportionally across entries.
-     * Each non-empty entry gets at least 1.
-     * Uses floor allocation with remainder distributed by largest fractional share.
-     */
-    static Map<String, Long> allocateProportionally(
-            Map<String, Long> pending, long budget) {
-
-        Map<String, Long> allocation = new LinkedHashMap<>();
-        Map<String, Double> fractional = new LinkedHashMap<>();
-        long allocated = 0;
-
-        // Pre-compute total pending once (O(n) instead of O(n^2))
-        long totalPending = 0;
-        for (long p : pending.values()) {
-            totalPending += Math.max(0, p);
-        }
-        if (totalPending == 0) {
-            for (String stream : pending.keySet()) {
-                allocation.put(stream, 0L);
-            }
-            return allocation;
-        }
-
-        long nonEmptyCount = pending.values().stream().filter(p -> p > 0).count();
-        if (budget <= nonEmptyCount) {
-            for (String stream : pending.keySet()) {
-                allocation.put(stream, 0L);
-            }
-            pending.entrySet().stream()
-                    .filter(e -> e.getValue() > 0)
-                    .sorted(Map.Entry.<String, Long>comparingByValue().reversed())
-                    .limit(budget)
-                    .forEach(e -> allocation.put(e.getKey(), 1L));
-            return allocation;
-        }
-
-        for (Map.Entry<String, Long> entry : pending.entrySet()) {
-            String stream = entry.getKey();
-            long p = entry.getValue();
-            if (p <= 0) {
-                allocation.put(stream, 0L);
-                continue;
-            }
-
-            double share = (double) p / totalPending * budget;
-            long floor = Math.max(1, (long) share);
-            allocation.put(stream, floor);
-            fractional.put(stream, share - floor);
-            allocated += floor;
-        }
-
-        // Guard against over-allocation from min-per-stream floor rounding.
-        if (allocated > budget) {
-            long toTrim = allocated - budget;
-            List<String> trimOrder = fractional.entrySet().stream()
-                    .sorted(Map.Entry.<String, Double>comparingByValue())
-                    .map(Map.Entry::getKey)
-                    .toList();
-            for (String stream : trimOrder) {
-                if (toTrim <= 0) {
-                    break;
-                }
-                long current = allocation.getOrDefault(stream, 0L);
-                long removable = Math.max(0L, current - 1L);
-                if (removable <= 0) {
-                    continue;
-                }
-                long trim = Math.min(removable, toTrim);
-                allocation.put(stream, current - trim);
-                toTrim -= trim;
-            }
-            allocated = budget - toTrim;
-        }
-
-        // Distribute remainder by largest fractional share
-        long remaining = budget - allocated;
-        if (remaining > 0) {
-            fractional.entrySet().stream()
-                    .sorted(Map.Entry.<String, Double>comparingByValue().reversed())
-                    .limit(remaining)
-                    .forEach(e -> allocation.merge(e.getKey(), 1L, Long::sum));
-        }
-
-        // Ensure no allocation exceeds pending
-        for (Map.Entry<String, Long> entry : pending.entrySet()) {
-            String stream = entry.getKey();
-            long alloc = allocation.getOrDefault(stream, 0L);
-            if (alloc > entry.getValue()) {
-                allocation.put(stream, entry.getValue());
-            }
-        }
-
-        return allocation;
-    }
 }

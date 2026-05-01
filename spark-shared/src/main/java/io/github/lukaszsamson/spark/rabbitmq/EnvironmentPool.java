@@ -6,6 +6,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.Objects;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -70,7 +71,8 @@ final class EnvironmentPool {
             String nettyByteBufAllocator,
             String nettyChannelCustomizer,
             String nettyBootstrapCustomizer,
-            String compressionCodecFactoryClass
+            String compressionCodecFactoryClass,
+            long environmentIdleTimeoutMs
     ) {
         static EnvironmentKey from(ConnectorOptions options) {
             return new EnvironmentKey(
@@ -105,7 +107,8 @@ final class EnvironmentPool {
                     options.getNettyByteBufAllocator(),
                     options.getNettyChannelCustomizer(),
                     options.getNettyBootstrapCustomizer(),
-                    options.getCompressionCodecFactoryClass()
+                    options.getCompressionCodecFactoryClass(),
+                    options.getEnvironmentIdleTimeoutMs()
             );
         }
 
@@ -131,18 +134,10 @@ final class EnvironmentPool {
     private static final class PooledEntry {
         final CompletableFuture<Environment> environmentFuture = new CompletableFuture<>();
         volatile Environment environment;
-        final AtomicInteger refCount = new AtomicInteger(1);
+        final AtomicInteger refCount = new AtomicInteger(0);
         volatile ScheduledFuture<?> evictionTask;
-
-        PooledEntry() {
-            this.refCount.set(0);
-        }
-
-        PooledEntry(Environment environment) {
-            Environment validated = Objects.requireNonNull(environment);
-            this.environment = validated;
-            this.environmentFuture.complete(validated);
-        }
+        // Ensures environment.close() is invoked at most once across evict() and closeAll().
+        final AtomicBoolean closed = new AtomicBoolean(false);
     }
 
     private final ConcurrentHashMap<EnvironmentKey, PooledEntry> pool = new ConcurrentHashMap<>();
@@ -258,9 +253,32 @@ final class EnvironmentPool {
                 entry.refCount.set(0);
                 remaining = 0;
             }
-            if (remaining == 0 && entry.environmentFuture.isCompletedExceptionally()) {
-                pool.remove(key, entry);
+            if (remaining != 0) {
+                return;
             }
+            if (entry.environmentFuture.isCompletedExceptionally()) {
+                pool.remove(key, entry);
+                return;
+            }
+            // If this entry is no longer the active mapping (e.g., closeAll cleared
+            // the pool, or the entry was otherwise replaced), don't resurrect it via
+            // a scheduled eviction — that would also recreate the scheduler if
+            // closeAll had shut it down. Whoever removed the entry is responsible
+            // for closing the Environment.
+            if (pool.get(key) != entry) {
+                return;
+            }
+            // The future completed successfully (e.g., this acquirer was interrupted
+            // after another thread built the environment). Without scheduling an
+            // eviction, the entry would remain in the pool at refCount=0 forever
+            // and the Environment would leak. Mirror release()'s eviction path.
+            ScheduledFuture<?> previousEviction = entry.evictionTask;
+            if (previousEviction != null) {
+                previousEviction.cancel(false);
+            }
+            long idleTimeoutMs = key.environmentIdleTimeoutMs();
+            entry.evictionTask = getOrCreateEvictionScheduler().schedule(
+                    () -> evict(key, entry), idleTimeoutMs, TimeUnit.MILLISECONDS);
         }
     }
 
@@ -318,7 +336,6 @@ final class EnvironmentPool {
     }
 
     private void evict(EnvironmentKey key, PooledEntry entry) {
-        boolean removed;
         synchronized (entry) {
             if (pool.get(key) != entry) {
                 return;
@@ -328,22 +345,23 @@ final class EnvironmentPool {
                 entry.evictionTask = null;
                 return;
             }
-            removed = pool.remove(key, entry);
-            if (removed) {
-                entry.evictionTask = null;
+            if (!pool.remove(key, entry)) {
+                return;
             }
-        }
-        if (!removed) {
-            return;
-        }
-        LOG.info("Evicting idle environment for key {}", key.endpoints());
-        try {
-            Environment environment = entry.environment;
-            if (environment != null) {
-                environment.close();
+            entry.evictionTask = null;
+            // Close inside the lock and gate on `closed` so a concurrent closeAll()
+            // (which also synchronizes on entry) cannot double-close the Environment.
+            if (entry.closed.compareAndSet(false, true)) {
+                LOG.info("Evicting idle environment for key {}", key.endpoints());
+                try {
+                    Environment environment = entry.environment;
+                    if (environment != null) {
+                        environment.close();
+                    }
+                } catch (Exception e) {
+                    LOG.warn("Error closing evicted environment for key {}", key.endpoints(), e);
+                }
             }
-        } catch (Exception e) {
-            LOG.warn("Error closing evicted environment for key {}", key.endpoints(), e);
         }
     }
 
@@ -368,10 +386,17 @@ final class EnvironmentPool {
                     eviction.cancel(false);
                     entry.evictionTask = null;
                 }
-                try {
-                    entry.environment.close();
-                } catch (Exception e) {
-                    LOG.debug("Error closing environment during pool shutdown", e);
+                if (entry.closed.compareAndSet(false, true)) {
+                    try {
+                        Environment environment = entry.environment;
+                        if (environment != null) {
+                            environment.close();
+                        }
+                    } catch (RuntimeException e) {
+                        LOG.debug("Runtime error closing environment during pool shutdown", e);
+                    } catch (Exception e) {
+                        LOG.debug("Error closing environment during pool shutdown", e);
+                    }
                 }
             }
         });
