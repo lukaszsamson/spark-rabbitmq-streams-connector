@@ -128,6 +128,68 @@ class ReadLimitBudgetTest {
     }
 
     @Nested
+    class Rotation {
+
+        @Test
+        void subEligibleSizeBudgetRotatesAcrossStreams() {
+            // 4 streams, budget of 2 records each trigger ⇒ 2/4 streams get a
+            // record per call. Without rotation, s1+s2 always win and s3+s4 starve.
+            Map<String, Long> start = Map.of("s1", 0L, "s2", 0L, "s3", 0L, "s4", 0L);
+            Map<String, Long> tail = Map.of("s1", 100L, "s2", 100L, "s3", 100L, "s4", 100L);
+
+            // Sum across 4 successive triggers — every stream should have been
+            // served at least once, totaling exactly the 4 * 2 = 8 records.
+            long s1 = 0, s2 = 0, s3 = 0, s4 = 0;
+            for (long rot = 0; rot < 4; rot++) {
+                Map<String, Long> result = ReadLimitBudget.distributeRecordBudget(
+                        start, tail, 2, rot);
+                s1 += result.get("s1");
+                s2 += result.get("s2");
+                s3 += result.get("s3");
+                s4 += result.get("s4");
+            }
+            assertThat(s1).isPositive();
+            assertThat(s2).isPositive();
+            assertThat(s3).isPositive();
+            assertThat(s4).isPositive();
+            assertThat(s1 + s2 + s3 + s4).isEqualTo(8L);
+        }
+
+        @Test
+        void remainderRotatesAcrossStreams() {
+            // 3 streams, budget of 4 ⇒ baseShare=1 each, remainder=1 to one stream.
+            // Across 3 successive triggers the bonus record should rotate.
+            Map<String, Long> start = Map.of("s1", 0L, "s2", 0L, "s3", 0L);
+            Map<String, Long> tail = Map.of("s1", 100L, "s2", 100L, "s3", 100L);
+
+            long s1 = 0, s2 = 0, s3 = 0;
+            for (long rot = 0; rot < 3; rot++) {
+                Map<String, Long> result = ReadLimitBudget.distributeRecordBudget(
+                        start, tail, 4, rot);
+                s1 += result.get("s1");
+                s2 += result.get("s2");
+                s3 += result.get("s3");
+            }
+            // Each stream got the +1 bonus exactly once across 3 triggers.
+            assertThat(s1).isEqualTo(4L);
+            assertThat(s2).isEqualTo(4L);
+            assertThat(s3).isEqualTo(4L);
+        }
+
+        @Test
+        void rotationZeroMatchesUnrotatedBehavior() {
+            Map<String, Long> start = Map.of("s1", 0L, "s2", 0L);
+            Map<String, Long> tail = Map.of("s1", 50L, "s2", 50L);
+
+            Map<String, Long> withDefault = ReadLimitBudget.distributeRecordBudget(
+                    start, tail, 30);
+            Map<String, Long> withZero = ReadLimitBudget.distributeRecordBudget(
+                    start, tail, 30, 0L);
+            assertThat(withZero).isEqualTo(withDefault);
+        }
+    }
+
+    @Nested
     class MostRestrictive {
 
         @Test

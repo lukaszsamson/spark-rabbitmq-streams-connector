@@ -46,13 +46,15 @@ final class RabbitMQMicroBatchStream extends BaseRabbitMQMicroBatchStream {
             Map<String, Long> tailOffsets,
             ReadLimit limit) {
 
+        long rotation = readLimitTriggerCounter.getAndIncrement();
+
         if (limit instanceof ReadAllAvailable) {
             return tailOffsets;
         }
 
         if (limit instanceof ReadMaxRows maxRows) {
             return ReadLimitBudget.distributeRecordBudget(
-                    startOffsets, tailOffsets, maxRows.maxRows());
+                    startOffsets, tailOffsets, maxRows.maxRows(), rotation);
         }
 
         if (limit instanceof ReadMinRows minRows) {
@@ -63,7 +65,8 @@ final class RabbitMQMicroBatchStream extends BaseRabbitMQMicroBatchStream {
 
         if (limit instanceof ReadMaxBytes maxBytes) {
             return ReadLimitBudget.distributeByteBudget(
-                    startOffsets, tailOffsets, maxBytes.maxBytes(), currentEstimatedMessageSize());
+                    startOffsets, tailOffsets, maxBytes.maxBytes(),
+                    currentEstimatedMessageSize(), rotation);
         }
 
         if (limit instanceof CompositeReadLimit composite) {

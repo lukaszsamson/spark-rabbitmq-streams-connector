@@ -130,6 +130,13 @@ class BaseRabbitMQMicroBatchStream
     final AtomicBoolean stopping = new AtomicBoolean(false);
     /** Guards compound read-modify-write updates on mutable admission-control state. */
     final Object mutableStateLock = new Object();
+    /**
+     * Monotonically increasing counter passed as the rotation seed to
+     * {@link ReadLimitBudget#distributeRecordBudget(Map, Map, long, long)} so that
+     * sub-eligible-size record budgets and remainder records are distributed
+     * round-robin across streams instead of always favoring the first ones.
+     */
+    final AtomicLong readLimitTriggerCounter = new AtomicLong();
 
     record CachedTailProbe(long tailExclusive, long expiresAtNanos) {}
     record LatestOffsetInvocationCache(
@@ -1149,13 +1156,15 @@ class BaseRabbitMQMicroBatchStream
             Map<String, Long> tailOffsets,
             ReadLimit limit) {
 
+        long rotation = readLimitTriggerCounter.getAndIncrement();
+
         if (limit instanceof ReadAllAvailable) {
             return tailOffsets;
         }
 
         if (limit instanceof ReadMaxRows maxRows) {
             return ReadLimitBudget.distributeRecordBudget(
-                    startOffsets, tailOffsets, maxRows.maxRows());
+                    startOffsets, tailOffsets, maxRows.maxRows(), rotation);
         }
 
         if (limit instanceof ReadMinRows minRows) {
@@ -1167,7 +1176,8 @@ class BaseRabbitMQMicroBatchStream
         Long maxBytes = extractReadMaxBytes(limit);
         if (maxBytes != null) {
             return ReadLimitBudget.distributeByteBudget(
-                    startOffsets, tailOffsets, maxBytes, currentEstimatedMessageSize());
+                    startOffsets, tailOffsets, maxBytes,
+                    currentEstimatedMessageSize(), rotation);
         }
 
         if (limit instanceof CompositeReadLimit composite) {
