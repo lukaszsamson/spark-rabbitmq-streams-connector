@@ -223,19 +223,14 @@ class BaseRabbitMQMicroBatchStream
 
                 if (result.hasFailures()) {
                     if (consumerNameExplicit) {
-                        if (result.wasInterruptedOrTimedOut()) {
-                            LOG.warn("Stored offset lookup for explicit consumer '{}' was interrupted/timed out "
-                                            + "on streams {}. Falling back to startingOffsets for those streams.",
-                                    consumerName, result.getFailedStreams());
-                        } else {
-                            // Explicit consumerName: fail fast on non-fatal lookup failures
-                            // (e.g. tracking-consumer limits)
-                            throw new IllegalStateException(
-                                    "Stored offset lookup failed for consumer '" + consumerName +
-                                            "' on streams: " + result.getFailedStreams() +
-                                            ". Since consumerName is explicitly configured, " +
-                                            "non-fatal lookup failures are treated as fatal.");
-                        }
+                        // Explicit consumerName means broker-tracked progress is authoritative.
+                        // Any lookup failure, including timeout/interrupt, must not silently
+                        // restart from configured startingOffsets.
+                        throw new IllegalStateException(
+                                "Stored offset lookup failed for consumer '" + consumerName +
+                                        "' on streams: " + result.getFailedStreams() +
+                                        ". Since consumerName is explicitly configured, " +
+                                        "lookup failures are treated as fatal.");
                     }
                     LOG.warn("Stored offset lookup had non-fatal failures for {} consumer '{}'"
                                     + " on streams {}. Falling back to startingOffsets for those streams.",
@@ -892,18 +887,32 @@ class BaseRabbitMQMicroBatchStream
             }
         }
 
-        // Ensure tail offsets never go backwards due to failed per-stream queries
-        // (queryStreamTailOffset returns 0 on failure which may be less than start)
-        Map<String, Long> safeTail = new LinkedHashMap<>(tailOffsets);
-        for (Map.Entry<String, Long> entry : safeTail.entrySet()) {
-            long startOff = effectiveStartMap.getOrDefault(entry.getKey(), 0L);
-            if (entry.getValue() < startOff) {
-                entry.setValue(startOff);
+        if (options.isFailOnDataLoss()) {
+            for (Map.Entry<String, Long> entry : tailOffsets.entrySet()) {
+                String stream = entry.getKey();
+                long startOff = effectiveStartMap.getOrDefault(stream, 0L);
+                long endOff = entry.getValue();
+                if (endOff < startOff) {
+                    validateStartOffset(stream, startOff, endOff);
+                    throw new IllegalStateException(
+                            "Tail offset " + endOff + " is before requested start offset "
+                                    + startOff + " in stream '" + stream + "'. "
+                                    + "Data may have been lost due to stream truncation or recreation. "
+                                    + "Set failOnDataLoss=false to advance.");
+                }
             }
-        }
-        tailOffsets = safeTail;
+        } else {
+            // Ensure tail offsets never go backwards due to stale snapshots or retention.
+            // With failOnDataLoss=false, clamp and let validation normalize stale starts.
+            Map<String, Long> safeTail = new LinkedHashMap<>(tailOffsets);
+            for (Map.Entry<String, Long> entry : safeTail.entrySet()) {
+                long startOff = effectiveStartMap.getOrDefault(entry.getKey(), 0L);
+                if (entry.getValue() < startOff) {
+                    entry.setValue(startOff);
+                }
+            }
+            tailOffsets = safeTail;
 
-        if (!options.isFailOnDataLoss()) {
             // Normalize stale starts before applying read limits. Without this, rate-limited
             // planning can advance from a stale retained offset in tiny steps (e.g. +100/trigger),
             // producing repeated empty batches when failOnDataLoss=false.
@@ -1774,7 +1783,7 @@ class BaseRabbitMQMicroBatchStream
         if (probedTail == 0L && latestStartedOnEmptyStreams.contains(stream)) {
             try {
                 stats.firstOffset();
-                resolved = Math.max(resolved, stats.committedChunkId() + 1L);
+                resolved = Math.max(resolved, resolveTailOffset(stats));
             } catch (NoOffsetException e) {
                 return 0L;
             } catch (RuntimeException e) {
