@@ -801,12 +801,6 @@ class EnvironmentPoolTest {
 
         return entry;
     }
-
-    private static Object getEntry(ConnectorOptions options) throws Exception {
-        EnvironmentPool.EnvironmentKey key = EnvironmentPool.EnvironmentKey.from(options);
-        return getPoolMap().get(key);
-    }
-
     private static final class CountingEnvironment implements Environment {
         private final AtomicInteger closeCount = new AtomicInteger();
 
