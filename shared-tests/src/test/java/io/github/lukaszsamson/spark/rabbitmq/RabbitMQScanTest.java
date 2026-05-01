@@ -243,59 +243,78 @@ class RabbitMQScanTest {
         }
 
         @Test
-        void timestampEndPlanningWaitsForProbeWithinConfiguredPollTimeoutWhenSupported() throws Exception {
+        void timestampEndPlanningReturnsFirstOffsetAtOrAfterEndingTimestamp() throws Exception {
+            // The probe lands at the first chunk where the last message has ts >= ending
+            // timestamp. The first message of that delivery whose timestamp clears the
+            // bound becomes the exclusive end, matching what the reader actually needs to
+            // include only messages that were published before the cutoff.
+            long endingTs = 1700000000000L;
             Map<String, String> opts = baseOptions();
             opts.put("endingOffsets", "timestamp");
-            opts.put("endingTimestamp", "1700000000000");
+            opts.put("endingTimestamp", String.valueOf(endingTs));
             opts.put("pollTimeoutMs", "1000");
             RabbitMQScan scan = new RabbitMQScan(new ConnectorOptions(opts), schema());
 
-            // Single observed offset: exclusive end is observed + 1 so the matching
-            // message itself is included.
             Long end = resolveTimestampEndingOffsetIfSupported(scan,
-                    new DelayedProbeEnvironment(400L, new Stats(0L, false, false, 99L), 17L),
-                    "s1", 1700000000000L);
+                    new DelayedProbeEnvironment(400L, new Stats(0L, false, false, 99L),
+                            new long[]{17L},
+                            new long[]{endingTs}),
+                    "s1", endingTs);
             if (end == null) {
                 return;
             }
-            assertThat(end).isEqualTo(18L);
+            assertThat(end).isEqualTo(17L);
         }
 
         @Test
-        void timestampEndPlanningDrainsMatchingChunkSoEarlierMessagesAreIncluded() throws Exception {
-            // Broker delivers the whole chunk that contains the matching timestamp.
-            // The exclusive end must be past the chunk's last offset, otherwise messages
-            // earlier in that chunk (whose timestamp is < endingTimestamp) would be
-            // excluded.
+        void timestampEndPlanningPicksFirstMessageWithTsAtOrAfterBound() throws Exception {
+            // Common broker case: messages within the matching chunk all share the chunk's
+            // aggregated timestamp, so the first message of the chunk already crosses the
+            // bound and the chunk is excluded as a whole. Earlier chunks (already
+            // committed before the cutoff) are read through the regular path.
+            long endingTs = 1700000000000L;
             Map<String, String> opts = baseOptions();
             opts.put("endingOffsets", "timestamp");
-            opts.put("endingTimestamp", "1700000000000");
+            opts.put("endingTimestamp", String.valueOf(endingTs));
             opts.put("pollTimeoutMs", "1000");
             RabbitMQScan scan = new RabbitMQScan(new ConnectorOptions(opts), schema());
 
+            long[] offsets = {10L, 11L, 12L, 13L, 14L, 15L, 16L, 17L, 18L, 19L};
+            long[] timestamps = new long[offsets.length];
+            // First half before the bound, second half at/after — exclusive end is the
+            // first late-stamped message.
+            for (int i = 0; i < 5; i++) {
+                timestamps[i] = endingTs - 1L;
+            }
+            for (int i = 5; i < offsets.length; i++) {
+                timestamps[i] = endingTs;
+            }
             Long end = resolveTimestampEndingOffsetIfSupported(scan,
                     new DelayedProbeEnvironment(50L, new Stats(0L, false, false, 99L),
-                            10L, 11L, 12L, 13L, 14L, 15L, 16L, 17L, 18L, 19L),
-                    "s1", 1700000000000L);
+                            offsets, timestamps),
+                    "s1", endingTs);
             if (end == null) {
                 return;
             }
-            assertThat(end).isEqualTo(20L);
+            assertThat(end).isEqualTo(15L);
         }
 
         @Test
         void timestampEndPlanningUsesPerStreamTimestampOverride() throws Exception {
+            long endingTs = 1700000000000L;
             Map<String, String> opts = baseOptions();
             opts.put("endingOffsets", "timestamp");
-            opts.put("endingOffsetsByTimestamp", "{\"s1\":1700000000000}");
+            opts.put("endingOffsetsByTimestamp", "{\"s1\":" + endingTs + "}");
             opts.put("pollTimeoutMs", "1000");
             RabbitMQScan scan = new RabbitMQScan(new ConnectorOptions(opts), schema());
             StreamStats stats = new Stats(0L, false, false, 99L);
 
             long end = resolveEndOffset(scan,
-                    new DelayedProbeEnvironment(0L, new Stats(0L, false, false, 99L), 17L),
+                    new DelayedProbeEnvironment(0L, new Stats(0L, false, false, 99L),
+                            new long[]{17L},
+                            new long[]{endingTs}),
                     "s1", stats);
-            assertThat(end).isEqualTo(18L);
+            assertThat(end).isEqualTo(17L);
         }
 
         @Test
@@ -639,17 +658,24 @@ class RabbitMQScanTest {
     private static final class DelayedProbeEnvironment implements Environment {
         private final long delayMs;
         private final long[] offsets;
+        private final long[] timestamps;
         private final StreamStats stats;
 
         private DelayedProbeEnvironment(long delayMs, StreamStats stats, long... offsets) {
+            this(delayMs, stats, offsets, new long[offsets.length]);
+        }
+
+        private DelayedProbeEnvironment(long delayMs, StreamStats stats,
+                long[] offsets, long[] timestamps) {
             this.delayMs = delayMs;
             this.stats = stats;
             this.offsets = offsets;
+            this.timestamps = timestamps;
         }
 
         @Override
         public ConsumerBuilder consumerBuilder() {
-            return new DelayedProbeConsumerBuilder(delayMs, offsets);
+            return new DelayedProbeConsumerBuilder(delayMs, offsets, timestamps);
         }
 
         @Override
@@ -1101,11 +1127,13 @@ class RabbitMQScanTest {
     private static final class DelayedProbeConsumerBuilder implements ConsumerBuilder {
         private final long delayMs;
         private final long[] offsets;
+        private final long[] timestamps;
         private com.rabbitmq.stream.MessageHandler handler;
 
-        private DelayedProbeConsumerBuilder(long delayMs, long[] offsets) {
+        private DelayedProbeConsumerBuilder(long delayMs, long[] offsets, long[] timestamps) {
             this.delayMs = delayMs;
             this.offsets = offsets;
+            this.timestamps = timestamps;
         }
 
         @Override
@@ -1187,8 +1215,10 @@ class RabbitMQScanTest {
                 Thread emitter = new Thread(() -> {
                     try {
                         Thread.sleep(delayMs);
-                        for (long offset : offsets) {
-                            handler.handle(new ProbeContext(offset), null);
+                        for (int i = 0; i < offsets.length; i++) {
+                            handler.handle(
+                                    new ProbeContext(offsets[i], timestamps[i]),
+                                    null);
                         }
                     } catch (InterruptedException e) {
                         Thread.currentThread().interrupt();
@@ -1222,9 +1252,15 @@ class RabbitMQScanTest {
 
     private static final class ProbeContext implements com.rabbitmq.stream.MessageHandler.Context {
         private final long offset;
+        private final long timestamp;
 
         private ProbeContext(long offset) {
+            this(offset, 0L);
+        }
+
+        private ProbeContext(long offset, long timestamp) {
             this.offset = offset;
+            this.timestamp = timestamp;
         }
 
         @Override
@@ -1234,7 +1270,7 @@ class RabbitMQScanTest {
 
         @Override
         public long timestamp() {
-            return 0;
+            return timestamp;
         }
 
         @Override

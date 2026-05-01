@@ -24,6 +24,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Logical representation of a RabbitMQ stream scan.
@@ -37,12 +38,6 @@ final class RabbitMQScan implements Scan {
     private static final Logger LOG = LoggerFactory.getLogger(RabbitMQScan.class);
     private static final long TAIL_PROBE_TIMEOUT_MS = 1_500L;
     private static final long MIN_TIMESTAMP_PROBE_TIMEOUT_MS = 250L;
-    private static final long CHUNK_DRAIN_IDLE_MS = 50L;
-    // Drain runs to completion when a chunk arrives in a tight burst, but the broker can
-    // keep granting credits on a busy stream. Cap by total time and offset count so
-    // planning cannot stall and `endingOffsets=timestamp` cannot drift toward `latest`.
-    private static final long CHUNK_DRAIN_MAX_MS = 200L;
-    private static final int CHUNK_DRAIN_MAX_OFFSETS = 4_096;
     private static final long RESOLVER_DRAIN_TIMEOUT_MS = 5_000L;
     private static final int TAIL_PROBE_EXECUTOR_PARALLELISM = Math.max(
             1,
@@ -499,64 +494,49 @@ final class RabbitMQScan implements Scan {
 
     /**
      * Resolve an ending offset by timestamp using a probe consumer.
-     * Finds the first chunk at or after the given timestamp, drains the rest of that
-     * chunk, then returns {@code maxObservedOffset + 1} as the exclusive end. Draining
-     * matters because the broker delivers a whole chunk; if we returned the chunk's
-     * first offset, messages later in the same chunk that fall <em>before</em> the
-     * timestamp would be incorrectly excluded. With this approach the boundary is
-     * chunk-granular on the upper side instead — a few messages past the timestamp may
-     * be included, which is the documented chunk-boundary behavior.
-     * If no messages exist at/after the timestamp, returns the stream tail
-     * (all available data is before the timestamp).
+     * Returns the offset of the first message whose timestamp is &gt;= the requested
+     * timestamp, used as an exclusive upper bound. The handler inspects each message's
+     * timestamp directly:
+     *
+     * <ul>
+     *   <li>When the publisher records per-message timestamps, the boundary is
+     *       message-precise — earlier messages in the matching chunk that are still
+     *       below the timestamp are included.</li>
+     *   <li>When the broker assigns chunk-aggregated timestamps (all messages in a
+     *       chunk share the same timestamp), the first message of the matching chunk
+     *       already satisfies {@code ts >= timestamp}, so the chunk is excluded as a
+     *       whole — matching the previous, well-tested behavior on the IT path.</li>
+     * </ul>
+     *
+     * If only earlier messages are observed (none at/after the timestamp), all
+     * available data is before the cutoff and the stream tail is returned.
      */
     private long resolveTimestampEndingOffset(Environment env, String stream, long timestamp) {
-        BlockingQueue<Long> observedOffsets = new LinkedBlockingQueue<>();
+        AtomicLong firstOffsetAtOrAfter = new AtomicLong(-1L);
+        CountDownLatch boundaryFound = new CountDownLatch(1);
         com.rabbitmq.stream.Consumer probe = null;
         try {
             probe = env.consumerBuilder()
                     .stream(stream)
                     .offset(com.rabbitmq.stream.OffsetSpecification.timestamp(timestamp))
                     .noTrackingStrategy()
-                    .messageHandler((context, message) -> observedOffsets.offer(context.offset()))
+                    .messageHandler((context, message) -> {
+                        if (context.timestamp() >= timestamp
+                                && firstOffsetAtOrAfter.compareAndSet(-1L, context.offset())) {
+                            boundaryFound.countDown();
+                        }
+                    })
                     .flow()
                     .initialCredits(1)
                     .strategy(ConsumerFlowStrategy.creditOnChunkArrival(1))
                     .builder()
                     .build();
 
-            Long observed = observedOffsets.poll(timestampProbeTimeoutMs(), TimeUnit.MILLISECONDS);
-            if (observed != null) {
-                long maxObserved = observed;
-                // Drain additional offsets from the matching delivery burst. The broker
-                // delivers a whole chunk in rapid succession with `creditOnChunkArrival(1)`,
-                // but it also keeps granting credits, so a busy stream could otherwise feed
-                // us forever. Bound the drain by both an idle gap, a hard wall-clock budget,
-                // and an offset cap to keep `endingOffsets=timestamp` from drifting toward
-                // `latest`.
-                long drainDeadlineNanos = System.nanoTime()
-                        + TimeUnit.MILLISECONDS.toNanos(CHUNK_DRAIN_MAX_MS);
-                int drained = 0;
-                while (drained < CHUNK_DRAIN_MAX_OFFSETS) {
-                    long remainingNanos = drainDeadlineNanos - System.nanoTime();
-                    if (remainingNanos <= 0L) {
-                        break;
-                    }
-                    long pollNanos = Math.min(
-                            remainingNanos,
-                            TimeUnit.MILLISECONDS.toNanos(CHUNK_DRAIN_IDLE_MS));
-                    Long next = observedOffsets.poll(pollNanos, TimeUnit.NANOSECONDS);
-                    if (next == null) {
-                        break;
-                    }
-                    if (next > maxObserved) {
-                        maxObserved = next;
-                    }
-                    drained++;
-                }
-                return maxObserved + 1L;
+            if (boundaryFound.await(timestampProbeTimeoutMs(), TimeUnit.MILLISECONDS)) {
+                return firstOffsetAtOrAfter.get();
             }
-            // No messages at/after timestamp: all data is before the cutoff.
-            // Use stream tail as ending offset (include everything).
+            // No message with ts >= requested timestamp arrived within the probe budget.
+            // Fall back to tail — all available data is before the cutoff.
             StreamStats stats = env.queryStreamStats(stream);
             return resolveLatestOffset(env, stream, stats);
         } catch (NoOffsetException e) {
@@ -572,14 +552,19 @@ final class RabbitMQScan implements Scan {
             throw new IllegalStateException(
                     "Failed to resolve timestamp end offset for stream '" + stream + "'", e);
         } finally {
-            if (probe != null) {
-                try {
-                    probe.close();
-                } catch (Exception ex) {
-                    LOG.debug("Error closing timestamp-end probe consumer for stream '{}'",
-                            stream, ex);
-                }
-            }
+            closeProbeQuietly(probe, stream);
+        }
+    }
+
+    private static void closeProbeQuietly(com.rabbitmq.stream.Consumer probe, String stream) {
+        if (probe == null) {
+            return;
+        }
+        try {
+            probe.close();
+        } catch (Exception ex) {
+            LOG.debug("Error closing timestamp-end probe consumer for stream '{}'",
+                    stream, ex);
         }
     }
 
