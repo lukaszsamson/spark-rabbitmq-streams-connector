@@ -90,14 +90,14 @@ class RealTimeModeIT extends AbstractRabbitMQIT {
                 .start();
 
         try {
-            awaitAtLeastRows(50, 30_000);
+            awaitAtLeastPayloadsFromStreamWithPrefix(sourceStream, "msg-", 50, 30_000);
         } finally {
             if (query.isActive()) {
                 query.stop();
             }
         }
 
-        Set<String> payloads = payloadsWithPrefix("msg-");
+        Set<String> payloads = payloadsFromStreamWithPrefix(sourceStream, "msg-");
         assertThat(payloads).hasSize(50);
     }
 
@@ -128,12 +128,12 @@ class RealTimeModeIT extends AbstractRabbitMQIT {
             publishMessages(sourceStream, 30);
 
             // Wait for messages to be processed
-            awaitAtLeastRows(30, 30_000);
+            awaitAtLeastPayloadsFromStreamWithPrefix(sourceStream, "msg-", 30, 30_000);
         } finally {
             query.stop();
         }
 
-        Set<String> payloads = payloadsWithPrefix("msg-");
+        Set<String> payloads = payloadsFromStreamWithPrefix(sourceStream, "msg-");
         assertThat(payloads).hasSize(30);
     }
 
@@ -334,7 +334,8 @@ class RealTimeModeIT extends AbstractRabbitMQIT {
                     .start();
 
             try {
-                awaitAtLeastRows(15, 30_000);
+                awaitAtLeastPayloadsWithPrefix("rtm-a-", 8, 30_000);
+                awaitAtLeastPayloadsWithPrefix("rtm-b-", 7, 30_000);
             } finally {
                 query.stop();
             }
@@ -371,15 +372,12 @@ class RealTimeModeIT extends AbstractRabbitMQIT {
                 .start();
 
         try {
-            long deadline = System.currentTimeMillis() + 30_000;
-            while (COLLECTED_ROWS.size() < 40 && System.currentTimeMillis() < deadline) {
-                Thread.sleep(500);
-            }
+            awaitAtLeastPayloadsFromStreamWithPrefix(sourceStream, "msg-", 40, 30_000);
         } finally {
             query.stop();
         }
 
-        assertThat(COLLECTED_ROWS.size()).isEqualTo(40);
+        assertThat(payloadsFromStreamWithPrefix(sourceStream, "msg-")).hasSize(40);
 
         // Verify broker stored the offset
         long storedOffset = queryStoredOffset(consumerName, sourceStream);
@@ -413,7 +411,7 @@ class RealTimeModeIT extends AbstractRabbitMQIT {
                 .start();
 
         try {
-            awaitAtLeastRows(20, 30_000);
+            awaitAtLeastPayloadsWithPrefix("rt-sac-", 20, 30_000);
         } finally {
             query.stop();
         }
@@ -444,10 +442,8 @@ class RealTimeModeIT extends AbstractRabbitMQIT {
                 .start();
 
         try {
-            long deadline = System.currentTimeMillis() + 30_000;
-            while (COLLECTED_ROWS.size() < 30 && System.currentTimeMillis() < deadline) {
-                Thread.sleep(500);
-            }
+            awaitAtLeastPayloadsWithPrefix("phase1-", 30, 30_000);
+            waitForCheckpointCommit(checkpointDir, 30_000);
         } finally {
             query1.stop();
         }
@@ -478,10 +474,7 @@ class RealTimeModeIT extends AbstractRabbitMQIT {
                 .start();
 
         try {
-            long deadline = System.currentTimeMillis() + 30_000;
-            while (COLLECTED_ROWS.size() < 20 && System.currentTimeMillis() < deadline) {
-                Thread.sleep(500);
-            }
+            awaitAtLeastPayloadsWithPrefix("phase2-", 20, 30_000);
         } finally {
             query2.stop();
         }
@@ -536,10 +529,7 @@ class RealTimeModeIT extends AbstractRabbitMQIT {
                     .start();
 
             try {
-                long deadline = System.currentTimeMillis() + 30_000;
-                while (COLLECTED_ROWS.size() < 30 && System.currentTimeMillis() < deadline) {
-                    Thread.sleep(500);
-                }
+                awaitAtLeastPayloadsWithPrefix("ss-msg-", 30, 30_000);
             } finally {
                 query.stop();
             }
@@ -583,7 +573,9 @@ class RealTimeModeIT extends AbstractRabbitMQIT {
                     .start();
 
             try {
-                awaitAtLeastRows(30, 30_000);
+                awaitAtLeastPayloadsWithPrefix("pre-p0-", 10, 30_000);
+                awaitAtLeastPayloadsWithPrefix("pre-p1-", 10, 30_000);
+                awaitAtLeastPayloadsWithPrefix("pre-p2-", 10, 30_000);
                 assertThat(payloadsWithPrefix("pre-p0-")).hasSize(10);
                 assertThat(payloadsWithPrefix("pre-p1-")).hasSize(10);
                 assertThat(payloadsWithPrefix("pre-p2-")).hasSize(10);
@@ -595,7 +587,8 @@ class RealTimeModeIT extends AbstractRabbitMQIT {
                 publishMessages(partition0, 8, "post-p0-");
                 publishMessages(partition1, 8, "post-p1-");
 
-                awaitAtLeastRows(16, 30_000);
+                awaitAtLeastPayloadsWithPrefix("post-p0-", 8, 30_000);
+                awaitAtLeastPayloadsWithPrefix("post-p1-", 8, 30_000);
             } finally {
                 if (query.isActive()) {
                     query.stop();
@@ -634,7 +627,7 @@ class RealTimeModeIT extends AbstractRabbitMQIT {
         try {
             Thread.sleep(3000);
             publishMessages(sourceStream, 15, "new-");
-            awaitAtLeastRows(15, 30_000);
+            awaitAtLeastPayloadsWithPrefix("new-", 15, 30_000);
         } finally {
             query.stop();
         }
@@ -669,7 +662,7 @@ class RealTimeModeIT extends AbstractRabbitMQIT {
                 .start();
 
         try {
-            awaitAtLeastRows(12, 30_000);
+            awaitAtLeastPayloadsWithPrefix("after-", 12, 30_000);
         } finally {
             query.stop();
         }
@@ -811,10 +804,42 @@ class RealTimeModeIT extends AbstractRabbitMQIT {
         }
     }
 
-    private static void awaitAtLeastRows(int expectedMinRows, long timeoutMs) throws Exception {
+    private static void awaitAtLeastPayloadsWithPrefix(
+            String prefix, int expectedMinRows, long timeoutMs) throws Exception {
         long deadline = System.currentTimeMillis() + timeoutMs;
-        while (COLLECTED_ROWS.size() < expectedMinRows && System.currentTimeMillis() < deadline) {
+        while (payloadsWithPrefix(prefix).size() < expectedMinRows
+                && System.currentTimeMillis() < deadline) {
             Thread.sleep(200);
+        }
+    }
+
+    private static void awaitAtLeastPayloadsFromStreamWithPrefix(
+            String stream, String prefix, int expectedMinRows, long timeoutMs) throws Exception {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (payloadsFromStreamWithPrefix(stream, prefix).size() < expectedMinRows
+                && System.currentTimeMillis() < deadline) {
+            Thread.sleep(200);
+        }
+    }
+
+    private static void waitForCheckpointCommit(Path checkpointDir, long timeoutMs) throws Exception {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (!hasCheckpointCommit(checkpointDir) && System.currentTimeMillis() < deadline) {
+            Thread.sleep(200);
+        }
+        assertThat(hasCheckpointCommit(checkpointDir))
+                .as("checkpoint commit should exist before restarting real-time query")
+                .isTrue();
+    }
+
+    private static boolean hasCheckpointCommit(Path checkpointDir) throws Exception {
+        Path commitsDir = checkpointDir.resolve("commits");
+        if (!Files.isDirectory(commitsDir)) {
+            return false;
+        }
+        try (java.util.stream.Stream<Path> files = Files.list(commitsDir)) {
+            return files.anyMatch(path -> !Files.isDirectory(path)
+                    && !path.getFileName().toString().startsWith("."));
         }
     }
 
@@ -831,6 +856,22 @@ class RealTimeModeIT extends AbstractRabbitMQIT {
     private static Set<String> payloadsWithPrefix(String prefix) {
         Set<String> payloads = new HashSet<>();
         for (Row row : COLLECTED_ROWS) {
+            byte[] value = row.getAs("value");
+            String payload = new String(value, StandardCharsets.UTF_8);
+            if (payload.startsWith(prefix)) {
+                payloads.add(payload);
+            }
+        }
+        return payloads;
+    }
+
+    private static Set<String> payloadsFromStreamWithPrefix(String stream, String prefix) {
+        Set<String> payloads = new HashSet<>();
+        for (Row row : COLLECTED_ROWS) {
+            String rowStream = row.getAs("stream");
+            if (!stream.equals(rowStream)) {
+                continue;
+            }
             byte[] value = row.getAs("value");
             String payload = new String(value, StandardCharsets.UTF_8);
             if (payload.startsWith(prefix)) {
