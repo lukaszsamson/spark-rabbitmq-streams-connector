@@ -3,7 +3,6 @@ package io.github.lukaszsamson.spark.rabbitmq;
 import com.rabbitmq.stream.Environment;
 import java.lang.reflect.Method;
 import java.util.List;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
 
 /**
@@ -13,26 +12,55 @@ import java.util.function.Function;
  * {@code Environment.locatorOperation(Function)} and the locator client's
  * {@code partitions(String)} method. These hooks have been part of the
  * official rabbitmq-stream-java-client since 0.x and remain present through
- * the 1.x line; the resolved {@link Method} handles are cached statically per
- * runtime class to avoid re-doing the lookup on every superstream discovery.
+ * the 1.x line; the resolved {@link Method} handles are cached per runtime
+ * class via {@link ClassValue} so cached entries do not pin classloaders
+ * (Spark may load shaded/unshaded copies of the connector under separate
+ * classloaders that should be reclaimable).
  */
 final class SuperStreamPartitionDiscovery {
 
     /**
-     * Cache of resolved {@code Environment#locatorOperation(Function)} {@link Method}
-     * handles, keyed by the concrete environment runtime class. Populated on first
-     * use; entries live for the lifetime of the JVM (one per runtime class).
+     * Per-class cache for the resolved {@code Environment#locatorOperation(Function)}
+     * {@link Method} handle. Uses {@link ClassValue} so the cache entry is
+     * weakly tied to the {@link Class}'s lifetime, preventing classloader
+     * pinning in long-running Spark JVMs.
      */
-    private static final ConcurrentHashMap<Class<?>, Method> LOCATOR_OPERATION_CACHE =
-            new ConcurrentHashMap<>();
+    private static final ClassValue<Method> LOCATOR_OPERATION_CACHE = new ClassValue<>() {
+        @Override
+        protected Method computeValue(Class<?> environmentClass) {
+            try {
+                Method method = environmentClass.getDeclaredMethod(
+                        "locatorOperation", Function.class);
+                method.setAccessible(true);
+                return method;
+            } catch (NoSuchMethodException e) {
+                throw new IllegalStateException(
+                        "rabbitmq-stream-java-client " + environmentClass.getName() +
+                                " does not expose locatorOperation(Function); " +
+                                "client version is incompatible", e);
+            }
+        }
+    };
 
     /**
-     * Cache of resolved {@code Client#partitions(String)} {@link Method} handles,
-     * keyed by the concrete client runtime class returned by the locator
-     * operation. Populated lazily on first use.
+     * Per-class cache for the resolved {@code partitions(String)} {@link Method}
+     * handle on the locator client returned by {@code locatorOperation}. Uses
+     * {@link ClassValue} for the same classloader-friendliness reasons as
+     * {@link #LOCATOR_OPERATION_CACHE}.
      */
-    private static final ConcurrentHashMap<Class<?>, Method> PARTITIONS_METHOD_CACHE =
-            new ConcurrentHashMap<>();
+    private static final ClassValue<Method> PARTITIONS_METHOD_CACHE = new ClassValue<>() {
+        @Override
+        protected Method computeValue(Class<?> clientClass) {
+            try {
+                return clientClass.getMethod("partitions", String.class);
+            } catch (NoSuchMethodException e) {
+                throw new IllegalStateException(
+                        "rabbitmq-stream-java-client locator " + clientClass.getName() +
+                                " does not expose partitions(String); " +
+                                "client version is incompatible", e);
+            }
+        }
+    };
 
     private SuperStreamPartitionDiscovery() {}
 
@@ -65,11 +93,11 @@ final class SuperStreamPartitionDiscovery {
     private static List<String> discoverPartitionsViaEnvironment(Environment environment,
                                                                  String superStream) {
         try {
-            Method locatorOperation = resolveLocatorOperation(environment.getClass());
+            Method locatorOperation = LOCATOR_OPERATION_CACHE.get(environment.getClass());
 
             Function<Object, Object> partitionsOperation = client -> {
                 try {
-                    Method partitionsMethod = resolvePartitionsMethod(client.getClass());
+                    Method partitionsMethod = PARTITIONS_METHOD_CACHE.get(client.getClass());
                     return partitionsMethod.invoke(client, superStream);
                 } catch (ReflectiveOperationException e) {
                     throw new IllegalStateException(
@@ -86,31 +114,6 @@ final class SuperStreamPartitionDiscovery {
             throw new IllegalStateException(
                     "Failed to query partitions for super stream '" + superStream + "'", e);
         }
-    }
-
-    private static Method resolveLocatorOperation(Class<?> environmentClass)
-            throws ReflectiveOperationException {
-        Method cached = LOCATOR_OPERATION_CACHE.get(environmentClass);
-        if (cached != null) {
-            return cached;
-        }
-        Method resolved = environmentClass.getDeclaredMethod("locatorOperation", Function.class);
-        resolved.setAccessible(true);
-        // putIfAbsent for benign-race-on-first-call semantics (Method.equals
-        // distinguishes by declaring class + signature, so duplicates are fine).
-        Method existing = LOCATOR_OPERATION_CACHE.putIfAbsent(environmentClass, resolved);
-        return existing != null ? existing : resolved;
-    }
-
-    private static Method resolvePartitionsMethod(Class<?> clientClass)
-            throws ReflectiveOperationException {
-        Method cached = PARTITIONS_METHOD_CACHE.get(clientClass);
-        if (cached != null) {
-            return cached;
-        }
-        Method resolved = clientClass.getMethod("partitions", String.class);
-        Method existing = PARTITIONS_METHOD_CACHE.putIfAbsent(clientClass, resolved);
-        return existing != null ? existing : resolved;
     }
 
     @SuppressWarnings("unchecked")

@@ -1149,14 +1149,29 @@ class BaseRabbitMQMicroBatchStream
 
     // ---- Read limit dispatch ----
 
+    /**
+     * Top-level read-limit dispatch entrypoint: allocates the per-trigger
+     * rotation seed exactly once and delegates to the overridable
+     * {@link #applyReadLimit(Map, Map, ReadLimit, long)} so that
+     * {@link CompositeReadLimit} components share a single rotation value
+     * within one trigger.
+     */
+    final Map<String, Long> applyReadLimit(
+            Map<String, Long> startOffsets,
+            Map<String, Long> tailOffsets,
+            ReadLimit limit) {
+        return applyReadLimit(
+                startOffsets, tailOffsets, limit,
+                readLimitTriggerCounter.getAndIncrement());
+    }
+
     // Spark 3.5 compat: uses reflection for ReadMaxBytes (not available in 3.5).
     // Overridden in spark40/spark41 subclasses to use instanceof ReadMaxBytes directly.
     Map<String, Long> applyReadLimit(
             Map<String, Long> startOffsets,
             Map<String, Long> tailOffsets,
-            ReadLimit limit) {
-
-        long rotation = readLimitTriggerCounter.getAndIncrement();
+            ReadLimit limit,
+            long rotation) {
 
         if (limit instanceof ReadAllAvailable) {
             return tailOffsets;
@@ -1184,7 +1199,7 @@ class BaseRabbitMQMicroBatchStream
             Map<String, Long> result = tailOffsets;
             for (ReadLimit component : composite.getReadLimits()) {
                 Map<String, Long> componentEnd = applyReadLimit(
-                        startOffsets, tailOffsets, component);
+                        startOffsets, tailOffsets, component, rotation);
                 result = ReadLimitBudget.mostRestrictive(result, componentEnd);
             }
             return result;
