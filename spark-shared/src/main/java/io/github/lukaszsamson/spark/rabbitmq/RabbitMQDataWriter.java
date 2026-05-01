@@ -55,6 +55,7 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
     private final AtomicLong lastConfirmationFailureCode = new AtomicLong(-1L);
     private final Object confirmMonitor = new Object();
     private final AtomicBoolean closeCalled = new AtomicBoolean(false);
+    private final AtomicBoolean confirmRouteCountingActive = new AtomicBoolean(false);
 
     // Deduplication: monotonic publishing ID
     private long nextPublishingId = -1;
@@ -146,38 +147,52 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
                 }
             }
 
-            // Track outstanding confirms
+            // Track at least one outstanding confirm; superstream custom routing may
+            // add more synchronously when the client resolves the destination routes.
             outstandingConfirms.incrementAndGet();
             long sendStartNanos = System.nanoTime();
 
             // Send with confirmation handler
             try {
+                confirmRouteCountingActive.set(true);
                 producer.send(message, confirmationStatus -> {
                     long elapsedMs = TimeUnit.NANOSECONDS.toMillis(
                             System.nanoTime() - sendStartNanos);
                     writeLatencyMs.addAndGet(Math.max(0L, elapsedMs));
-                    if (!confirmationStatus.isConfirmed()) {
+                    if (reconcileOutstandingConfirm()) {
+                        if (!confirmationStatus.isConfirmed()) {
+                            confirmationFailureCount.incrementAndGet();
+                            lastConfirmationFailureCode.set(confirmationStatus.getCode());
+                            publishErrors.incrementAndGet();
+                            sendError.compareAndSet(null,
+                                    new IOException("Message confirmation failed with code " +
+                                            confirmationStatus.getCode() +
+                                            " on partition " + partitionId));
+                        } else {
+                            publishConfirms.incrementAndGet();
+                        }
+                    } else if (!confirmationStatus.isConfirmed()) {
                         confirmationFailureCount.incrementAndGet();
                         lastConfirmationFailureCode.set(confirmationStatus.getCode());
-                        publishErrors.incrementAndGet();
                         sendError.compareAndSet(null,
                                 new IOException("Message confirmation failed with code " +
                                         confirmationStatus.getCode() +
                                         " on partition " + partitionId));
-                    } else {
-                        publishConfirms.incrementAndGet();
                     }
                     synchronized (confirmMonitor) {
-                        long remaining = outstandingConfirms.decrementAndGet();
+                        long remaining = outstandingConfirms.get();
                         if (remaining == 0 || sendError.get() != null) {
                             confirmMonitor.notifyAll();
                         }
                     }
                 });
             } catch (Exception e) {
-                outstandingConfirms.decrementAndGet();
-                publishErrors.incrementAndGet();
+                if (reconcileOutstandingConfirm()) {
+                    publishErrors.incrementAndGet();
+                }
                 throw new IOException("Failed to send message on partition " + partitionId, e);
+            } finally {
+                confirmRouteCountingActive.set(false);
             }
 
             // Track metrics
@@ -378,12 +393,22 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
                     LOG.warn("Producer for partition {} is recovering ({}->{})",
                             partitionId, from, to);
                 } else if (to == Resource.State.CLOSED) {
-                    LOG.warn("Producer for partition {} has closed ({}->{})",
-                            partitionId, from, to);
-                    sendError.compareAndSet(null,
-                            new IOException("Producer closed unexpectedly on partition " + partitionId));
-                    synchronized (confirmMonitor) {
-                        confirmMonitor.notifyAll();
+                    if (closeCalled.get()) {
+                        LOG.debug("Producer for partition {} closed after requested close ({}->{})",
+                                partitionId, from, to);
+                    } else {
+                        LOG.warn("Producer for partition {} has closed ({}->{})",
+                                partitionId, from, to);
+                        long unreconciled = reconcileOutstandingConfirmsAsErrors();
+                        if (unreconciled > 0) {
+                            LOG.warn("Producer for partition {} closed with {} unreconciled confirms",
+                                    partitionId, unreconciled);
+                        }
+                        sendError.compareAndSet(null,
+                                new IOException("Producer closed unexpectedly on partition " + partitionId));
+                        synchronized (confirmMonitor) {
+                            confirmMonitor.notifyAll();
+                        }
                     }
                 } else {
                     LOG.debug("Producer for partition {} state change: {}->{}",
@@ -505,14 +530,42 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
                         ConnectorOptions.PARTITIONER_CLASS);
                 routing.strategy((message, metadata) -> {
                     ConnectorMessageView messageView = toMessageView(message);
-                    return customStrategy.route(
+                    java.util.List<String> routes = customStrategy.route(
                             messageView,
                             new ConnectorRoutingMetadataView(metadata));
+                    addExpectedConfirms(routes.size());
+                    return routes;
                 }).producerBuilder();
             }
         }
 
         return builder;
+    }
+
+    private void addExpectedConfirms(int expectedConfirmCount) {
+        if (confirmRouteCountingActive.get() && expectedConfirmCount > 1) {
+            outstandingConfirms.addAndGet(expectedConfirmCount - 1L);
+        }
+    }
+
+    private boolean reconcileOutstandingConfirm() {
+        while (true) {
+            long current = outstandingConfirms.get();
+            if (current <= 0) {
+                return false;
+            }
+            if (outstandingConfirms.compareAndSet(current, current - 1)) {
+                return true;
+            }
+        }
+    }
+
+    private long reconcileOutstandingConfirmsAsErrors() {
+        long unreconciled = outstandingConfirms.getAndSet(0);
+        if (unreconciled > 0) {
+            publishErrors.addAndGet(unreconciled);
+        }
+        return unreconciled;
     }
 
     /**

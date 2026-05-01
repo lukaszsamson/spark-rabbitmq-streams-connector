@@ -1096,6 +1096,25 @@ class RabbitMQWriteTest {
         }
 
         @Test
+        void initProducerListenerIgnoresClosedAfterRequestedClose() throws Exception {
+            RabbitMQDataWriter writer = new RabbitMQDataWriter(
+                    minimalSinkOptions(), minimalSinkSchema(), 0, 1, -1);
+            CapturingProducerBuilder builder = new CapturingProducerBuilder();
+            seedEnvironmentPool(minimalSinkOptions(), new BuilderEnvironment(builder));
+
+            writer.write(new GenericInternalRow(new Object[]{"x".getBytes()}));
+            writer.close();
+
+            builder.listener.handle(new FakeStateListenerContext(
+                    com.rabbitmq.stream.Resource.State.OPEN,
+                    com.rabbitmq.stream.Resource.State.CLOSED));
+
+            var sendError = (java.util.concurrent.atomic.AtomicReference<?>) getPrivateField(
+                    writer, "sendError");
+            assertThat(sendError.get()).isNull();
+        }
+
+        @Test
         void initProducerFailureAfterBuildCleansUpProducerAndEnvironment() throws Exception {
             Map<String, String> opts = minimalSinkMap();
             opts.put("producerName", "dedup");
@@ -1129,10 +1148,9 @@ class RabbitMQWriteTest {
             RabbitMQDataWriter writer = new RabbitMQDataWriter(
                     options, minimalSinkSchema(), 0, 1, -1);
             CapturingProducerBuilder builder = new CapturingProducerBuilder();
+            builder.customProducer = new DeferredConfirmationProducer();
             seedEnvironmentPool(options, new BuilderEnvironment(builder));
             writer.write(new GenericInternalRow(new Object[]{"x".getBytes()}));
-
-            setPrivateField(writer, "outstandingConfirms", new java.util.concurrent.atomic.AtomicLong(1));
 
             java.util.concurrent.atomic.AtomicReference<Throwable> commitError =
                     new java.util.concurrent.atomic.AtomicReference<>();
@@ -1165,6 +1183,91 @@ class RabbitMQWriteTest {
             assertThat(commitError.get())
                     .isInstanceOf(IOException.class)
                     .hasMessageContaining("failed confirmation");
+            assertThat(metricsByName(writer.currentMetricsValues()))
+                    .containsEntry("recordsWritten", 1L)
+                    .containsEntry("publishConfirms", 0L)
+                    .containsEntry("publishErrors", 1L);
+        }
+
+        @Test
+        void superstreamMultiRouteCommitWaitsForEveryConfirmation() throws Exception {
+            TestMultiRouteStrategy.invoked = false;
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("superstream", "super");
+            opts.put("routingStrategy", "custom");
+            opts.put("partitionerClass", TestMultiRouteStrategy.class.getName());
+            opts.put("publisherConfirmTimeoutMs", "30000");
+            ConnectorOptions options = new ConnectorOptions(opts);
+
+            RabbitMQDataWriter writer = new RabbitMQDataWriter(
+                    options, minimalSinkSchema(), 0, 1, -1);
+            CapturingProducerBuilder builder = new CapturingProducerBuilder();
+            RoutingFanOutProducer producer = new RoutingFanOutProducer(builder);
+            builder.customProducer = producer;
+            seedEnvironmentPool(options, new BuilderEnvironment(builder));
+
+            writer.write(new GenericInternalRow(new Object[]{"x".getBytes()}));
+            producer.confirmRoute(0, true, (short) 0);
+
+            java.util.concurrent.atomic.AtomicReference<Throwable> commitError =
+                    new java.util.concurrent.atomic.AtomicReference<>();
+            Thread commitThread = new Thread(() -> {
+                try {
+                    writer.commit();
+                } catch (Throwable t) {
+                    commitError.set(t);
+                }
+            }, "rabbitmq-writer-multi-route-commit-test");
+            commitThread.start();
+
+            Thread.sleep(100L);
+            assertThat(commitThread.isAlive()).isTrue();
+
+            producer.confirmRoute(1, true, (short) 0);
+            commitThread.join(2_000L);
+            if (commitThread.isAlive()) {
+                commitThread.interrupt();
+            }
+
+            assertThat(commitThread.isAlive()).isFalse();
+            assertThat(commitError.get()).isNull();
+            assertThat(TestMultiRouteStrategy.invoked).isTrue();
+            assertThat(metricsByName(writer.currentMetricsValues()))
+                    .containsEntry("recordsWritten", 1L)
+                    .containsEntry("publishConfirms", 2L)
+                    .containsEntry("publishErrors", 0L);
+        }
+
+        @Test
+        void superstreamMultiRouteCommitFailsIfAnyConfirmationFails() throws Exception {
+            TestMultiRouteStrategy.invoked = false;
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("superstream", "super");
+            opts.put("routingStrategy", "custom");
+            opts.put("partitionerClass", TestMultiRouteStrategy.class.getName());
+            ConnectorOptions options = new ConnectorOptions(opts);
+
+            RabbitMQDataWriter writer = new RabbitMQDataWriter(
+                    options, minimalSinkSchema(), 0, 1, -1);
+            CapturingProducerBuilder builder = new CapturingProducerBuilder();
+            RoutingFanOutProducer producer = new RoutingFanOutProducer(builder);
+            builder.customProducer = producer;
+            seedEnvironmentPool(options, new BuilderEnvironment(builder));
+
+            writer.write(new GenericInternalRow(new Object[]{"x".getBytes()}));
+            producer.confirmRoute(0, true, (short) 0);
+            producer.confirmRoute(1, false, (short) 42);
+
+            assertThatThrownBy(writer::commit)
+                    .isInstanceOf(IOException.class)
+                    .hasMessageContaining("confirmation failures=1")
+                    .hasMessageContaining("lastCode=42");
+            assertThat(metricsByName(writer.currentMetricsValues()))
+                    .containsEntry("recordsWritten", 1L)
+                    .containsEntry("publishConfirms", 1L)
+                    .containsEntry("publishErrors", 1L);
         }
 
         @Test
@@ -1813,6 +1916,7 @@ class RabbitMQWriteTest {
         private final Set<String> activeProducerNames;
         private com.rabbitmq.stream.Producer customProducer;
         private java.util.function.Function<com.rabbitmq.stream.Message, String> routingExtractor;
+        private com.rabbitmq.stream.RoutingStrategy routingStrategy;
         private int maxInFlight;
         private long confirmTimeoutMs;
         private long enqueueTimeoutMs;
@@ -2038,6 +2142,7 @@ class RabbitMQWriteTest {
         @Override
         public com.rabbitmq.stream.ProducerBuilder.RoutingConfiguration strategy(
                 com.rabbitmq.stream.RoutingStrategy routingStrategy) {
+            builder.routingStrategy = routingStrategy;
             com.rabbitmq.stream.Message message = CODEC.messageBuilder()
                     .applicationProperties().entry("routing_key", "rk-1")
                     .messageBuilder()
@@ -2050,6 +2155,49 @@ class RabbitMQWriteTest {
         @Override
         public com.rabbitmq.stream.ProducerBuilder producerBuilder() {
             return builder;
+        }
+    }
+
+    private static final class RoutingFanOutProducer implements com.rabbitmq.stream.Producer {
+        private static final com.rabbitmq.stream.codec.QpidProtonCodec CODEC =
+                new com.rabbitmq.stream.codec.QpidProtonCodec();
+        private final CapturingProducerBuilder builder;
+        private final java.util.List<com.rabbitmq.stream.Message> messages = new java.util.ArrayList<>();
+        private final java.util.List<com.rabbitmq.stream.ConfirmationHandler> handlers =
+                new java.util.ArrayList<>();
+
+        private RoutingFanOutProducer(CapturingProducerBuilder builder) {
+            this.builder = builder;
+        }
+
+        @Override
+        public com.rabbitmq.stream.MessageBuilder messageBuilder() {
+            return CODEC.messageBuilder();
+        }
+
+        @Override
+        public long getLastPublishingId() {
+            return 0L;
+        }
+
+        @Override
+        public void send(com.rabbitmq.stream.Message message,
+                         com.rabbitmq.stream.ConfirmationHandler confirmationHandler) {
+            java.util.List<String> routes = builder.routingStrategy.route(
+                    message, new RoutingMetadata(java.util.List.of("p1", "p2")));
+            for (int i = 0; i < routes.size(); i++) {
+                messages.add(message);
+                handlers.add(confirmationHandler);
+            }
+        }
+
+        void confirmRoute(int routeIndex, boolean confirmed, short code) {
+            handlers.get(routeIndex).handle(new com.rabbitmq.stream.ConfirmationStatus(
+                    messages.get(routeIndex), confirmed, code));
+        }
+
+        @Override
+        public void close() {
         }
     }
 
@@ -2097,6 +2245,17 @@ class RabbitMQWriteTest {
                 }
             }
             return java.util.List.of(metadata.partitions().get(0));
+        }
+    }
+
+    public static final class TestMultiRouteStrategy implements ConnectorRoutingStrategy {
+        static boolean invoked = false;
+
+        @Override
+        public java.util.List<String> route(
+                ConnectorMessageView message, ConnectorRoutingStrategy.Metadata metadata) {
+            invoked = true;
+            return metadata.partitions();
         }
     }
 
