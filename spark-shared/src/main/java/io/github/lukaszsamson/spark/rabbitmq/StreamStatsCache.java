@@ -25,7 +25,7 @@ final class StreamStatsCache {
 
     /** Sentinel for "field threw NoOffsetException at capture time". */
     private static final long NO_OFFSET = Long.MIN_VALUE;
-    /** Sentinel for "field threw a non-NoOffset RuntimeException at capture time". */
+    /** Sentinel for "field is unsupported on this broker (older version)". */
     private static final long UNSUPPORTED = Long.MIN_VALUE + 1;
 
     private final long ttlNanos;
@@ -46,10 +46,10 @@ final class StreamStatsCache {
         if (cached != null && nowNanos < cached.expiresAtNanos) {
             return cached.stats;
         }
-        // Capture outside the cache so concurrent loaders don't double-count
-        // even though queryStreamStats is normally cheap. We tolerate the rare
-        // duplicate query during a stampede; correctness only requires that
-        // every read sees a consistent snapshot.
+        // Best-effort de-duplication only. Concurrent callers can still race between
+        // get() and put() and issue duplicate queryStreamStats calls for the same
+        // stream during a cache miss. We tolerate that rare stampede because
+        // correctness only requires that every read sees a consistent snapshot.
         StreamStats fresh = capture(env.queryStreamStats(stream));
         long expiresAtNanos = nowNanos + ttlNanos;
         entries.put(stream, new Entry(fresh, expiresAtNanos));
@@ -72,25 +72,34 @@ final class StreamStatsCache {
     }
 
     private static StreamStats capture(StreamStats live) {
-        long firstOffset = readOrSentinel(live::firstOffset);
-        long committedOffset = readOrSentinel(live::committedOffset);
-        long committedChunkId = readOrSentinel(live::committedChunkId);
-        return new SnapshotStreamStats(firstOffset, committedOffset, committedChunkId);
-    }
-
-    private static long readOrSentinel(LongSupplierWithExceptions supplier) {
+        // firstOffset() and committedChunkId() throw only NoOffsetException for the
+        // empty-stream case on every supported broker; let other RuntimeExceptions
+        // bubble so unexpected failures aren't silently masked as "unsupported".
+        long firstOffset;
         try {
-            return supplier.get();
+            firstOffset = live.firstOffset();
         } catch (NoOffsetException e) {
-            return NO_OFFSET;
-        } catch (RuntimeException e) {
-            return UNSUPPORTED;
+            firstOffset = NO_OFFSET;
         }
-    }
-
-    @FunctionalInterface
-    private interface LongSupplierWithExceptions {
-        long get();
+        long committedChunkId;
+        try {
+            committedChunkId = live.committedChunkId();
+        } catch (NoOffsetException e) {
+            committedChunkId = NO_OFFSET;
+        }
+        // committedOffset() additionally throws non-NoOffset RuntimeExceptions on
+        // older brokers (RabbitMQ < 4.3) where it isn't supported. Treat those as
+        // UNSUPPORTED so callers fall back to committedChunkId, which is the same
+        // contract resolveTailOffset() expected of the live broker.
+        long committedOffset;
+        try {
+            committedOffset = live.committedOffset();
+        } catch (NoOffsetException e) {
+            committedOffset = NO_OFFSET;
+        } catch (RuntimeException e) {
+            committedOffset = UNSUPPORTED;
+        }
+        return new SnapshotStreamStats(firstOffset, committedOffset, committedChunkId);
     }
 
     private record Entry(StreamStats stats, long expiresAtNanos) {}
