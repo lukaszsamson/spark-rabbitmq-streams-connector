@@ -142,6 +142,7 @@ class BaseRabbitMQMicroBatchStream
     final AtomicLong readLimitTriggerCounter = new AtomicLong();
 
     record CachedTailProbe(long tailExclusive, long expiresAtNanos) {}
+    record TailRefresh(long tailExclusive, boolean confirmed) {}
     record LatestOffsetInvocationCache(
             String startOffsetJson,
             String readLimitKey,
@@ -234,19 +235,14 @@ class BaseRabbitMQMicroBatchStream
 
                 if (result.hasFailures()) {
                     if (consumerNameExplicit) {
-                        if (result.wasInterruptedOrTimedOut()) {
-                            LOG.warn("Stored offset lookup for explicit consumer '{}' was interrupted/timed out "
-                                            + "on streams {}. Falling back to startingOffsets for those streams.",
-                                    consumerName, result.getFailedStreams());
-                        } else {
-                            // Explicit consumerName: fail fast on non-fatal lookup failures
-                            // (e.g. tracking-consumer limits)
-                            throw new IllegalStateException(
-                                    "Stored offset lookup failed for consumer '" + consumerName +
-                                            "' on streams: " + result.getFailedStreams() +
-                                            ". Since consumerName is explicitly configured, " +
-                                            "non-fatal lookup failures are treated as fatal.");
-                        }
+                        // Explicit consumerName means broker-tracked progress is authoritative.
+                        // Any lookup failure, including timeout/interrupt, must not silently
+                        // restart from configured startingOffsets.
+                        throw new IllegalStateException(
+                                "Stored offset lookup failed for consumer '" + consumerName +
+                                        "' on streams: " + result.getFailedStreams() +
+                                        ". Since consumerName is explicitly configured, " +
+                                        "lookup failures are treated as fatal.");
                     }
                     LOG.warn("Stored offset lookup had non-fatal failures for {} consumer '{}'"
                                     + " on streams {}. Falling back to startingOffsets for those streams.",
@@ -926,18 +922,51 @@ class BaseRabbitMQMicroBatchStream
             }
         }
 
-        // Ensure tail offsets never go backwards due to failed per-stream queries
-        // (queryStreamTailOffset returns 0 on failure which may be less than start)
-        Map<String, Long> safeTail = new LinkedHashMap<>(tailOffsets);
-        for (Map.Entry<String, Long> entry : safeTail.entrySet()) {
-            long startOff = effectiveStartMap.getOrDefault(entry.getKey(), 0L);
-            if (entry.getValue() < startOff) {
-                entry.setValue(startOff);
+        if (options.isFailOnDataLoss()) {
+            Map<String, Long> confirmedTailOffsets = new LinkedHashMap<>(tailOffsets);
+            for (Map.Entry<String, Long> entry : tailOffsets.entrySet()) {
+                String stream = entry.getKey();
+                long startOff = effectiveStartMap.getOrDefault(stream, 0L);
+                long endOff = entry.getValue();
+                if (endOff < startOff) {
+                    TailRefresh refreshed = refreshTailOffsetForDataLossCheck(stream, endOff);
+                    if (refreshed.tailExclusive() >= startOff) {
+                        confirmedTailOffsets.put(
+                                stream,
+                                availableNowActive ? startOff : refreshed.tailExclusive());
+                        continue;
+                    }
+                    // Reuse validation for its retention/data-loss throw before reporting
+                    // an indeterminate tail that still sits behind the requested start.
+                    long validatedStart = validateStartOffset(stream, startOff, refreshed.tailExclusive());
+                    if (validatedStart < 0L || validatedStart > startOff || refreshed.confirmed()) {
+                        throw new IllegalStateException(
+                                "Tail offset " + refreshed.tailExclusive()
+                                        + " is before requested start offset "
+                                        + startOff + " in stream '" + stream + "'. "
+                                        + "Data may have been lost due to stream truncation or recreation. "
+                                        + "Set failOnDataLoss=false to advance.");
+                    }
+                    LOG.warn("Tail offset estimate {} is before requested start offset {} "
+                                    + "in stream '{}', but the requested start is still readable. "
+                                    + "Treating the tail as stale for this batch.",
+                            refreshed.tailExclusive(), startOff, stream);
+                    confirmedTailOffsets.put(stream, startOff);
+                }
             }
-        }
-        tailOffsets = safeTail;
+            tailOffsets = confirmedTailOffsets;
+        } else {
+            // Ensure tail offsets never go backwards due to stale snapshots or retention.
+            // With failOnDataLoss=false, clamp and let validation normalize stale starts.
+            Map<String, Long> safeTail = new LinkedHashMap<>(tailOffsets);
+            for (Map.Entry<String, Long> entry : safeTail.entrySet()) {
+                long startOff = effectiveStartMap.getOrDefault(entry.getKey(), 0L);
+                if (entry.getValue() < startOff) {
+                    entry.setValue(startOff);
+                }
+            }
+            tailOffsets = safeTail;
 
-        if (!options.isFailOnDataLoss()) {
             // Normalize stale starts before applying read limits. Without this, rate-limited
             // planning can advance from a stale retained offset in tiny steps (e.g. +100/trigger),
             // producing repeated empty batches when failOnDataLoss=false.
@@ -1843,8 +1872,10 @@ class BaseRabbitMQMicroBatchStream
 
         if (probedTail == 0L && latestStartedOnEmptyStreams.contains(stream)) {
             try {
-                stats.firstOffset();
-                resolved = Math.max(resolved, stats.committedChunkId() + 1L);
+                long firstAvailable = stats.firstOffset();
+                resolved = Math.max(
+                        resolved,
+                        Math.max(statsTail, firstAvailable + 1L));
             } catch (NoOffsetException e) {
                 return 0L;
             } catch (RuntimeException e) {
@@ -1857,6 +1888,63 @@ class BaseRabbitMQMicroBatchStream
             latestStartedOnEmptyStreams.remove(stream);
         }
         return resolved;
+    }
+
+    private TailRefresh refreshTailOffsetForDataLossCheck(String stream, long currentTail) {
+        latestTailProbeCache.remove(stream);
+        Environment env = getEnvironment();
+        StreamStats stats;
+        try {
+            stats = env.queryStreamStats(stream);
+        } catch (com.rabbitmq.stream.StreamDoesNotExistException e) {
+            throw new IllegalStateException(
+                    "Stream '" + stream + "' does not exist. "
+                            + "It may have been deleted. Set failOnDataLoss=false to skip.", e);
+        } catch (Exception e) {
+            throw new IllegalStateException(
+                    "Failed to query stream stats for '" + stream + "'", e);
+        }
+
+        long refreshedTail = 0L;
+        boolean confirmed = false;
+        try {
+            refreshedTail = stats.committedOffset() + 1L;
+            confirmed = true;
+        } catch (NoOffsetException e) {
+            // Broker does not expose a precise tail for this stream yet.
+        } catch (RuntimeException e) {
+            LOG.debug("committedOffset() not available while refreshing tail for '{}': {}",
+                    stream, e.toString());
+        }
+        try {
+            refreshedTail = Math.max(refreshedTail, stats.committedChunkId());
+        } catch (NoOffsetException e) {
+            // Empty streams have a confirmed tail of 0.
+            confirmed = true;
+        }
+
+        long probedTail = probeTailOffsetFromLastMessageWithRetry(env, stream);
+        if (probedTail > 0L) {
+            refreshedTail = Math.max(refreshedTail, probedTail);
+            confirmed = true;
+            latestTailProbeCache.put(
+                    stream,
+                    new CachedTailProbe(
+                            probedTail,
+                            System.nanoTime()
+                                    + TimeUnit.MILLISECONDS.toNanos(options.getTailProbeCacheMs())));
+        } else {
+            latestTailProbeCache.remove(stream);
+        }
+
+        if (probedTail == 0L && latestStartedOnEmptyStreams.contains(stream)) {
+            try {
+                refreshedTail = Math.max(refreshedTail, stats.firstOffset() + 1L);
+            } catch (NoOffsetException e) {
+                confirmed = true;
+            }
+        }
+        return new TailRefresh(Math.max(currentTail, refreshedTail), confirmed);
     }
 
     private long probeTailOffsetForLatestWithCache(Environment env, String stream) {

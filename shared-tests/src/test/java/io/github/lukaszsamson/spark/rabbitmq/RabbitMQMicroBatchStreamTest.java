@@ -331,7 +331,7 @@ class RabbitMQMicroBatchStreamTest {
         }
 
         @Test
-        void initialOffsetExplicitConsumerNameInterruptedLookupFallsBackToStartingOffsets()
+        void initialOffsetExplicitConsumerNameInterruptedLookupFailsFast()
                 throws Exception {
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
@@ -345,8 +345,9 @@ class RabbitMQMicroBatchStreamTest {
                     Map.of("test-stream", 99L), Map.of("test-stream", 0L)));
             Thread.currentThread().interrupt();
             try {
-                RabbitMQStreamOffset offset = (RabbitMQStreamOffset) stream.initialOffset();
-                assertThat(offset.getStreamOffsets()).containsEntry("test-stream", 7L);
+                assertThatThrownBy(stream::initialOffset)
+                        .isInstanceOf(IllegalStateException.class)
+                        .hasMessageContaining("lookup failures are treated as fatal");
                 assertThat(Thread.currentThread().isInterrupted()).isTrue();
             } finally {
                 Thread.interrupted(); // Clear interrupt status
@@ -886,17 +887,48 @@ class RabbitMQMicroBatchStreamTest {
         }
 
         @Test
-        void latestOffsetClampsTailBelowStartOffsets() throws Exception {
-            RabbitMQMicroBatchStream stream = createStream(minimalOptions());
-            Map<String, Long> snapshot = Map.of("s1", 5L, "s2", 100L);
+        void latestOffsetClampsTailBelowStartOffsetsWhenFailOnDataLossFalse() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("failOnDataLoss", "false");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            setPrivateField(stream, "environment", new FirstOffsetEnvironment(0L));
+            Map<String, Long> snapshot = Map.of("test-stream", 5L);
             setPrivateField(stream, "availableNowSnapshot", snapshot);
 
-            RabbitMQStreamOffset start = new RabbitMQStreamOffset(Map.of("s1", 10L, "s2", 50L));
+            RabbitMQStreamOffset start = new RabbitMQStreamOffset(Map.of("test-stream", 10L));
             Offset latest = stream.latestOffset(start, ReadLimit.allAvailable());
 
             RabbitMQStreamOffset latestOffset = (RabbitMQStreamOffset) latest;
-            assertThat(latestOffset.getStreamOffsets()).containsEntry("s1", 10L);
-            assertThat(latestOffset.getStreamOffsets()).containsEntry("s2", 100L);
+            assertThat(latestOffset.getStreamOffsets()).containsEntry("test-stream", 10L);
+        }
+
+        @Test
+        void latestOffsetThrowsWhenTailFallsBelowStartAndFailOnDataLossTrue() throws Exception {
+            RabbitMQMicroBatchStream stream = createStream(minimalOptions());
+            setPrivateField(stream, "environment", new FirstOffsetEnvironment(0L));
+            setPrivateField(stream, "availableNowSnapshot", Map.of("test-stream", 5L));
+
+            RabbitMQStreamOffset start = new RabbitMQStreamOffset(Map.of("test-stream", 100L));
+
+            assertThatThrownBy(() -> stream.latestOffset(start, ReadLimit.allAvailable()))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining(
+                            "Tail offset 5 is before requested start offset 100");
+        }
+
+        @Test
+        void latestOffsetRefreshesStaleTailBeforeFailingOnDataLoss() throws Exception {
+            RabbitMQMicroBatchStream stream = createStream(minimalOptions());
+            setPrivateField(stream, "environment", new NoOffsetThenFixedProbeEnvironment(149L));
+
+            RabbitMQStreamOffset start = new RabbitMQStreamOffset(Map.of("test-stream", 100L));
+            RabbitMQStreamOffset latest = (RabbitMQStreamOffset) stream.latestOffset(
+                    start, ReadLimit.allAvailable());
+
+            assertThat(latest.getStreamOffsets()).containsEntry("test-stream", 150L);
         }
 
         @Test
@@ -1248,8 +1280,8 @@ class RabbitMQMicroBatchStreamTest {
             assertThat(latest.getStreamOffsets()).containsEntry("test-stream", 50L);
             assertThat(((RabbitMQStreamOffset) stream.reportLatestOffset()).getStreamOffsets())
                     .containsEntry("test-stream", 50L);
-            assertThat(env.queryStatsCalls).isEqualTo(2);
-            assertThat(env.probeBuilderCalls).isEqualTo(3);
+            assertThat(env.queryStatsCalls).isEqualTo(4);
+            assertThat(env.probeBuilderCalls).isEqualTo(6);
         }
 
         @Test
@@ -1484,6 +1516,32 @@ class RabbitMQMicroBatchStreamTest {
                     ReadLimit.allAvailable());
             assertThat(latest.getStreamOffsets()).containsEntry("test-stream", 50L);
             assertThat(env.probeBuilderCalls).isEqualTo(1);
+        }
+
+        @Test
+        void latestOffsetDoesNotAddOneToCommittedChunkAfterLatestStartedOnEmpty() throws Exception {
+            RabbitMQMicroBatchStream stream = createStream(minimalOptions());
+            setPrivateField(stream, "environment", new ChunkOnlyTailEnvironment(10L));
+            stream.latestStartedOnEmptyStreams.add("test-stream");
+
+            RabbitMQStreamOffset latest = (RabbitMQStreamOffset) stream.latestOffset(
+                    new RabbitMQStreamOffset(Map.of("test-stream", 0L)),
+                    ReadLimit.allAvailable());
+
+            assertThat(latest.getStreamOffsets()).containsEntry("test-stream", 10L);
+        }
+
+        @Test
+        void latestOffsetAdvancesAtLeastOneWhenLatestStartedOnEmptyBecomesNonEmpty() throws Exception {
+            RabbitMQMicroBatchStream stream = createStream(minimalOptions());
+            setPrivateField(stream, "environment", new ChunkOnlyTailEnvironment(0L));
+            stream.latestStartedOnEmptyStreams.add("test-stream");
+
+            RabbitMQStreamOffset latest = (RabbitMQStreamOffset) stream.latestOffset(
+                    new RabbitMQStreamOffset(Map.of("test-stream", 0L)),
+                    ReadLimit.allAvailable());
+
+            assertThat(latest.getStreamOffsets()).containsEntry("test-stream", 1L);
         }
 
         @Test
@@ -2602,6 +2660,81 @@ class RabbitMQMicroBatchStreamTest {
         }
     }
 
+    private static final class ChunkOnlyTailEnvironment implements com.rabbitmq.stream.Environment {
+        private final long committedChunkId;
+
+        private ChunkOnlyTailEnvironment(long committedChunkId) {
+            this.committedChunkId = committedChunkId;
+        }
+
+        @Override
+        public com.rabbitmq.stream.StreamCreator streamCreator() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void deleteStream(String stream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void deleteSuperStream(String superStream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public com.rabbitmq.stream.StreamStats queryStreamStats(String stream) {
+            return new ChunkOnlyStreamStats(committedChunkId);
+        }
+
+        @Override
+        public void storeOffset(String reference, String stream, long offset) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public boolean streamExists(String stream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public com.rabbitmq.stream.ProducerBuilder producerBuilder() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public com.rabbitmq.stream.ConsumerBuilder consumerBuilder() {
+            throw new NoOffsetException("probe has no offsets");
+        }
+
+        @Override
+        public void close() {
+        }
+    }
+
+    private static final class ChunkOnlyStreamStats implements com.rabbitmq.stream.StreamStats {
+        private final long committedChunkId;
+
+        private ChunkOnlyStreamStats(long committedChunkId) {
+            this.committedChunkId = committedChunkId;
+        }
+
+        @Override
+        public long firstOffset() {
+            return 0L;
+        }
+
+        @Override
+        public long committedChunkId() {
+            return committedChunkId;
+        }
+
+        @Override
+        public long committedOffset() {
+            throw new NoOffsetException("committedOffset unavailable");
+        }
+    }
+
     private static final class NoCommittedOffsetStreamStats implements com.rabbitmq.stream.StreamStats {
         @Override
         public long firstOffset() {
@@ -2888,6 +3021,62 @@ class RabbitMQMicroBatchStreamTest {
         @Override
         public com.rabbitmq.stream.ConsumerBuilder consumerBuilder() {
             throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void close() {
+        }
+    }
+
+    private static final class NoOffsetThenFixedProbeEnvironment implements com.rabbitmq.stream.Environment {
+        private final long refreshedProbeOffset;
+        private int probeBuilderCalls;
+
+        private NoOffsetThenFixedProbeEnvironment(long refreshedProbeOffset) {
+            this.refreshedProbeOffset = refreshedProbeOffset;
+        }
+
+        @Override
+        public com.rabbitmq.stream.StreamCreator streamCreator() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void deleteStream(String stream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void deleteSuperStream(String superStream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public com.rabbitmq.stream.StreamStats queryStreamStats(String stream) {
+            return new FixedStreamStats(0L);
+        }
+
+        @Override
+        public void storeOffset(String reference, String stream, long offset) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public boolean streamExists(String stream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public com.rabbitmq.stream.ProducerBuilder producerBuilder() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public com.rabbitmq.stream.ConsumerBuilder consumerBuilder() {
+            if (probeBuilderCalls++ == 0) {
+                throw new NoOffsetException("probe did not find a tail offset");
+            }
+            return new FixedOffsetProbeConsumerBuilder(java.util.List.of(refreshedProbeOffset));
         }
 
         @Override
