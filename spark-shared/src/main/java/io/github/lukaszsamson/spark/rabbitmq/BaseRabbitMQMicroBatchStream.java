@@ -448,6 +448,15 @@ class BaseRabbitMQMicroBatchStream
     @Override
     public InputPartition[] planInputPartitions(Offset start, Offset end) {
         clearLatestOffsetInvocationCache();
+        // Drop the stats snapshot collected by latestOffset before re-validating here.
+        // Under live retention churn, firstOffset can advance between latestOffset and
+        // planInputPartitions; a stale snapshot would let validateStartOffset return an
+        // already-truncated start, producing partitions whose ranges no longer exist on
+        // the broker and stalling readers. The dedupe within planInputPartitions itself
+        // (one RPC per stream across the loop's revalidations) is preserved by the cache,
+        // and the finally block also clears so a planning failure cannot leak a stale
+        // snapshot into the next trigger or its retry.
+        streamStatsCache.clear();
 
         RabbitMQStreamOffset startOffset = (RabbitMQStreamOffset) start;
         RabbitMQStreamOffset endOffset = (RabbitMQStreamOffset) end;
@@ -456,12 +465,6 @@ class BaseRabbitMQMicroBatchStream
             return planInputPartitionsInternal(startOffset, endOffset, availableNowActive,
                     start, end);
         } finally {
-            // planInputPartitions marks the end of a trigger's offset planning. Any
-            // cached stats we collected from latestOffset have served their purpose;
-            // clear in finally so a planning failure (validation/splitting) does not
-            // leak a stale snapshot into the next trigger or the retry that follows.
-            // firstOffset can advance between triggers under retention, and a stale
-            // cached snapshot would mask that.
             streamStatsCache.clear();
         }
     }
