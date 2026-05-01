@@ -64,8 +64,7 @@ final class RabbitMQPartitionReader extends BaseRabbitMQPartitionReader
                 return RecordStatus.newStatusWithoutArrivalTime(false);
             }
 
-            if ((lastEmittedOffset >= 0 && lastEmittedOffset >= endOffset - 1)
-                    || (lastObservedOffset >= 0 && lastObservedOffset >= endOffset - 1)) {
+            if (hasReachedPlannedEnd()) {
                 finished = true;
                 return RecordStatus.newStatusWithoutArrivalTime(false);
             }
@@ -74,6 +73,9 @@ final class RabbitMQPartitionReader extends BaseRabbitMQPartitionReader
             Throwable error = consumerError.get();
             if (error != null) {
                 throw new IOException("Consumer error on stream '" + stream + "'", error);
+            }
+            if (isSingleActiveConsumerKnownInactive() && queue.isEmpty()) {
+                throw terminationFailure(false, false, true, 0L);
             }
 
             long remainingMs = TimeUnit.NANOSECONDS.toMillis(deadlineNanos - System.nanoTime());
@@ -84,29 +86,24 @@ final class RabbitMQPartitionReader extends BaseRabbitMQPartitionReader
                 boolean sacInactive = isSingleActiveConsumerKnownInactive();
                 TerminationDecision decision = decideTermination(
                         false, dataLossProven, plannedEndReached, sacInactive);
-                if (decision == TerminationDecision.COMPLETE) {
-                    if (dataLossProven) {
-                        dataLoss++;
-                    }
-                    finished = true;
-                    return RecordStatus.newStatusWithoutArrivalTime(false);
-                }
-                if (sacInactive) {
-                    throw new IOException(
-                            "Single active consumer for stream '" + stream
-                                    + "' is currently inactive; retrying the task may attach to the active consumer");
-                }
-                if (dataLossProven && options.isFailOnDataLoss()) {
-                    throw new IOException(
-                            "Planned range [" + startOffset + ", " + endOffset + ") for stream '"
-                                    + stream + "' is no longer reachable due to data loss/recreation");
+                switch (decision) {
+                    case COMPLETE:
+                        if (dataLossProven) {
+                            dataLoss++;
+                        }
+                        finished = true;
+                        return RecordStatus.newStatusWithoutArrivalTime(false);
+                    case THROW:
+                        throw terminationFailure(false, dataLossProven, sacInactive, timeout);
+                    case CONTINUE:
+                        break;
                 }
                 return RecordStatus.newStatusWithoutArrivalTime(false);
             }
 
             QueuedMessage qm;
             try {
-                long pollMs = Math.min(remainingMs, pollTimeoutMs);
+                long pollMs = pollIntervalMs(remainingMs, pollTimeoutMs);
                 long pollStart = System.nanoTime();
                 qm = queue.poll(pollMs, TimeUnit.MILLISECONDS);
                 pollWaitMs += TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - pollStart);
@@ -126,18 +123,18 @@ final class RabbitMQPartitionReader extends BaseRabbitMQPartitionReader
                     boolean dataLossProven = isPlannedRangeNoLongerReachableDueToDataLoss();
                     TerminationDecision decision = decideTermination(
                             false, dataLossProven, false, false);
-                    if (decision == TerminationDecision.COMPLETE) {
-                        LOG.warn("Consumer for stream '{}' closed and planned range [{}, {}) is no longer " +
-                                        "reachable; completing split because failOnDataLoss=false",
-                                stream, startOffset, endOffset);
-                        dataLoss++;
-                        finished = true;
-                        return RecordStatus.newStatusWithoutArrivalTime(false);
-                    }
-                    if (dataLossProven && options.isFailOnDataLoss()) {
-                        throw new IOException(
-                                "Planned range [" + startOffset + ", " + endOffset + ") for stream '"
-                                        + stream + "' is no longer reachable due to data loss/recreation");
+                    switch (decision) {
+                        case COMPLETE:
+                            LOG.warn("Consumer for stream '{}' closed and planned range [{}, {}) is no longer " +
+                                            "reachable; completing split because failOnDataLoss=false",
+                                    stream, startOffset, endOffset);
+                            dataLoss++;
+                            finished = true;
+                            return RecordStatus.newStatusWithoutArrivalTime(false);
+                        case THROW:
+                            throw terminationFailure(false, dataLossProven, false, timeout);
+                        case CONTINUE:
+                            break;
                     }
                     throw new IOException(
                             "Consumer for stream '" + stream + "' closed while waiting for data");
@@ -146,11 +143,14 @@ final class RabbitMQPartitionReader extends BaseRabbitMQPartitionReader
                     finished = true;
                     return RecordStatus.newStatusWithoutArrivalTime(false);
                 }
+                if (isSingleActiveConsumerKnownInactive()) {
+                    throw terminationFailure(false, false, true, 0L);
+                }
                 continue;
             }
 
             // Stop at end offset (exclusive) without granting additional credit.
-            if (qm.offset() >= endOffset) {
+            if (isAtOrBeyondPlannedEnd(qm.offset())) {
                 finished = true;
                 return RecordStatus.newStatusWithoutArrivalTime(false);
             }

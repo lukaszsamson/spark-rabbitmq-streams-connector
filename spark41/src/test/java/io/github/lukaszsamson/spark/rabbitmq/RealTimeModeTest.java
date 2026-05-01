@@ -534,6 +534,68 @@ class RealTimeModeTest {
         }
 
         @Test
+        void nextWithTimeoutOnFilteredEmptyRangeTerminatesBeforeFullTimeout() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("filterValues", "alpha");
+            opts.put("filterValuePath", "application_properties.region");
+            opts.put("pollTimeoutMs", "30000");
+            ConnectorOptions options = new ConnectorOptions(opts);
+
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 0, 5, options);
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(
+                    partition, partition.getOptions());
+
+            setPrivateField(reader, "consumer", new NoopConsumer());
+            setPrivateField(reader, "queue", new LinkedBlockingQueue<>());
+            setPrivateField(reader, "environment", new NoConsumerEnvironment(5L));
+            setPrivateField(reader, "lastTailProbeNanos", System.nanoTime());
+            setPrivateField(reader, "lastTailProbeOffset", -1L);
+
+            long startNanos = System.nanoTime();
+            SupportsRealTimeRead.RecordStatus status = reader.nextWithTimeout(5_000L);
+            long elapsedMs = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(
+                    System.nanoTime() - startNanos);
+
+            assertThat(status.hasRecord()).isFalse();
+            assertThat(elapsedMs).isLessThan(1_000L);
+            assertThat((boolean) getPrivateField(reader, "finished")).isTrue();
+        }
+
+        @Test
+        void nextWithTimeoutOnTimestampEmptyRangeTerminatesBeforeFullTimeout() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("startingOffsets", "timestamp");
+            opts.put("startingTimestamp", "1700000000000");
+            opts.put("pollTimeoutMs", "30000");
+            ConnectorOptions options = new ConnectorOptions(opts);
+
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 0, 5, options, true);
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(
+                    partition, partition.getOptions());
+
+            setPrivateField(reader, "consumer", new NoopConsumer());
+            setPrivateField(reader, "queue", new LinkedBlockingQueue<>());
+            setPrivateField(reader, "environment", new NoConsumerEnvironment(5L));
+            setPrivateField(reader, "lastTailProbeNanos", System.nanoTime());
+            setPrivateField(reader, "lastTailProbeOffset", -1L);
+
+            long startNanos = System.nanoTime();
+            SupportsRealTimeRead.RecordStatus status = reader.nextWithTimeout(5_000L);
+            long elapsedMs = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(
+                    System.nanoTime() - startNanos);
+
+            assertThat(status.hasRecord()).isFalse();
+            assertThat(elapsedMs).isLessThan(1_000L);
+            assertThat((boolean) getPrivateField(reader, "finished")).isTrue();
+        }
+
+        @Test
         void nextWithTimeoutSkipsDedup() throws Exception {
             RabbitMQInputPartition partition = new RabbitMQInputPartition(
                     "test-stream", 0, Long.MAX_VALUE, minimalOptions());
@@ -760,6 +822,24 @@ class RealTimeModeTest {
         @Override
         public StreamStats queryStreamStats(String stream) {
             throw new NoOffsetException("empty");
+        }
+    }
+
+    private static final class NoConsumerEnvironment extends NoOpEnvironment {
+        private final long tailOffset;
+
+        private NoConsumerEnvironment(long tailOffset) {
+            this.tailOffset = tailOffset;
+        }
+
+        @Override
+        public StreamStats queryStreamStats(String stream) {
+            return new FixedStreamStats(tailOffset);
+        }
+
+        @Override
+        public ConsumerBuilder consumerBuilder() {
+            throw new AssertionError("tail probe should use the cached empty result");
         }
     }
 

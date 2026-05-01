@@ -66,6 +66,8 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
     volatile Consumer consumer;
     volatile InternalRow currentRow;
     volatile long lastEmittedOffset = -1;
+    // Broker chunk delivery can make this temporarily lower than startOffset;
+    // reconnect resume clamps observed-only progress back to startOffset.
     volatile long lastObservedOffset = -1;
     boolean filteredTailReached = false;
     volatile boolean finished = false;
@@ -119,8 +121,7 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
 
         // Fast-path: if we already observed or emitted the final in-range offset, stop immediately.
         // lastObservedOffset is needed when post-filter drops tail records.
-        if ((lastEmittedOffset >= 0 && lastEmittedOffset >= endOffset - 1)
-                || (lastObservedOffset >= 0 && lastObservedOffset >= endOffset - 1)) {
+        if (hasReachedPlannedEnd()) {
             finished = true;
             return false;
         }
@@ -154,8 +155,7 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
                 return false;
             }
 
-            if ((lastEmittedOffset >= 0 && lastEmittedOffset >= endOffset - 1)
-                    || (lastObservedOffset >= 0 && lastObservedOffset >= endOffset - 1)) {
+            if (hasReachedPlannedEnd()) {
                 finished = true;
                 return false;
             }
@@ -164,6 +164,9 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
             Throwable error = consumerError.get();
             if (error != null) {
                 throw new IOException("Consumer error on stream '" + stream + "'", error);
+            }
+            if (isSingleActiveConsumerKnownInactive() && queue.isEmpty()) {
+                throw terminationFailure(false, false, true, 0L);
             }
 
             QueuedMessage qm;
@@ -180,13 +183,21 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
 
             if (qm == null) {
                 if (consumerClosed.get()) {
-                    if (!options.isFailOnDataLoss() && isPlannedRangeNoLongerReachableDueToDataLoss()) {
-                        LOG.warn("Consumer for stream '{}' closed and planned range [{}, {}) is no longer " +
-                                        "reachable; completing split because failOnDataLoss=false",
-                                stream, startOffset, endOffset);
-                        dataLoss++;
-                        finished = true;
-                        return false;
+                    boolean dataLossProven = isPlannedRangeNoLongerReachableDueToDataLoss();
+                    TerminationDecision decision = decideTermination(
+                            false, dataLossProven, false, false);
+                    switch (decision) {
+                        case COMPLETE:
+                            LOG.warn("Consumer for stream '{}' closed and planned range [{}, {}) is no longer " +
+                                            "reachable; completing split because failOnDataLoss=false",
+                                    stream, startOffset, endOffset);
+                            dataLoss++;
+                            finished = true;
+                            return false;
+                        case THROW:
+                            throw terminationFailure(false, dataLossProven, false, 0L);
+                        case CONTINUE:
+                            break;
                     }
                     throw new IOException(
                             "Consumer for stream '" + stream + "' closed before reaching target end offset "
@@ -196,6 +207,9 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
                     finished = true;
                     return false;
                 }
+                if (isSingleActiveConsumerKnownInactive()) {
+                    throw terminationFailure(false, false, true, 0L);
+                }
                 totalWaitMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - waitStartNanos);
                 if (totalWaitMs >= maxWaitMs) {
                     boolean sacInactive = isSingleActiveConsumerKnownInactive();
@@ -204,29 +218,24 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
                     boolean dataLossProven = isPlannedRangeNoLongerReachableDueToDataLoss();
                     TerminationDecision decision = decideTermination(
                             true, dataLossProven, plannedEndReached, sacInactive);
-                    if (decision == TerminationDecision.COMPLETE) {
-                        if (dataLossProven) {
-                            LOG.warn("Reached maxWaitMs={} on stream '{}' and planned range [{}, {}) is no longer " +
-                                            "reachable after data loss/recreation; completing split because failOnDataLoss=false",
-                                    maxWaitMs, stream, startOffset, endOffset);
-                            dataLoss++;
-                        } else {
-                            LOG.warn("Reached maxWaitMs={} while reading filtered/timestamp stream '{}'; " +
-                                            "tail indicates planned end reached at lastObservedOffset={} for endOffset={}",
-                                    maxWaitMs, stream, lastObservedOffset, endOffset);
-                        }
-                        finished = true;
-                        return false;
-                    }
-                    if (sacInactive) {
-                        throw new IOException(
-                                "Single active consumer for stream '" + stream
-                                        + "' is currently inactive; retrying the task may attach to the active consumer");
-                    }
-                    if (dataLossProven && options.isFailOnDataLoss()) {
-                        throw new IOException(
-                                "Planned range [" + startOffset + ", " + endOffset + ") for stream '"
-                                        + stream + "' is no longer reachable due to data loss/recreation");
+                    switch (decision) {
+                        case COMPLETE:
+                            if (dataLossProven) {
+                                LOG.warn("Reached maxWaitMs={} on stream '{}' and planned range [{}, {}) is no longer " +
+                                                "reachable after data loss/recreation; completing split because failOnDataLoss=false",
+                                        maxWaitMs, stream, startOffset, endOffset);
+                                dataLoss++;
+                            } else {
+                                LOG.warn("Reached maxWaitMs={} while reading filtered/timestamp stream '{}'; " +
+                                                "tail indicates planned end reached at lastObservedOffset={} for endOffset={}",
+                                        maxWaitMs, stream, lastObservedOffset, endOffset);
+                            }
+                            finished = true;
+                            return false;
+                        case THROW:
+                            throw terminationFailure(true, dataLossProven, sacInactive, totalWaitMs);
+                        case CONTINUE:
+                            break;
                     }
                     throw new IOException(
                             "Timed out waiting for messages from stream '" + stream +
@@ -259,7 +268,7 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
             }
 
             // Stop at end offset (exclusive) without granting additional credit.
-            if (qm.offset() >= endOffset) {
+            if (isAtOrBeyondPlannedEnd(qm.offset())) {
                 finished = true;
                 return false;
             }
@@ -665,7 +674,7 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
     }
 
     void enqueueFromCallback(MessageHandler.Context context, Message message) {
-        if (context.offset() >= endOffset) {
+        if (isAtOrBeyondPlannedEnd(context.offset())) {
             context.processed();
             return;
         }
@@ -782,8 +791,46 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
                 && !singleActiveConsumerActive.get();
     }
 
+    boolean hasFinitePlannedEnd() {
+        return endOffset != Long.MAX_VALUE;
+    }
+
+    boolean hasReachedPlannedEnd() {
+        if (!hasFinitePlannedEnd()) {
+            return false;
+        }
+        if (endOffset <= startOffset) {
+            return true;
+        }
+        long lastPlannedOffset = endOffset - 1;
+        return (lastEmittedOffset >= 0 && lastEmittedOffset >= lastPlannedOffset)
+                || (lastObservedOffset >= 0 && lastObservedOffset >= lastPlannedOffset);
+    }
+
+    boolean isAtOrBeyondPlannedEnd(long offset) {
+        return hasFinitePlannedEnd() && offset >= endOffset;
+    }
+
+    boolean isTailBeforePlannedEnd(long tail) {
+        if (!hasFinitePlannedEnd()) {
+            return true;
+        }
+        if (endOffset <= startOffset) {
+            return false;
+        }
+        return tail < endOffset - 1;
+    }
+
+    long pollIntervalMs(long remainingMs, long pollTimeoutMs) {
+        long pollMs = Math.max(1L, Math.min(remainingMs, pollTimeoutMs));
+        if (canCompleteEmptyPlannedRange()) {
+            return Math.min(pollMs, CLOSED_CHECK_INTERVAL_MS);
+        }
+        return pollMs;
+    }
+
     TerminationDecision decideTermination(
-            boolean timedOut,
+            boolean timeoutIsFailure,
             boolean dataLossProven,
             boolean plannedEndReached,
             boolean sacInactive) {
@@ -795,10 +842,37 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
         if (plannedEndReached) {
             return TerminationDecision.COMPLETE;
         }
-        if (sacInactive || timedOut) {
+        if (sacInactive || timeoutIsFailure) {
             return TerminationDecision.THROW;
         }
         return TerminationDecision.CONTINUE;
+    }
+
+    IOException terminationFailure(
+            boolean timeoutIsFailure,
+            boolean dataLossProven,
+            boolean sacInactive,
+            long waitedMs) {
+        if (sacInactive) {
+            return new IOException(
+                    "Single active consumer for stream '" + stream
+                            + "' is currently inactive; retrying the task may attach to the active consumer");
+        }
+        if (dataLossProven && options.isFailOnDataLoss()) {
+            return new IOException(
+                    "Planned range [" + startOffset + ", " + endOffset + ") for stream '"
+                            + stream + "' is no longer reachable due to data loss/recreation");
+        }
+        if (timeoutIsFailure) {
+            return new IOException(
+                    "Timed out waiting for messages from stream '" + stream +
+                            "'. Last emitted offset: " + lastEmittedOffset +
+                            ", target end offset: " + endOffset +
+                            ". Waited " + waitedMs + "ms (maxWaitMs=" + options.getMaxWaitMs() + ")");
+        }
+        return new IOException(
+                "Reader for stream '" + stream + "' cannot complete planned range ["
+                        + startOffset + ", " + endOffset + ")");
     }
 
     boolean shouldDetectOffsetGapsAfterConsumerClosure() {
@@ -836,6 +910,9 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
     }
 
     boolean hasStreamTailReachedPlannedEnd() {
+        if (!hasFinitePlannedEnd()) {
+            return false;
+        }
         if (filteredTailReached) {
             return true;
         }
@@ -844,9 +921,9 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
             long probedTail = probeLastMessageOffset();
             long tail = Math.max(statsTail, probedTail);
             if (tail < 0) {
-                return endOffset <= 0;
+                return endOffset <= startOffset;
             }
-            if (tail >= endOffset - 1) {
+            if (!isTailBeforePlannedEnd(tail)) {
                 filteredTailReached = true;
                 return true;
             }
@@ -872,7 +949,7 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
             boolean streamWasResetOrTruncated =
                     tail < startOffset || startWasTruncatedBeforeAnyInRangeProgress
                             || (lastObservedOffset >= 0 && tail < lastObservedOffset);
-            return tail < endOffset - 1 && streamWasResetOrTruncated;
+            return isTailBeforePlannedEnd(tail) && streamWasResetOrTruncated;
         } catch (Exception e) {
             if (isMissingStreamException(e)) {
                 return true;
