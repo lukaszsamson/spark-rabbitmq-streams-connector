@@ -1805,7 +1805,7 @@ class BaseRabbitMQMicroBatchStream
                 long firstAvailable = stats.firstOffset();
                 resolved = Math.max(
                         resolved,
-                        Math.max(resolveTailOffset(stats), firstAvailable + 1L));
+                        Math.max(statsTail, firstAvailable + 1L));
             } catch (NoOffsetException e) {
                 return 0L;
             } catch (RuntimeException e) {
