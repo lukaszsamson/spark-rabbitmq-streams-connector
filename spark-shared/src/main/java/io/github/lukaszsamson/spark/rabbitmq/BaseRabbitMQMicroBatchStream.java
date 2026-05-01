@@ -124,6 +124,9 @@ class BaseRabbitMQMicroBatchStream
     volatile long lastAccumulatedMessageRecords;
     /** Recent per-stream tail probe results used by latestOffset planning. */
     final ConcurrentHashMap<String, CachedTailProbe> latestTailProbeCache = new ConcurrentHashMap<>();
+    /** Per-trigger {@code queryStreamStats} cache shared by latestOffset, validateStartOffset,
+     *  and planInputPartitions. */
+    final StreamStatsCache streamStatsCache;
     /** Streams whose initial latest offset was resolved while empty. */
     final Set<String> latestStartedOnEmptyStreams = ConcurrentHashMap.newKeySet();
     /** Set once stop() begins to prevent new environment usage during shutdown. */
@@ -163,6 +166,7 @@ class BaseRabbitMQMicroBatchStream
         this.messageSizeBytesAccumulator = accumulators[0];
         this.messageSizeRecordsAccumulator = accumulators[1];
         this.estimatedMessageSize = options.getEstimatedMessageSizeBytes();
+        this.streamStatsCache = new StreamStatsCache(options.getTailProbeCacheMs());
         if (options.getConsumerName() == null && this.effectiveConsumerName != null) {
             LOG.info("consumerName not set; derived stable name '{}' from checkpoint location",
                     this.effectiveConsumerName);
@@ -418,6 +422,7 @@ class BaseRabbitMQMicroBatchStream
         awaitExecutorTermination("brokerCommitExecutor", brokerCommitExecutor);
         awaitExecutorTermination("tailQueryExecutor", tailQueryExecutor);
         latestTailProbeCache.clear();
+        streamStatsCache.clear();
         MessageSizeTracker.clear(messageSizeTrackerScope);
         if (environment != null) {
             try {
@@ -450,11 +455,33 @@ class BaseRabbitMQMicroBatchStream
     @Override
     public InputPartition[] planInputPartitions(Offset start, Offset end) {
         clearLatestOffsetInvocationCache();
+        // Drop the stats snapshot collected by latestOffset before re-validating here.
+        // Under live retention churn, firstOffset can advance between latestOffset and
+        // planInputPartitions; a stale snapshot would let validateStartOffset return an
+        // already-truncated start, producing partitions whose ranges no longer exist on
+        // the broker and stalling readers. The dedupe within planInputPartitions itself
+        // (one RPC per stream across the loop's revalidations) is preserved by the cache,
+        // and the finally block also clears so a planning failure cannot leak a stale
+        // snapshot into the next trigger or its retry.
+        streamStatsCache.clear();
 
         RabbitMQStreamOffset startOffset = (RabbitMQStreamOffset) start;
         RabbitMQStreamOffset endOffset = (RabbitMQStreamOffset) end;
         boolean availableNowActive = availableNowSnapshot != null;
+        try {
+            return planInputPartitionsInternal(startOffset, endOffset, availableNowActive,
+                    start, end);
+        } finally {
+            streamStatsCache.clear();
+        }
+    }
 
+    private InputPartition[] planInputPartitionsInternal(
+            RabbitMQStreamOffset startOffset,
+            RabbitMQStreamOffset endOffset,
+            boolean availableNowActive,
+            Offset start,
+            Offset end) {
         // Collect validated per-stream ranges
         Map<String, long[]> validRanges = new LinkedHashMap<>();
         Map<String, Long> startOffsets = startOffset.getStreamOffsets();
@@ -720,7 +747,7 @@ class BaseRabbitMQMicroBatchStream
         }
 
         try {
-            StreamStats stats = env.queryStreamStats(stream);
+            StreamStats stats = streamStatsCache.getOrLoad(env, stream);
             long firstAvailable = stats.firstOffset();
             if (startOff < firstAvailable) {
                 if (options.isFailOnDataLoss()) {
@@ -997,6 +1024,9 @@ class BaseRabbitMQMicroBatchStream
     @Override
     public void prepareForTriggerAvailableNow() {
         clearLatestOffsetInvocationCache();
+        // Drop any stats cached for an earlier query so the snapshot reflects the broker
+        // at this exact moment, not whatever a transient earlier trigger observed.
+        streamStatsCache.clear();
         Map<String, Long> snapshot = queryTailOffsetsForAvailableNow();
         this.availableNowSnapshot = snapshot;
         LOG.info("Trigger.AvailableNow: snapshot tail offsets = {}", snapshot);
@@ -1417,8 +1447,14 @@ class BaseRabbitMQMicroBatchStream
     /**
      * Query tail offsets for all streams from the broker.
      *
-     * @return map of stream → end offset (exclusive), using committedOffset() when available
-     *         and probing the last message offset when committedOffset() is unavailable.
+     * <p>Per stream the result is {@code max(statsTail, probedTail)}, where
+     * {@code statsTail} comes from the cached {@link StreamStats} (committedOffset()+1
+     * when available, committedChunkId() as a conservative fallback) and
+     * {@code probedTail} comes from a brief consumer probe of the last chunk —
+     * deduplicated across triggers via {@link #latestTailProbeCache}. The probe
+     * compensates for the lag between published messages and committedOffset().
+     *
+     * @return map of stream → end offset (exclusive)
      */
     private Map<String, Long> queryTailOffsets() {
         List<String> streams = discoverStreams();
@@ -1426,6 +1462,7 @@ class BaseRabbitMQMicroBatchStream
         if (!latestTailProbeCache.isEmpty()) {
             Set<String> activeStreams = new HashSet<>(streams);
             latestTailProbeCache.keySet().removeIf(stream -> !activeStreams.contains(stream));
+            streamStatsCache.retainOnly(activeStreams);
         }
         return queryTailOffsetsInParallel(
                 streams,
@@ -1487,15 +1524,17 @@ class BaseRabbitMQMicroBatchStream
     }
 
     /**
-     * Query the tail offset for a single stream.
+     * Query the tail offset for a single stream from the cached {@link StreamStats}.
      *
-     * @return end offset (exclusive). Uses committedOffset() when available; otherwise falls
-     *         back to committedChunkId()+1 as a conservative lower-bound estimate.
+     * @return end offset (exclusive). Returns {@code committedOffset() + 1} when
+     *         committedOffset() is available, falling back to {@code committedChunkId()}
+     *         (without +1; storeOffset()-induced tracking chunks can push committedChunkId
+     *         past the last user message, so adding 1 would overshoot).
      */
     private long queryStreamTailOffset(Environment env, String stream) {
         StreamStats stats;
         try {
-            stats = env.queryStreamStats(stream);
+            stats = streamStatsCache.getOrLoad(env, stream);
         } catch (com.rabbitmq.stream.StreamDoesNotExistException e) {
             // Stream deleted (topology change or manual deletion)
             if (options.isFailOnDataLoss()) {
@@ -1777,7 +1816,7 @@ class BaseRabbitMQMicroBatchStream
     private long queryStreamTailOffsetForLatest(Environment env, String stream) {
         StreamStats stats;
         try {
-            stats = env.queryStreamStats(stream);
+            stats = streamStatsCache.getOrLoad(env, stream);
         } catch (com.rabbitmq.stream.StreamDoesNotExistException e) {
             if (options.isFailOnDataLoss()) {
                 throw new IllegalStateException(
@@ -1792,6 +1831,12 @@ class BaseRabbitMQMicroBatchStream
                     "Failed to query stream stats for '" + stream + "'", e);
         }
 
+        // committedOffset() lags freshly-published messages on the broker, so stats
+        // alone can underestimate the tail and cause readers to miss data they could
+        // already consume. The probe-consumer fallback compensates by reading the last
+        // chunk; latestTailProbeCache deduplicates probes within tailProbeCacheMs so
+        // the cost stays bounded. The stats RPC is still cached separately via
+        // streamStatsCache so latestOffset/planInputPartitions don't double-query.
         long statsTail = resolveTailOffset(stats);
         long probedTail = probeTailOffsetForLatestWithCache(env, stream);
         long resolved = Math.max(statsTail, probedTail);
@@ -1834,9 +1879,12 @@ class BaseRabbitMQMicroBatchStream
     }
 
     private long queryStreamTailOffsetForAvailableNow(Environment env, String stream) {
+        // Match queryStreamTailOffsetForLatest's stats+probe semantics: committedOffset()
+        // can lag freshly-published messages, so we take max(statsTail, probedTail) to
+        // capture the true tail at snapshot time. Seed the per-trigger probe cache so
+        // subsequent latestOffset() calls reuse the fresh probe value.
         long statsTail = queryStreamTailOffset(env, stream);
         long probedTail = probeTailOffsetFromLastMessageWithRetry(env, stream);
-        // Seed the per-trigger cache so subsequent latestOffset() calls get the fresh value
         long nowNanos = System.nanoTime();
         if (probedTail > 0L) {
             latestTailProbeCache.put(stream, new CachedTailProbe(

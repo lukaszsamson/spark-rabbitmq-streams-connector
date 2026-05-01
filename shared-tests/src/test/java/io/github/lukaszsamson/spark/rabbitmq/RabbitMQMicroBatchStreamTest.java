@@ -1299,6 +1299,87 @@ class RabbitMQMicroBatchStreamTest {
                 stream.stop();
             }
         }
+
+        @Test
+        void perTriggerStatsCacheDedupesWithinLatestOffsetAndPlanInputPartitions()
+                throws Exception {
+            // CLAUDE-8 fix: StreamStatsCache deduplicates queryStreamStats within a single
+            // call. Within latestOffset, the tail lookup and failOnDataLoss=false start
+            // revalidation share one RPC per stream. Within planInputPartitions the
+            // per-stream validation loop also shares one RPC per stream. The cache is
+            // cleared between latestOffset and planInputPartitions so retention churn that
+            // advances firstOffset between the two phases is still observed.
+            //
+            // For three streams in one trigger we therefore expect at most 2 × N = 6
+            // stats RPCs (N for latestOffset's tail probe, N for planInputPartitions's
+            // revalidation), instead of the 3N main would issue (latestOffset's tail probe
+            // + latestOffset's failOnDataLoss revalidation + planInputPartitions's
+            // revalidation, all separately).
+            Map<String, String> optsMap = new LinkedHashMap<>();
+            optsMap.put("endpoints", "localhost:5552");
+            optsMap.put("superstream", "super");
+            optsMap.put("failOnDataLoss", "false");
+            ConnectorOptions opts = new ConnectorOptions(optsMap);
+            var schema = RabbitMQStreamTable.buildSourceSchema(opts.getMetadataFields());
+            BaseRabbitMQMicroBatchStream stream = new ForcedStreamsMicroBatchStream(
+                    opts, schema, "/tmp/checkpoint", java.util.List.of("s1", "s2", "s3"));
+            ProbeCountingEnvironment env =
+                    new ProbeCountingEnvironment(10L, java.util.List.of(14L));
+            setPrivateField(stream, "environment", env);
+
+            try {
+                RabbitMQStreamOffset start = new RabbitMQStreamOffset(
+                        Map.of("s1", 0L, "s2", 0L, "s3", 0L));
+                RabbitMQStreamOffset end = (RabbitMQStreamOffset) stream.latestOffset(
+                        start, ReadLimit.allAvailable());
+                stream.planInputPartitions(start, end);
+
+                // Trigger 1 with fresh data: 3 RPCs from latestOffset (tail probe,
+                // reused for failOnDataLoss revalidation via cache) + 3 RPCs from
+                // planInputPartitions (cleared cache, fresh stats per stream).
+                assertThat(env.queryStatsCalls).isEqualTo(6);
+            } finally {
+                stream.stop();
+            }
+        }
+
+        @Test
+        void planInputPartitionsRefetchesStatsAfterCacheClearForRetentionFreshness()
+                throws Exception {
+            // Stream C compromise: validateStartOffset within planInputPartitions is
+            // intentionally NOT served from the latestOffset-time stats cache. Real
+            // retention churn can advance firstOffset between latestOffset and
+            // planInputPartitions; a stale snapshot would let validateStartOffset return
+            // an already-truncated start, producing partition ranges no longer reachable
+            // on the broker. This test pins that contract: planInputPartitions must
+            // re-query stats (one RPC per stream) regardless of what latestOffset cached.
+            Map<String, String> optsMap = new LinkedHashMap<>();
+            optsMap.put("endpoints", "localhost:5552");
+            optsMap.put("superstream", "super");
+            optsMap.put("failOnDataLoss", "false");
+            ConnectorOptions opts = new ConnectorOptions(optsMap);
+            var schema = RabbitMQStreamTable.buildSourceSchema(opts.getMetadataFields());
+            BaseRabbitMQMicroBatchStream stream = new ForcedStreamsMicroBatchStream(
+                    opts, schema, "/tmp/checkpoint", java.util.List.of("s1", "s2", "s3"));
+            ProbeCountingEnvironment env =
+                    new ProbeCountingEnvironment(10L, java.util.List.of(14L));
+            setPrivateField(stream, "environment", env);
+
+            try {
+                RabbitMQStreamOffset start = new RabbitMQStreamOffset(
+                        Map.of("s1", 0L, "s2", 0L, "s3", 0L));
+                RabbitMQStreamOffset end = (RabbitMQStreamOffset) stream.latestOffset(
+                        start, ReadLimit.allAvailable());
+                int afterLatestOffset = env.queryStatsCalls;
+                stream.planInputPartitions(start, end);
+                // planInputPartitions issues exactly N fresh RPCs (one per stream)
+                // — the cache cleared at function entry forces revalidation against
+                // the current firstOffset.
+                assertThat(env.queryStatsCalls - afterLatestOffset).isEqualTo(3);
+            } finally {
+                stream.stop();
+            }
+        }
     }
 
     @Nested
