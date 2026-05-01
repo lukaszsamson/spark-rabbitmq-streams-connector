@@ -130,6 +130,13 @@ class BaseRabbitMQMicroBatchStream
     final AtomicBoolean stopping = new AtomicBoolean(false);
     /** Guards compound read-modify-write updates on mutable admission-control state. */
     final Object mutableStateLock = new Object();
+    /**
+     * Monotonically increasing counter passed as the rotation seed to
+     * {@link ReadLimitBudget#distributeRecordBudget(Map, Map, long, long)} so that
+     * sub-eligible-size record budgets and remainder records are distributed
+     * round-robin across streams instead of always favoring the first ones.
+     */
+    final AtomicLong readLimitTriggerCounter = new AtomicLong();
 
     record CachedTailProbe(long tailExclusive, long expiresAtNanos) {}
     record LatestOffsetInvocationCache(
@@ -1142,12 +1149,29 @@ class BaseRabbitMQMicroBatchStream
 
     // ---- Read limit dispatch ----
 
+    /**
+     * Top-level read-limit dispatch entrypoint: allocates the per-trigger
+     * rotation seed exactly once and delegates to the overridable
+     * {@link #applyReadLimit(Map, Map, ReadLimit, long)} so that
+     * {@link CompositeReadLimit} components share a single rotation value
+     * within one trigger.
+     */
+    final Map<String, Long> applyReadLimit(
+            Map<String, Long> startOffsets,
+            Map<String, Long> tailOffsets,
+            ReadLimit limit) {
+        return applyReadLimit(
+                startOffsets, tailOffsets, limit,
+                readLimitTriggerCounter.getAndIncrement());
+    }
+
     // Spark 3.5 compat: uses reflection for ReadMaxBytes (not available in 3.5).
     // Overridden in spark40/spark41 subclasses to use instanceof ReadMaxBytes directly.
     Map<String, Long> applyReadLimit(
             Map<String, Long> startOffsets,
             Map<String, Long> tailOffsets,
-            ReadLimit limit) {
+            ReadLimit limit,
+            long rotation) {
 
         if (limit instanceof ReadAllAvailable) {
             return tailOffsets;
@@ -1155,7 +1179,7 @@ class BaseRabbitMQMicroBatchStream
 
         if (limit instanceof ReadMaxRows maxRows) {
             return ReadLimitBudget.distributeRecordBudget(
-                    startOffsets, tailOffsets, maxRows.maxRows());
+                    startOffsets, tailOffsets, maxRows.maxRows(), rotation);
         }
 
         if (limit instanceof ReadMinRows minRows) {
@@ -1167,14 +1191,15 @@ class BaseRabbitMQMicroBatchStream
         Long maxBytes = extractReadMaxBytes(limit);
         if (maxBytes != null) {
             return ReadLimitBudget.distributeByteBudget(
-                    startOffsets, tailOffsets, maxBytes, currentEstimatedMessageSize());
+                    startOffsets, tailOffsets, maxBytes,
+                    currentEstimatedMessageSize(), rotation);
         }
 
         if (limit instanceof CompositeReadLimit composite) {
             Map<String, Long> result = tailOffsets;
             for (ReadLimit component : composite.getReadLimits()) {
                 Map<String, Long> componentEnd = applyReadLimit(
-                        startOffsets, tailOffsets, component);
+                        startOffsets, tailOffsets, component, rotation);
                 result = ReadLimitBudget.mostRestrictive(result, componentEnd);
             }
             return result;

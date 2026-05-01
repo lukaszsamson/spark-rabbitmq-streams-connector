@@ -78,7 +78,7 @@ public final class MessageToRowConverter implements Serializable {
         if (includeCreationTime) {
             Properties props = message.getProperties();
             if (props != null && props.getCreationTime() >= 0) {
-                values[idx++] = millisToMicros(props.getCreationTime());
+                values[idx++] = safeMillisToMicros(props.getCreationTime());
             } else {
                 values[idx++] = null;
             }
@@ -88,7 +88,7 @@ public final class MessageToRowConverter implements Serializable {
             if (appProps != null && appProps.containsKey("routing_key")) {
                 Object routingValue = appProps.get("routing_key");
                 values[idx++] = routingValue != null
-                        ? UTF8String.fromString(String.valueOf(routingValue))
+                        ? UTF8String.fromString(coerceValueToString(routingValue))
                         : null;
             } else {
                 values[idx++] = null;
@@ -149,7 +149,8 @@ public final class MessageToRowConverter implements Serializable {
 
     /**
      * Convert a {@code Map<String, Object>} to Spark MapData with string keys and values.
-     * Values are coerced to strings (lossy).
+     * Values are coerced to strings deterministically per {@link #coerceValueToString(Object)}
+     * (base64 for byte[], UUID.toString(), default toString() for other types).
      */
     static ArrayBasedMapData convertStringMap(Map<String, Object> map) {
         if (map == null || map.isEmpty()) {
@@ -161,10 +162,32 @@ public final class MessageToRowConverter implements Serializable {
         for (Map.Entry<String, Object> entry : map.entrySet()) {
             keys[i] = UTF8String.fromString(entry.getKey());
             Object value = entry.getValue();
-            vals[i] = value != null ? UTF8String.fromString(String.valueOf(value)) : null;
+            vals[i] = value != null ? UTF8String.fromString(coerceValueToString(value)) : null;
             i++;
         }
         return new ArrayBasedMapData(new GenericArrayData(keys), new GenericArrayData(vals));
+    }
+
+    /**
+     * Coerce an arbitrary application_properties / message_annotations value to a
+     * deterministic string. Mirrors {@link #coerceIdToString} so that byte[] is
+     * encoded as base64 and UUIDs use {@link UUID#toString()} rather than
+     * {@code String.valueOf} which would emit JVM identity strings for byte[].
+     */
+    static String coerceValueToString(Object value) {
+        if (value == null) {
+            return null;
+        }
+        if (value instanceof String s) {
+            return s;
+        }
+        if (value instanceof byte[] bytes) {
+            return java.util.Base64.getEncoder().encodeToString(bytes);
+        }
+        if (value instanceof UUID uuid) {
+            return uuid.toString();
+        }
+        return value.toString();
     }
 
     // ---- Type coercion helpers ----
@@ -190,9 +213,37 @@ public final class MessageToRowConverter implements Serializable {
         return UTF8String.fromString(id.toString());
     }
 
-    /** Convert millis to micros for Spark TimestampType. */
+    /** Maximum input millis whose micros conversion still fits in a signed long. */
+    static final long MAX_MILLIS_FOR_MICROS = Long.MAX_VALUE / 1000L;
+    /** Minimum input millis whose micros conversion still fits in a signed long. */
+    static final long MIN_MILLIS_FOR_MICROS = Long.MIN_VALUE / 1000L;
+
+    /**
+     * Convert millis to micros for Spark TimestampType, saturating on overflow.
+     * Used for the required {@code chunk_timestamp} field where a non-null value
+     * must always be produced; saturation only triggers for millis values
+     * outside roughly +/- 292 million years from the epoch.
+     */
     static long millisToMicros(long millis) {
-        return Math.multiplyExact(millis, 1000L);
+        if (millis > MAX_MILLIS_FOR_MICROS) {
+            return Long.MAX_VALUE;
+        }
+        if (millis < MIN_MILLIS_FOR_MICROS) {
+            return Long.MIN_VALUE;
+        }
+        return millis * 1000L;
+    }
+
+    /**
+     * Convert millis to micros for an optional Spark TimestampType column,
+     * returning {@code null} when the value would overflow rather than
+     * silently saturating.
+     */
+    static Long safeMillisToMicros(long millis) {
+        if (millis > MAX_MILLIS_FOR_MICROS || millis < MIN_MILLIS_FOR_MICROS) {
+            return null;
+        }
+        return millis * 1000L;
     }
 
     /** Convert micros to millis for RabbitMQ timestamps. */
@@ -205,7 +256,7 @@ public final class MessageToRowConverter implements Serializable {
     }
 
     private static Object timestampOrNull(long millis) {
-        return millis >= 0 ? millisToMicros(millis) : null;
+        return millis >= 0 ? safeMillisToMicros(millis) : null;
     }
 
     private static Object longOrNull(long value) {
