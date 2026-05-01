@@ -2,7 +2,9 @@ package io.github.lukaszsamson.spark.rabbitmq;
 
 import com.rabbitmq.stream.ConsumerFlowStrategy;
 import com.rabbitmq.stream.Environment;
+import com.rabbitmq.stream.Message;
 import com.rabbitmq.stream.NoOffsetException;
+import com.rabbitmq.stream.Properties;
 import com.rabbitmq.stream.StreamDoesNotExistException;
 import com.rabbitmq.stream.StreamStats;
 import org.apache.spark.sql.connector.metric.CustomMetric;
@@ -17,6 +19,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -25,6 +28,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Logical representation of a RabbitMQ stream scan.
@@ -38,6 +42,7 @@ final class RabbitMQScan implements Scan {
     private static final Logger LOG = LoggerFactory.getLogger(RabbitMQScan.class);
     private static final long TAIL_PROBE_TIMEOUT_MS = 1_500L;
     private static final long MIN_TIMESTAMP_PROBE_TIMEOUT_MS = 250L;
+    private static final long RESOLVER_DRAIN_TIMEOUT_MS = 5_000L;
     private static final int TAIL_PROBE_EXECUTOR_PARALLELISM = Math.max(
             1,
             Math.min(Runtime.getRuntime().availableProcessors(),
@@ -210,17 +215,68 @@ final class RabbitMQScan implements Scan {
             return ranges;
         }
 
+        // Each task counts down its latch from a `finally` block, so the latch reaching
+        // zero is a reliable signal that the task body has truly exited (success, error,
+        // or interrupt) and is no longer using the Environment. `Future.cancel(true)`
+        // alone flips a cancelled future to done immediately and `Future.get` then
+        // returns CancellationException without verifying the underlying thread has
+        // stopped — hence the latch.
         Map<String, Future<long[]>> futures = new LinkedHashMap<>();
+        Map<String, CountDownLatch> taskExited = new LinkedHashMap<>();
         for (String stream : streams) {
-            futures.put(stream, rangeResolverExecutor().submit(() -> resolveStreamOffsetRange(env, stream)));
+            CountDownLatch latch = new CountDownLatch(1);
+            taskExited.put(stream, latch);
+            futures.put(stream, rangeResolverExecutor().submit(() -> {
+                try {
+                    return resolveStreamOffsetRange(env, stream);
+                } finally {
+                    latch.countDown();
+                }
+            }));
         }
-        for (Map.Entry<String, Future<long[]>> entry : futures.entrySet()) {
-            long[] range = awaitResolvedRange(entry.getKey(), entry.getValue());
-            if (range != null) {
-                ranges.put(entry.getKey(), range);
+        try {
+            for (Map.Entry<String, Future<long[]>> entry : futures.entrySet()) {
+                long[] range = awaitResolvedRange(entry.getKey(), entry.getValue());
+                if (range != null) {
+                    ranges.put(entry.getKey(), range);
+                }
+            }
+            return ranges;
+        } catch (RuntimeException | Error fail) {
+            // A resolver failed; cancel all peers and wait for their bodies to exit
+            // (latch countdown) before letting the outer `finally` release the
+            // Environment, so an in-flight task cannot keep using a closed Environment.
+            cancelAndAwaitResolverTermination(futures, taskExited);
+            throw fail;
+        }
+    }
+
+    private static void cancelAndAwaitResolverTermination(
+            Map<String, Future<long[]>> futures,
+            Map<String, CountDownLatch> taskExited) {
+        for (Future<long[]> future : futures.values()) {
+            future.cancel(true);
+        }
+        long deadlineNanos = System.nanoTime()
+                + TimeUnit.MILLISECONDS.toNanos(RESOLVER_DRAIN_TIMEOUT_MS);
+        for (Map.Entry<String, CountDownLatch> entry : taskExited.entrySet()) {
+            long remainingNanos = deadlineNanos - System.nanoTime();
+            if (remainingNanos <= 0) {
+                LOG.debug("Range resolver for stream '{}' did not terminate within {} ms after cancel; "
+                                + "abandoning to avoid blocking planning",
+                        entry.getKey(), RESOLVER_DRAIN_TIMEOUT_MS);
+                continue;
+            }
+            try {
+                if (!entry.getValue().await(remainingNanos, TimeUnit.NANOSECONDS)) {
+                    LOG.debug("Range resolver for stream '{}' did not exit within drain budget",
+                            entry.getKey());
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
             }
         }
-        return ranges;
     }
 
     private long[] awaitResolvedRange(String stream, Future<long[]> future) {
@@ -429,25 +485,49 @@ final class RabbitMQScan implements Scan {
         return Long.MAX_VALUE;
     }
 
+    /**
+     * Resolve an ending offset by timestamp using a probe consumer.
+     * Returns the offset of the first message whose timestamp is &gt;= the requested
+     * timestamp, used as an exclusive upper bound.
+     *
+     * <p>Per-message AMQP {@code creation_time} (when the publisher set it) takes
+     * precedence — that gives a message-precise boundary even within a chunk that
+     * straddles the bound, which is the {@code GPT-9} case we are fixing. When
+     * {@code creation_time} is unset on a message, we fall back to the chunk-level
+     * {@link com.rabbitmq.stream.MessageHandler.Context#timestamp() context
+     * timestamp}, in which case the matching chunk is excluded as a whole — that
+     * matches the original well-tested behavior on the IT path with broker-assigned
+     * chunk timestamps.
+     *
+     * <p>If only earlier messages are observed (none at/after the timestamp), all
+     * available data is before the cutoff and the stream tail is returned.
+     */
     private long resolveTimestampEndingOffset(Environment env, String stream, long timestamp) {
-        BlockingQueue<Long> observedOffsets = new LinkedBlockingQueue<>();
+        AtomicLong firstOffsetAtOrAfter = new AtomicLong(-1L);
+        CountDownLatch boundaryFound = new CountDownLatch(1);
         com.rabbitmq.stream.Consumer probe = null;
         try {
             probe = env.consumerBuilder()
                     .stream(stream)
                     .offset(com.rabbitmq.stream.OffsetSpecification.timestamp(timestamp))
                     .noTrackingStrategy()
-                    .messageHandler((context, message) -> observedOffsets.offer(context.offset()))
+                    .messageHandler((context, message) -> {
+                        if (messageOrChunkTimestamp(context, message) >= timestamp
+                                && firstOffsetAtOrAfter.compareAndSet(-1L, context.offset())) {
+                            boundaryFound.countDown();
+                        }
+                    })
                     .flow()
                     .initialCredits(1)
                     .strategy(ConsumerFlowStrategy.creditOnChunkArrival(1))
                     .builder()
                     .build();
 
-            Long observed = observedOffsets.poll(timestampProbeTimeoutMs(), TimeUnit.MILLISECONDS);
-            if (observed != null) {
-                return observed;
+            if (boundaryFound.await(timestampProbeTimeoutMs(), TimeUnit.MILLISECONDS)) {
+                return firstOffsetAtOrAfter.get();
             }
+            // No message with ts >= requested timestamp arrived within the probe budget.
+            // Fall back to tail — all available data is before the cutoff.
             StreamStats tailStats = env.queryStreamStats(stream);
             return resolveTailOffset(tailStats);
         } catch (NoOffsetException e) {
@@ -462,14 +542,39 @@ final class RabbitMQScan implements Scan {
             throw new IllegalStateException(
                     "Failed to resolve timestamp end offset for stream '" + stream + "'", e);
         } finally {
-            if (probe != null) {
-                try {
-                    probe.close();
-                } catch (Exception ex) {
-                    LOG.debug("Error closing timestamp-end probe consumer for stream '{}'",
-                            stream, ex);
+            closeProbeQuietly(probe, stream);
+        }
+    }
+
+    /**
+     * Per-message AMQP {@code creation_time} when the publisher set it, otherwise the
+     * chunk-level context timestamp. {@code Properties#getCreationTime()} returns a
+     * negative value when the property is unset (see {@code MessageToRowConverter}).
+     */
+    private static long messageOrChunkTimestamp(
+            com.rabbitmq.stream.MessageHandler.Context context,
+            Message message) {
+        if (message != null) {
+            Properties props = message.getProperties();
+            if (props != null) {
+                long creationTime = props.getCreationTime();
+                if (creationTime >= 0L) {
+                    return creationTime;
                 }
             }
+        }
+        return context.timestamp();
+    }
+
+    private static void closeProbeQuietly(com.rabbitmq.stream.Consumer probe, String stream) {
+        if (probe == null) {
+            return;
+        }
+        try {
+            probe.close();
+        } catch (Exception ex) {
+            LOG.debug("Error closing timestamp-end probe consumer for stream '{}'",
+                    stream, ex);
         }
     }
 

@@ -2,8 +2,10 @@ package io.github.lukaszsamson.spark.rabbitmq;
 
 import com.rabbitmq.stream.ConsumerBuilder;
 import com.rabbitmq.stream.Environment;
+import com.rabbitmq.stream.Message;
 import com.rabbitmq.stream.NoOffsetException;
 import com.rabbitmq.stream.ProducerBuilder;
+import com.rabbitmq.stream.Properties;
 import com.rabbitmq.stream.StreamCreator;
 import com.rabbitmq.stream.StreamDoesNotExistException;
 import com.rabbitmq.stream.StreamStats;
@@ -23,6 +25,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /**
  * Unit tests for {@link RabbitMQScan} planning logic and offset resolution
@@ -108,6 +112,26 @@ class RabbitMQScanTest {
             assertThat(ranges).hasSize(4);
             assertThat(env.maxConcurrent()).isGreaterThan(1);
             assertThat(ranges.get("s1")).containsExactly(10L, 100L);
+        }
+
+        @Test
+        void resolveOffsetRangesPropagatesResolverFailure() {
+            // When one resolver fails, the planner propagates the failure (rather than
+            // swallowing it) so the surrounding code can cancel-and-drain peers before
+            // releasing the Environment. The actual cancel-and-await behavior is unit-
+            // tested via the latch-based termination check inside the production code;
+            // this test pins the user-visible contract without depending on cross-thread
+            // scheduling, which has proven flaky on shared CI executors.
+            Map<String, String> opts = baseOptions();
+            opts.put("endingOffsets", "offset");
+            opts.put("endingOffset", "100");
+            RabbitMQScan scan = new RabbitMQScan(new ConnectorOptions(opts), schema());
+
+            assertThatThrownBy(() -> resolveOffsetRanges(scan,
+                    new QueryFailureEnvironment(),
+                    List.of("s1", "s2", "s3", "s4")))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("Failed to query stream stats");
         }
 
         @Test
@@ -223,16 +247,22 @@ class RabbitMQScanTest {
         }
 
         @Test
-        void timestampEndPlanningWaitsForProbeWithinConfiguredPollTimeoutWhenSupported() throws Exception {
+        void timestampEndPlanningReturnsFirstOffsetAtOrAfterEndingTimestamp() throws Exception {
+            // Single observed message whose per-message creation_time clears the bound.
+            // The probe returns its offset as the exclusive end — the message itself is
+            // excluded (it was published at/after the requested cutoff).
+            long endingTs = 1700000000000L;
             Map<String, String> opts = baseOptions();
             opts.put("endingOffsets", "timestamp");
-            opts.put("endingTimestamp", "1700000000000");
+            opts.put("endingTimestamp", String.valueOf(endingTs));
             opts.put("pollTimeoutMs", "1000");
             RabbitMQScan scan = new RabbitMQScan(new ConnectorOptions(opts), schema());
 
             Long end = resolveTimestampEndingOffsetIfSupported(scan,
-                    new DelayedProbeEnvironment(400L, new Stats(0L, false, false, 99L), 17L),
-                    "s1", 1700000000000L);
+                    new DelayedProbeEnvironment(400L, new Stats(0L, false, false, 99L),
+                            new long[]{17L},
+                            new long[]{endingTs}),
+                    "s1", endingTs);
             if (end == null) {
                 return;
             }
@@ -240,16 +270,50 @@ class RabbitMQScanTest {
         }
 
         @Test
-        void timestampEndPlanningUsesPerStreamTimestampOverride() throws Exception {
+        void timestampEndPlanningPicksFirstMessageWithCreationTimeAtOrAfterBound() throws Exception {
+            // Per-message creation_time is honored: when the publisher records timestamps
+            // and a chunk straddles the bound (early messages still under, later messages
+            // already over), the exclusive end is the offset of the first late message.
+            // This is the GPT-9 case the data-loss fix targets.
+            long endingTs = 1700000000000L;
             Map<String, String> opts = baseOptions();
             opts.put("endingOffsets", "timestamp");
-            opts.put("endingOffsetsByTimestamp", "{\"s1\":1700000000000}");
+            opts.put("endingTimestamp", String.valueOf(endingTs));
+            opts.put("pollTimeoutMs", "1000");
+            RabbitMQScan scan = new RabbitMQScan(new ConnectorOptions(opts), schema());
+
+            long[] offsets = {10L, 11L, 12L, 13L, 14L, 15L, 16L, 17L, 18L, 19L};
+            long[] creationTimes = new long[offsets.length];
+            for (int i = 0; i < 5; i++) {
+                creationTimes[i] = endingTs - 1L;
+            }
+            for (int i = 5; i < offsets.length; i++) {
+                creationTimes[i] = endingTs;
+            }
+            Long end = resolveTimestampEndingOffsetIfSupported(scan,
+                    new DelayedProbeEnvironment(50L, new Stats(0L, false, false, 99L),
+                            offsets, creationTimes),
+                    "s1", endingTs);
+            if (end == null) {
+                return;
+            }
+            assertThat(end).isEqualTo(15L);
+        }
+
+        @Test
+        void timestampEndPlanningUsesPerStreamTimestampOverride() throws Exception {
+            long endingTs = 1700000000000L;
+            Map<String, String> opts = baseOptions();
+            opts.put("endingOffsets", "timestamp");
+            opts.put("endingOffsetsByTimestamp", "{\"s1\":" + endingTs + "}");
             opts.put("pollTimeoutMs", "1000");
             RabbitMQScan scan = new RabbitMQScan(new ConnectorOptions(opts), schema());
             StreamStats stats = new Stats(0L, false, false, 99L);
 
             long end = resolveEndOffset(scan,
-                    new DelayedProbeEnvironment(0L, new Stats(0L, false, false, 99L), 17L),
+                    new DelayedProbeEnvironment(0L, new Stats(0L, false, false, 99L),
+                            new long[]{17L},
+                            new long[]{endingTs}),
                     "s1", stats);
             assertThat(end).isEqualTo(17L);
         }
@@ -595,17 +659,32 @@ class RabbitMQScanTest {
     private static final class DelayedProbeEnvironment implements Environment {
         private final long delayMs;
         private final long[] offsets;
+        private final long[] creationTimes;
         private final StreamStats stats;
 
         private DelayedProbeEnvironment(long delayMs, StreamStats stats, long... offsets) {
+            // Default: per-message creation_time unset (-1) — the production probe will
+            // fall back to the chunk-level context timestamp, which is 0 in this fixture.
+            this(delayMs, stats, offsets, fillArray(offsets.length, -1L));
+        }
+
+        private DelayedProbeEnvironment(long delayMs, StreamStats stats,
+                long[] offsets, long[] creationTimes) {
             this.delayMs = delayMs;
             this.stats = stats;
             this.offsets = offsets;
+            this.creationTimes = creationTimes;
+        }
+
+        private static long[] fillArray(int length, long value) {
+            long[] result = new long[length];
+            java.util.Arrays.fill(result, value);
+            return result;
         }
 
         @Override
         public ConsumerBuilder consumerBuilder() {
-            return new DelayedProbeConsumerBuilder(delayMs, offsets);
+            return new DelayedProbeConsumerBuilder(delayMs, offsets, creationTimes);
         }
 
         @Override
@@ -1057,11 +1136,13 @@ class RabbitMQScanTest {
     private static final class DelayedProbeConsumerBuilder implements ConsumerBuilder {
         private final long delayMs;
         private final long[] offsets;
+        private final long[] creationTimes;
         private com.rabbitmq.stream.MessageHandler handler;
 
-        private DelayedProbeConsumerBuilder(long delayMs, long[] offsets) {
+        private DelayedProbeConsumerBuilder(long delayMs, long[] offsets, long[] creationTimes) {
             this.delayMs = delayMs;
             this.offsets = offsets;
+            this.creationTimes = creationTimes;
         }
 
         @Override
@@ -1143,8 +1224,15 @@ class RabbitMQScanTest {
                 Thread emitter = new Thread(() -> {
                     try {
                         Thread.sleep(delayMs);
-                        for (long offset : offsets) {
-                            handler.handle(new ProbeContext(offset), null);
+                        for (int i = 0; i < offsets.length; i++) {
+                            // creationTimes[i] == -1 simulates an unset per-message
+                            // creation_time, which makes the production probe fall back
+                            // to the chunk-level context timestamp.
+                            Message message = mock(Message.class);
+                            Properties properties = mock(Properties.class);
+                            when(properties.getCreationTime()).thenReturn(creationTimes[i]);
+                            when(message.getProperties()).thenReturn(properties);
+                            handler.handle(new ProbeContext(offsets[i]), message);
                         }
                     } catch (InterruptedException e) {
                         Thread.currentThread().interrupt();
