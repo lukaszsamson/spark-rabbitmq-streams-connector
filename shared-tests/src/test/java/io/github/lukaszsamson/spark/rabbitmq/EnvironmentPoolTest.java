@@ -563,6 +563,116 @@ class EnvironmentPoolTest {
         }
 
         @Test
+        void rollbackFailedAcquireSchedulesEvictionWhenFutureSucceeded() throws Exception {
+            // CLAUDE-6: an interrupted acquirer must not leave a refCount=0 entry
+            // in the pool without scheduled eviction — that would leak the Environment.
+            EnvironmentPool pool = EnvironmentPool.getInstance();
+            Map<String, String> map = minimalMap("localhost:5552", "test-stream");
+            map.put("environmentIdleTimeoutMs", "60000");
+            ConnectorOptions options = new ConnectorOptions(map);
+            EnvironmentPool.EnvironmentKey key = EnvironmentPool.EnvironmentKey.from(options);
+            CountingEnvironment env = new CountingEnvironment();
+            Object entry = newEntry(env); // future complete normally, refCount=1
+            putEntry(key, entry);
+
+            invokeRollbackFailedAcquire(pool, key, entry);
+
+            assertThat(getRefCount(entry)).isEqualTo(0);
+            assertThat((Object) getEvictionTask(entry)).isNotNull();
+            assertThat(getPoolMap()).containsKey(key);
+            assertThat(env.closeCount.get()).isZero();
+        }
+
+        @Test
+        void rollbackFailedAcquireDoesNotScheduleEvictionWhenEntryNotInPool() throws Exception {
+            // If the entry is no longer the active mapping (e.g., closeAll cleared
+            // the pool), rollback must not schedule an eviction — that would
+            // resurrect the entry and recreate the eviction scheduler post-shutdown.
+            EnvironmentPool pool = EnvironmentPool.getInstance();
+            ConnectorOptions options = opts("localhost:5552", "test-stream");
+            EnvironmentPool.EnvironmentKey key = EnvironmentPool.EnvironmentKey.from(options);
+            CountingEnvironment env = new CountingEnvironment();
+            Object entry = newEntry(env);
+            // Deliberately do NOT put the entry in the pool.
+
+            pool.shutdownEvictionScheduler();
+            assertThat(pool.isEvictionSchedulerShutdown()).isTrue();
+
+            invokeRollbackFailedAcquire(pool, key, entry);
+
+            assertThat(getRefCount(entry)).isEqualTo(0);
+            assertThat((Object) getEvictionTask(entry)).isNull();
+            assertThat(pool.isEvictionSchedulerShutdown()).isTrue();
+        }
+
+        @Test
+        void rollbackFailedAcquireRemovesEntryWhenFutureFailed() throws Exception {
+            EnvironmentPool pool = EnvironmentPool.getInstance();
+            ConnectorOptions options = opts("localhost:5552", "test-stream");
+            EnvironmentPool.EnvironmentKey key = EnvironmentPool.EnvironmentKey.from(options);
+            Object entry = newEntryWithFailedFuture();
+            putEntry(key, entry);
+
+            invokeRollbackFailedAcquire(pool, key, entry);
+
+            assertThat(getPoolMap()).doesNotContainKey(key);
+            assertThat((Object) getEvictionTask(entry)).isNull();
+        }
+
+        @Test
+        void closeAllDoesNotCloseEnvironmentAlreadyClosedByEviction() throws Exception {
+            // CLAUDE-11: if evict() already closed the Environment, a concurrent
+            // closeAll() must not invoke close() again.
+            EnvironmentPool pool = EnvironmentPool.getInstance();
+            ConnectorOptions options = opts("localhost:5552", "test-stream");
+            EnvironmentPool.EnvironmentKey key = EnvironmentPool.EnvironmentKey.from(options);
+            CountingEnvironment env = new CountingEnvironment();
+            Object entry = newEntry(env);
+            putEntry(key, entry);
+            setClosed(entry, true); // simulate evict() already closed it
+
+            pool.closeAll();
+
+            assertThat(env.closeCount.get()).isZero();
+        }
+
+        @Test
+        void evictDoesNotCloseEnvironmentAlreadyClosedByCloseAll() throws Exception {
+            EnvironmentPool pool = EnvironmentPool.getInstance();
+            ConnectorOptions options = opts("localhost:5552", "test-stream");
+            EnvironmentPool.EnvironmentKey key = EnvironmentPool.EnvironmentKey.from(options);
+            CountingEnvironment env = new CountingEnvironment();
+            Object entry = newEntry(env);
+            setRefCount(entry, 0);
+            setClosed(entry, true); // simulate closeAll() already closed it
+            putEntry(key, entry);
+
+            invokeEvict(pool, key, entry);
+
+            assertThat(env.closeCount.get()).isZero();
+            assertThat(getPoolMap()).doesNotContainKey(key);
+        }
+
+        @Test
+        void evictThenCloseAllInvokesEnvironmentCloseExactlyOnce() throws Exception {
+            EnvironmentPool pool = EnvironmentPool.getInstance();
+            ConnectorOptions options = opts("localhost:5552", "test-stream");
+            EnvironmentPool.EnvironmentKey key = EnvironmentPool.EnvironmentKey.from(options);
+            CountingEnvironment env = new CountingEnvironment();
+            Object entry = newEntry(env);
+            setRefCount(entry, 0);
+            putEntry(key, entry);
+
+            invokeEvict(pool, key, entry);
+            assertThat(env.closeCount.get()).isEqualTo(1);
+            // entry was removed from pool; place it back to simulate the race
+            // where closeAll snapshotted before evict's pool.remove.
+            putEntry(key, entry);
+            pool.closeAll();
+            assertThat(env.closeCount.get()).isEqualTo(1);
+        }
+
+        @Test
         void keyDoesNotNormalizeEquivalentEndpoints() {
             Map<String, String> map1 = minimalMap("localhost:5552", "test-stream");
             Map<String, String> map2 = minimalMap(" localhost:5552 ", "test-stream");
@@ -653,6 +763,43 @@ class EnvironmentPoolTest {
                 EnvironmentPool.EnvironmentKey.class, entry.getClass());
         evict.setAccessible(true);
         evict.invoke(pool, key, entry);
+    }
+
+    private static void invokeRollbackFailedAcquire(EnvironmentPool pool,
+                                                    EnvironmentPool.EnvironmentKey key,
+                                                    Object entry) throws Exception {
+        Method method = EnvironmentPool.class.getDeclaredMethod("rollbackFailedAcquire",
+                EnvironmentPool.EnvironmentKey.class, entry.getClass());
+        method.setAccessible(true);
+        method.invoke(pool, key, entry);
+    }
+
+    private static void setClosed(Object entry, boolean value) throws Exception {
+        Field closedField = entry.getClass().getDeclaredField("closed");
+        closedField.setAccessible(true);
+        java.util.concurrent.atomic.AtomicBoolean closed =
+                (java.util.concurrent.atomic.AtomicBoolean) closedField.get(entry);
+        closed.set(value);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Object newEntryWithFailedFuture() throws Exception {
+        Class<?> entryClass = Class.forName(
+                "io.github.lukaszsamson.spark.rabbitmq.EnvironmentPool$PooledEntry");
+        Constructor<?> ctor = entryClass.getDeclaredConstructor();
+        ctor.setAccessible(true);
+        Object entry = ctor.newInstance();
+
+        Field futureField = entryClass.getDeclaredField("environmentFuture");
+        futureField.setAccessible(true);
+        ((java.util.concurrent.CompletableFuture<Environment>) futureField.get(entry))
+                .completeExceptionally(new RuntimeException("build failed"));
+
+        Field refCountField = entryClass.getDeclaredField("refCount");
+        refCountField.setAccessible(true);
+        ((AtomicInteger) refCountField.get(entry)).set(1);
+
+        return entry;
     }
 
     private static Object getEntry(ConnectorOptions options) throws Exception {
