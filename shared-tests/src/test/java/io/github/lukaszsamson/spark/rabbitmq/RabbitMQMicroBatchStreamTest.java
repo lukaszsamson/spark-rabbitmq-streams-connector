@@ -1263,6 +1263,20 @@ class RabbitMQMicroBatchStreamTest {
         }
 
         @Test
+        void latestOffsetUsesProbeWhenStatsTailOvershootsAfterRecreation() throws Exception {
+            RabbitMQMicroBatchStream stream = createStream(minimalOptions());
+            ProbeCountingEnvironment env = new ProbeCountingEnvironment(12L, java.util.List.of(11L));
+            setPrivateField(stream, "environment", env);
+
+            RabbitMQStreamOffset start = new RabbitMQStreamOffset(Map.of("test-stream", 10L));
+            RabbitMQStreamOffset latest =
+                    (RabbitMQStreamOffset) stream.latestOffset(start, ReadLimit.allAvailable());
+
+            assertThat(latest.getStreamOffsets()).containsEntry("test-stream", 12L);
+            assertThat(env.probeBuilderCalls).isEqualTo(1);
+        }
+
+        @Test
         void latestOffsetNeverRegressesBelowStartWhenStatsTailIsStaleAndProbeFails() throws Exception {
             RabbitMQMicroBatchStream stream = createStream(minimalOptions());
             SequencedProbeCountingEnvironment env = new SequencedProbeCountingEnvironment(
@@ -1481,7 +1495,7 @@ class RabbitMQMicroBatchStreamTest {
         void queryTailOffsetsForAvailableNowCallsProbeAndTakesMaxWithStats() throws Exception {
             // prepareForTriggerAvailableNow calls BOTH stats and probe, taking max.
             // stats tail = 400+1 = 401, probe offsets=[399] -> probedTail = 399+1 = 400.
-            // max(401, 400) = 401 is stored in snapshot. Probe IS called (probeBuilderCalls=1).
+            // Use the exact probe result instead of stale stats to avoid overshooting.
             RabbitMQMicroBatchStream stream = createStream(minimalOptions());
             setPrivateField(stream, "environment",
                     new ProbeCountingEnvironment(400L, java.util.List.of(399L)));
@@ -1492,7 +1506,7 @@ class RabbitMQMicroBatchStreamTest {
             RabbitMQStreamOffset latest = (RabbitMQStreamOffset) stream.latestOffset(
                     new RabbitMQStreamOffset(Map.of("test-stream", 400L)),
                     ReadLimit.allAvailable());
-            assertThat(latest.getStreamOffsets()).containsEntry("test-stream", 401L);
+            assertThat(latest.getStreamOffsets()).containsEntry("test-stream", 400L);
             assertThat(((ProbeCountingEnvironment) getPrivateField(stream, "environment")).probeBuilderCalls)
                     .isEqualTo(1);
         }

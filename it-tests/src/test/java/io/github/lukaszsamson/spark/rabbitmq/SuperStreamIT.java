@@ -1689,7 +1689,11 @@ class SuperStreamIT extends AbstractRabbitMQIT {
                 .option("superstream", superStream)
                 .option("startingOffsets", "earliest")
                 .option("failOnDataLoss", "false")
+                // Churn validation is about reader progress/duplicates; broker offset storage
+                // can block while a partition is deleted and make this stress test timing-sensitive.
+                .option("serverSideOffsetTracking", "false")
                 .option("maxRecordsPerTrigger", "8")
+                .option("maxWaitMs", "5000")
                 .option("metadataFields", "")
                 .option("addressResolverClass",
                         "io.github.lukaszsamson.spark.rabbitmq.TestAddressResolver")
@@ -1702,31 +1706,30 @@ class SuperStreamIT extends AbstractRabbitMQIT {
                 .trigger(Trigger.ProcessingTime(200))
                 .start();
 
-        CompletableFuture<Void> churnTask = CompletableFuture.runAsync(() -> {
-            try {
-                for (int i = 0; i < 3; i++) {
-                    String target = superStream + "-" + (i % PARTITION_COUNT);
-                    deleteStream(target);
-                    Thread.sleep(300);
-                    createStream(target);
-                    publishMessages(target, 6, "churn-new-" + i + "-");
-                    churned.incrementAndGet();
-                    Thread.sleep(500);
-                }
-            } catch (Exception e) {
-                throw new RuntimeException(e);
-            }
-        });
-
         try {
+            waitUntil(
+                    () -> captured.size() >= 20,
+                    60_000,
+                    "initial rows to be captured before churn scenario");
+            CompletableFuture<Void> churnTask = CompletableFuture.runAsync(() -> {
+                try {
+                    for (int i = 0; i < 3; i++) {
+                        String target = superStream + "-" + (i % PARTITION_COUNT);
+                        deleteStream(target);
+                        Thread.sleep(300);
+                        createStream(target);
+                        publishMessages(target, 6, "churn-new-" + i + "-");
+                        churned.incrementAndGet();
+                        Thread.sleep(500);
+                    }
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
+            });
             waitUntil(
                     () -> churned.get() == 3,
                     60_000,
                     "three churn cycles to complete");
-            waitUntil(
-                    () -> captured.size() >= 20,
-                    60_000,
-                    "rows to be captured for churn scenario");
             churnTask.join();
         } finally {
             query.stop();

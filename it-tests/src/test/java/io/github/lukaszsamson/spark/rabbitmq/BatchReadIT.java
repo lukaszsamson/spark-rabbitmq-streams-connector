@@ -737,7 +737,8 @@ class BatchReadIT extends AbstractRabbitMQIT {
                             assertThat(message).isNotNull();
                             assertThat(
                                     message.contains("closed before reaching target end offset")
-                                            || message.contains("does not exist"))
+                                            || message.contains("does not exist")
+                                            || message.contains("data loss/recreation"))
                                     .isTrue();
                         }
                     });

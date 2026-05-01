@@ -84,11 +84,14 @@ final class RabbitMQPartitionReader extends BaseRabbitMQPartitionReader
                         && hasStreamTailReachedPlannedEnd();
                 boolean dataLossProven = isPlannedRangeNoLongerReachableDueToDataLoss();
                 boolean sacInactive = isSingleActiveConsumerKnownInactive();
-                TerminationDecision decision = decideTermination(
-                        false, dataLossProven, plannedEndReached, sacInactive);
+                boolean rangeEndedBeforeTarget = !options.isFailOnDataLoss()
+                        && plannedRangeEndedBeforeTarget();
+                TerminationDecision decision = rangeEndedBeforeTarget
+                        ? TerminationDecision.COMPLETE
+                        : decideTermination(false, dataLossProven, plannedEndReached, sacInactive);
                 switch (decision) {
                     case COMPLETE:
-                        if (dataLossProven) {
+                        if (dataLossProven || rangeEndedBeforeTarget) {
                             dataLoss++;
                         }
                         finished = true;

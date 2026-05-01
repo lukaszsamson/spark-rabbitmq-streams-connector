@@ -264,6 +264,31 @@ class RabbitMQPartitionReaderTest {
         }
 
         @Test
+        void failOnDataLossFalseCompletesWhenProbeShowsRangeEndedBeforeTarget() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("failOnDataLoss", "false");
+            opts.put("pollTimeoutMs", "5");
+            opts.put("maxWaitMs", "5");
+
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 10, 13, new ConnectorOptions(opts));
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
+
+            setPrivateField(reader, "consumer", new NoopConsumer());
+            setPrivateField(reader, "queue", new LinkedBlockingQueue<>());
+            setPrivateField(reader, "lastObservedOffset", 11L);
+            setPrivateField(reader, "lastEmittedOffset", 11L);
+            setPrivateField(reader, "lastTailProbeOffset", 11L);
+            setPrivateField(reader, "lastTailProbeNanos",
+                    System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(1));
+
+            assertThat(reader.next()).isFalse();
+            assertThat(reader.currentMetricsValues()[5].value()).isEqualTo(1L);
+        }
+
+        @Test
         void nextFailsFastWhenConsumerAlreadyClosed() throws Exception {
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
@@ -1323,6 +1348,23 @@ class RabbitMQPartitionReaderTest {
             setPrivateField(reader, "lastObservedOffset", -1L);
 
             assertThat(isPlannedRangeNoLongerReachableDueToDataLoss(reader)).isTrue();
+        }
+
+        @Test
+        void staleStatsTailBehindObservedOffsetIsNotTreatedAsDataLoss() throws Exception {
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 0, 100, minimalOptions());
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
+
+            com.rabbitmq.stream.Environment env = mock(com.rabbitmq.stream.Environment.class);
+            com.rabbitmq.stream.StreamStats stats = mock(com.rabbitmq.stream.StreamStats.class);
+            when(env.queryStreamStats("test-stream")).thenReturn(stats);
+            when(stats.firstOffset()).thenReturn(0L);
+            when(stats.committedOffset()).thenReturn(0L);
+            setPrivateField(reader, "environment", env);
+            setPrivateField(reader, "lastObservedOffset", 9L);
+
+            assertThat(isPlannedRangeNoLongerReachableDueToDataLoss(reader)).isFalse();
         }
 
         @Test

@@ -216,11 +216,14 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
                     boolean plannedEndReached = canCompleteEmptyPlannedRange()
                             && hasStreamTailReachedPlannedEnd();
                     boolean dataLossProven = isPlannedRangeNoLongerReachableDueToDataLoss();
-                    TerminationDecision decision = decideTermination(
-                            true, dataLossProven, plannedEndReached, sacInactive);
+                    boolean rangeEndedBeforeTarget = !options.isFailOnDataLoss()
+                            && plannedRangeEndedBeforeTarget();
+                    TerminationDecision decision = rangeEndedBeforeTarget
+                            ? TerminationDecision.COMPLETE
+                            : decideTermination(true, dataLossProven, plannedEndReached, sacInactive);
                     switch (decision) {
                         case COMPLETE:
-                            if (dataLossProven) {
+                            if (dataLossProven || rangeEndedBeforeTarget) {
                                 LOG.warn("Reached maxWaitMs={} on stream '{}' and planned range [{}, {}) is no longer " +
                                                 "reachable after data loss/recreation; completing split because failOnDataLoss=false",
                                         maxWaitMs, stream, startOffset, endOffset);
@@ -943,13 +946,13 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
             }
             StreamStats stats = env.queryStreamStats(stream);
             long first = stats.firstOffset();
-            long tail = resolveTailOffsetInclusive(stats);
             boolean startWasTruncatedBeforeAnyInRangeProgress =
                     first > startOffset && lastObservedOffset < startOffset;
-            boolean streamWasResetOrTruncated =
-                    tail < startOffset || startWasTruncatedBeforeAnyInRangeProgress
-                            || (lastObservedOffset >= 0 && tail < lastObservedOffset);
-            return isTailBeforePlannedEnd(tail) && streamWasResetOrTruncated;
+            if (startWasTruncatedBeforeAnyInRangeProgress) {
+                return true;
+            }
+            long tail = probeLastMessageOffset();
+            return tail >= 0 && tail < startOffset;
         } catch (Exception e) {
             if (isMissingStreamException(e)) {
                 return true;
@@ -958,6 +961,18 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
                     stream, e.getMessage());
             return false;
         }
+    }
+
+    boolean plannedRangeEndedBeforeTarget() {
+        if (!hasFinitePlannedEnd() || endOffset <= startOffset) {
+            return false;
+        }
+        long lastObservedInRange = Math.min(lastObservedOffset, endOffset - 1);
+        if (lastObservedInRange < startOffset) {
+            return false;
+        }
+        long tail = probeLastMessageOffset();
+        return tail >= 0 && tail <= lastObservedInRange && isTailBeforePlannedEnd(tail);
     }
 
     boolean isMissingStreamException(Throwable throwable) {
