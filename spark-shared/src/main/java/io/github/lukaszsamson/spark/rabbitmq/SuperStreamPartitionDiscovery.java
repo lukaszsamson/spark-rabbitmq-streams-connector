@@ -24,6 +24,11 @@ final class SuperStreamPartitionDiscovery {
      * {@link Method} handle. Uses {@link ClassValue} so the cache entry is
      * weakly tied to the {@link Class}'s lifetime, preventing classloader
      * pinning in long-running Spark JVMs.
+     *
+     * <p>{@code computeValue} re-throws {@link NoSuchMethodException} as a
+     * {@link CachedReflectionException} so callers can recover the original
+     * checked exception and let the existing wrap site produce the
+     * documented "Failed to query partitions ..." message.
      */
     private static final ClassValue<Method> LOCATOR_OPERATION_CACHE = new ClassValue<>() {
         @Override
@@ -34,10 +39,7 @@ final class SuperStreamPartitionDiscovery {
                 method.setAccessible(true);
                 return method;
             } catch (NoSuchMethodException e) {
-                throw new IllegalStateException(
-                        "rabbitmq-stream-java-client " + environmentClass.getName() +
-                                " does not expose locatorOperation(Function); " +
-                                "client version is incompatible", e);
+                throw new CachedReflectionException(e);
             }
         }
     };
@@ -54,15 +56,47 @@ final class SuperStreamPartitionDiscovery {
             try {
                 return clientClass.getMethod("partitions", String.class);
             } catch (NoSuchMethodException e) {
-                throw new IllegalStateException(
-                        "rabbitmq-stream-java-client locator " + clientClass.getName() +
-                                " does not expose partitions(String); " +
-                                "client version is incompatible", e);
+                throw new CachedReflectionException(e);
             }
         }
     };
 
     private SuperStreamPartitionDiscovery() {}
+
+    private static Method locatorOperation(Class<?> environmentClass)
+            throws ReflectiveOperationException {
+        try {
+            return LOCATOR_OPERATION_CACHE.get(environmentClass);
+        } catch (CachedReflectionException e) {
+            throw e.cause;
+        }
+    }
+
+    private static Method partitionsMethod(Class<?> clientClass)
+            throws ReflectiveOperationException {
+        try {
+            return PARTITIONS_METHOD_CACHE.get(clientClass);
+        } catch (CachedReflectionException e) {
+            throw e.cause;
+        }
+    }
+
+    /**
+     * Lightweight unchecked wrapper used to thread a checked
+     * {@link ReflectiveOperationException} through {@link ClassValue#computeValue}
+     * (which forbids checked throws). Caught and unwrapped by the {@code locatorOperation}
+     * / {@code partitionsMethod} accessors so the rest of the class continues
+     * to handle the original checked exception type.
+     */
+    private static final class CachedReflectionException extends RuntimeException {
+        private static final long serialVersionUID = 1L;
+        final ReflectiveOperationException cause;
+
+        CachedReflectionException(ReflectiveOperationException cause) {
+            super(cause);
+            this.cause = cause;
+        }
+    }
 
     /**
      * Discover partition streams using connector connection options.
@@ -93,11 +127,11 @@ final class SuperStreamPartitionDiscovery {
     private static List<String> discoverPartitionsViaEnvironment(Environment environment,
                                                                  String superStream) {
         try {
-            Method locatorOperation = LOCATOR_OPERATION_CACHE.get(environment.getClass());
+            Method locatorOperation = locatorOperation(environment.getClass());
 
             Function<Object, Object> partitionsOperation = client -> {
                 try {
-                    Method partitionsMethod = PARTITIONS_METHOD_CACHE.get(client.getClass());
+                    Method partitionsMethod = partitionsMethod(client.getClass());
                     return partitionsMethod.invoke(client, superStream);
                 } catch (ReflectiveOperationException e) {
                     throw new IllegalStateException(
