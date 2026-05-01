@@ -1147,10 +1147,11 @@ class RabbitMQMicroBatchStreamTest {
         }
 
         @Test
-        void latestOffsetUsesBothStatsAndProbeAndCachesProbeResult() throws Exception {
-            // latestOffset calls both queryStreamStats and probeTailOffsetFromLastMessage,
-            // takes max(statsTail, probedTail). The probe result is cached for ~1s so a
-            // second back-to-back call reuses the cached probe without a second consumerBuilder call.
+        void latestOffsetResolvesTailFromStatsAndCachesAcrossInvocations() throws Exception {
+            // latestOffset resolves tail purely from stats: committedOffset() + 1 when
+            // available, committedChunkId fallback otherwise. The per-trigger StreamStatsCache
+            // means back-to-back calls within one trigger query the broker exactly once per
+            // stream — and the consumer-builder probe is no longer used at all.
             RabbitMQMicroBatchStream stream = createStream(minimalOptions());
             ProbeCountingEnvironment env = new ProbeCountingEnvironment(10L, java.util.List.of(14L));
             setPrivateField(stream, "environment", env);
@@ -1161,19 +1162,21 @@ class RabbitMQMicroBatchStreamTest {
             RabbitMQStreamOffset second =
                     (RabbitMQStreamOffset) stream.latestOffset(start, ReadLimit.allAvailable());
 
-            // stats tail = 10+1 = 11, probe tail = 14+1 = 15, max = 15
-            assertThat(first.getStreamOffsets()).containsEntry("test-stream", 15L);
-            assertThat(second.getStreamOffsets()).containsEntry("test-stream", 15L);
-            // Stats queried once per latestOffset call; probe cached after first call
+            // stats tail = committedOffset(10) + 1 = 11; no probe contribution
+            assertThat(first.getStreamOffsets()).containsEntry("test-stream", 11L);
+            assertThat(second.getStreamOffsets()).containsEntry("test-stream", 11L);
+            // Two stats calls per query lifecycle: one inside discoverStreams (the
+            // validateConfiguredStreamExists check) and one inside queryStreamTailOffsetForLatest.
+            // The second latestOffset is served from the latestOffset invocation cache
+            // without re-entering queryStreamStats. Probe path is gone entirely.
             assertThat(env.queryStatsCalls).isEqualTo(2);
-            assertThat(env.probeBuilderCalls).isEqualTo(1);
+            assertThat(env.probeBuilderCalls).isEqualTo(0);
         }
 
         @Test
-        void latestOffsetAdvancesWhenProbeDetectsNewDataBeyondStatsTail() throws Exception {
-            // When stats tail <= start, the old behavior would return start unchanged.
-            // With probe enabled: max(statsTail=11, probedTail=15) = 15 > start=11, so
-            // latestOffset now returns 15 instead of staying at start.
+        void latestOffsetReturnsStartWhenStatsTailDoesNotExceedIt() throws Exception {
+            // Stats-only tail is 11; start is also 11. Since tail does not exceed start,
+            // latestOffset returns the start map (no advance, no consumer-builder probe).
             RabbitMQMicroBatchStream stream = createStream(minimalOptions());
             ProbeCountingEnvironment env = new ProbeCountingEnvironment(10L, java.util.List.of(14L));
             setPrivateField(stream, "environment", env);
@@ -1182,56 +1185,15 @@ class RabbitMQMicroBatchStreamTest {
             RabbitMQStreamOffset latest =
                     (RabbitMQStreamOffset) stream.latestOffset(start, ReadLimit.allAvailable());
 
-            // stats tail = 10+1 = 11, probe tail = 14+1 = 15, max = 15 > start(11) -> new data
-            assertThat(latest.getStreamOffsets()).containsEntry("test-stream", 15L);
-            assertThat(env.probeBuilderCalls).isEqualTo(1);
+            assertThat(latest.getStreamOffsets()).containsEntry("test-stream", 11L);
+            assertThat(env.probeBuilderCalls).isEqualTo(0);
         }
 
         @Test
-        void latestOffsetRetriesSlowProbeWhenStatsTailIsStale() throws Exception {
-            RabbitMQMicroBatchStream stream = createStream(minimalOptions());
-            SequencedProbeCountingEnvironment env = new SequencedProbeCountingEnvironment(
-                    true,
-                    java.util.List.of(java.util.List.of(49L)),
-                    java.util.List.of(400L));
-            setPrivateField(stream, "environment", env);
-
-            RabbitMQStreamOffset start = new RabbitMQStreamOffset(Map.of("test-stream", 0L));
-            RabbitMQStreamOffset latest =
-                    (RabbitMQStreamOffset) stream.latestOffset(start, ReadLimit.allAvailable());
-
-            assertThat(latest.getStreamOffsets()).containsEntry("test-stream", 50L);
-            assertThat(env.queryStatsCalls).isEqualTo(2);
-            assertThat(env.probeBuilderCalls).isEqualTo(2);
-        }
-
-        @Test
-        void latestOffsetDoesNotCacheFailedProbeResults() throws Exception {
-            RabbitMQMicroBatchStream stream = createStream(minimalOptions());
-            SequencedProbeCountingEnvironment env = new SequencedProbeCountingEnvironment(
-                    true,
-                    java.util.List.of(
-                            java.util.List.of(),
-                            java.util.List.of(),
-                            java.util.List.of(),
-                            java.util.List.of(49L)));
-            setPrivateField(stream, "environment", env);
-
-            RabbitMQStreamOffset start = new RabbitMQStreamOffset(Map.of("test-stream", 0L));
-            RabbitMQStreamOffset first =
-                    (RabbitMQStreamOffset) stream.latestOffset(start, ReadLimit.allAvailable());
-            setPrivateField(stream, "latestOffsetInvocationCache", null);
-            RabbitMQStreamOffset second =
-                    (RabbitMQStreamOffset) stream.latestOffset(start, ReadLimit.allAvailable());
-
-            assertThat(first.getStreamOffsets()).containsEntry("test-stream", 0L);
-            assertThat(second.getStreamOffsets()).containsEntry("test-stream", 50L);
-            assertThat(env.queryStatsCalls).isEqualTo(3);
-            assertThat(env.probeBuilderCalls).isEqualTo(4);
-        }
-
-        @Test
-        void latestOffsetNeverRegressesBelowStartWhenStatsTailIsStaleAndProbeFails() throws Exception {
+        void latestOffsetNeverRegressesBelowStartWhenStatsTailIsStale() throws Exception {
+            // committedOffsetUnavailable=true means stats fall back to committedChunkId,
+            // which is 0 in this fixture. The safeTail clamp keeps tail >= start, so
+            // latestOffset returns the start map rather than regressing.
             RabbitMQMicroBatchStream stream = createStream(minimalOptions());
             SequencedProbeCountingEnvironment env = new SequencedProbeCountingEnvironment(
                     true,
@@ -1248,12 +1210,14 @@ class RabbitMQMicroBatchStreamTest {
             assertThat(latest.getStreamOffsets()).containsEntry("test-stream", 50L);
             assertThat(((RabbitMQStreamOffset) stream.reportLatestOffset()).getStreamOffsets())
                     .containsEntry("test-stream", 50L);
+            // Two stats RPCs: one in discoverStreams (validateConfiguredStreamExists),
+            // one inside queryStreamTailOffsetForLatest. No probe.
             assertThat(env.queryStatsCalls).isEqualTo(2);
-            assertThat(env.probeBuilderCalls).isEqualTo(3);
+            assertThat(env.probeBuilderCalls).isEqualTo(0);
         }
 
         @Test
-        void planInputPartitionsClearsLatestOffsetInvocationCache() throws Exception {
+        void planInputPartitionsClearsCachesSoNextLatestOffsetReQueriesStats() throws Exception {
             RabbitMQMicroBatchStream stream = createStream(minimalOptions());
             ProbeCountingEnvironment env = new ProbeCountingEnvironment(10L, java.util.List.of(14L));
             setPrivateField(stream, "environment", env);
@@ -1266,6 +1230,8 @@ class RabbitMQMicroBatchStreamTest {
             int queryStatsBeforeSecondLatest = env.queryStatsCalls;
             stream.latestOffset(start, ReadLimit.allAvailable());
 
+            // planInputPartitions clears both the latestOffset invocation cache and the
+            // stats cache, so the next trigger genuinely re-queries the broker.
             assertThat(env.queryStatsCalls).isEqualTo(queryStatsBeforeSecondLatest + 1);
         }
 
@@ -1289,15 +1255,69 @@ class RabbitMQMicroBatchStreamTest {
                         new RabbitMQStreamOffset(Map.of("s1", 0L, "s2", 0L, "s3", 0L)),
                         ReadLimit.allAvailable());
 
-                // stats tail = 6+1 = 7, probe tail = 9+1 = 10, max = 10
+                // Stats-only tail = committedOffset(6) + 1 = 7
                 assertThat(latest.getStreamOffsets())
-                        .containsEntry("s1", 10L)
-                        .containsEntry("s2", 10L)
-                        .containsEntry("s3", 10L);
+                        .containsEntry("s1", 7L)
+                        .containsEntry("s2", 7L)
+                        .containsEntry("s3", 7L);
                 assertThat(env.maxConcurrentStatsQueries()).isGreaterThan(1);
             } finally {
                 stream.stop();
             }
+        }
+
+        @Test
+        void latestOffsetAndPlanInputPartitionsShareSingleStatsRpcPerStreamPerTrigger()
+                throws Exception {
+            // CLAUDE-8 fix: per-trigger StreamStatsCache deduplicates queryStreamStats so
+            // latestOffset's normalization, planInputPartitions's revalidation, and the
+            // initial tail probe all share one RPC per stream per trigger. Across two
+            // triggers (planInputPartitions clears the cache) we expect 2N RPCs, not 4N+.
+            Map<String, String> optsMap = new LinkedHashMap<>();
+            optsMap.put("endpoints", "localhost:5552");
+            optsMap.put("superstream", "super");
+            optsMap.put("failOnDataLoss", "false");
+            ConnectorOptions opts = new ConnectorOptions(optsMap);
+            var schema = RabbitMQStreamTable.buildSourceSchema(opts.getMetadataFields());
+            BaseRabbitMQMicroBatchStream stream = new ForcedStreamsMicroBatchStream(
+                    opts, schema, "/tmp/checkpoint", java.util.List.of("s1", "s2", "s3"));
+            ProbeCountingEnvironment env = new ProbeCountingEnvironment(10L, java.util.List.of());
+            setPrivateField(stream, "environment", env);
+
+            try {
+                RabbitMQStreamOffset start = new RabbitMQStreamOffset(
+                        Map.of("s1", 0L, "s2", 0L, "s3", 0L));
+                RabbitMQStreamOffset end = (RabbitMQStreamOffset) stream.latestOffset(
+                        start, ReadLimit.allAvailable());
+                stream.planInputPartitions(start, end);
+                assertThat(env.queryStatsCalls).isEqualTo(3);
+
+                int afterTriggerOne = env.queryStatsCalls;
+                RabbitMQStreamOffset end2 = (RabbitMQStreamOffset) stream.latestOffset(
+                        end, ReadLimit.allAvailable());
+                stream.planInputPartitions(end, end2);
+                assertThat(env.queryStatsCalls).isEqualTo(afterTriggerOne + 3);
+                assertThat(env.probeBuilderCalls).isEqualTo(0);
+            } finally {
+                stream.stop();
+            }
+        }
+
+        @Test
+        void latestOffsetNeverInvokesConsumerBuilder() throws Exception {
+            // Stream C contract: latestOffset must not open a probe consumer. With a
+            // throwing consumerBuilder we still get a clean stats-only result.
+            RabbitMQMicroBatchStream stream = createStream(minimalOptions());
+            ThrowingConsumerBuilderProbeStatsEnvironment env =
+                    new ThrowingConsumerBuilderProbeStatsEnvironment(10L);
+            setPrivateField(stream, "environment", env);
+
+            RabbitMQStreamOffset start = new RabbitMQStreamOffset(Map.of("test-stream", 0L));
+            RabbitMQStreamOffset latest =
+                    (RabbitMQStreamOffset) stream.latestOffset(start, ReadLimit.allAvailable());
+
+            assertThat(latest.getStreamOffsets()).containsEntry("test-stream", 11L);
+            assertThat(env.consumerBuilderInvocations).isEqualTo(0);
         }
     }
 
@@ -1347,11 +1367,12 @@ class RabbitMQMicroBatchStreamTest {
         }
 
         @Test
-        void queryTailOffsetsForAvailableNowUsesBothStatsAndProbe() throws Exception {
-            // prepareForTriggerAvailableNow calls queryStreamTailOffsetForAvailableNow
-            // which runs BOTH stats and probe, taking max of the two.
-            // CountingEnvironment: first stats call returns 4 (tail=5), probe fires offsets
-            // 4 and 14 so probedTail=15. Snapshot = max(5, 15) = 15.
+        void prepareForTriggerAvailableNowSnapshotsTailFromStatsOnly() throws Exception {
+            // prepareForTriggerAvailableNow now resolves tail purely from stats — no
+            // consumer-builder probe. CountingEnvironment's stats fixture returns
+            // committedOffset=4 on the first call (used by validateConfiguredStreamExists)
+            // and committedOffset=9 on the second (used by queryStreamTailOffsetForAvailableNow),
+            // yielding tail=10 in the snapshot.
             RabbitMQMicroBatchStream stream = createStream(minimalOptions());
             setPrivateField(stream, "environment", new CountingEnvironment());
             setPrivateField(stream, "availableNowSnapshot", null);
@@ -1361,14 +1382,12 @@ class RabbitMQMicroBatchStreamTest {
             RabbitMQStreamOffset latest = (RabbitMQStreamOffset) stream.latestOffset(
                     new RabbitMQStreamOffset(Map.of("test-stream", 0L)),
                     ReadLimit.allAvailable());
-            assertThat(latest.getStreamOffsets()).containsEntry("test-stream", 15L);
+            assertThat(latest.getStreamOffsets()).containsEntry("test-stream", 10L);
         }
 
         @Test
-        void queryTailOffsetsForAvailableNowCallsProbeAndTakesMaxWithStats() throws Exception {
-            // prepareForTriggerAvailableNow calls BOTH stats and probe, taking max.
-            // stats tail = 400+1 = 401, probe offsets=[399] -> probedTail = 399+1 = 400.
-            // max(401, 400) = 401 is stored in snapshot. Probe IS called (probeBuilderCalls=1).
+        void prepareForTriggerAvailableNowResolvesTailFromCommittedOffset() throws Exception {
+            // committedOffset = 400 → tail = 401. No probe path.
             RabbitMQMicroBatchStream stream = createStream(minimalOptions());
             setPrivateField(stream, "environment",
                     new ProbeCountingEnvironment(400L, java.util.List.of(399L)));
@@ -1381,28 +1400,27 @@ class RabbitMQMicroBatchStreamTest {
                     ReadLimit.allAvailable());
             assertThat(latest.getStreamOffsets()).containsEntry("test-stream", 401L);
             assertThat(((ProbeCountingEnvironment) getPrivateField(stream, "environment")).probeBuilderCalls)
-                    .isEqualTo(1);
+                    .isEqualTo(0);
         }
 
         @Test
-        void queryTailOffsetsForAvailableNowUsesProbeWhenStatsLagsBehind()
-                throws Exception {
-            // When committedOffset() is unavailable (throws NoOffsetException), stats returns 0
-            // (committedChunkId is not used for tail estimation). Probe returns 49+1=50.
-            // max(0, 50) = 50 is stored in snapshot. Probe IS called (probeBuilderCalls=1).
+        void prepareForTriggerAvailableNowDoesNotInvokeConsumerBuilder() throws Exception {
+            // Stream C contract: prepareForTriggerAvailableNow must not open a probe
+            // consumer. Even with a throwing consumerBuilder, the snapshot is produced
+            // cleanly from stats.
             RabbitMQMicroBatchStream stream = createStream(minimalOptions());
-            ProbeCountingEnvironment env = new ProbeCountingEnvironment(
-                    0L, java.util.List.of(49L), true);
+            ThrowingConsumerBuilderProbeStatsEnvironment env =
+                    new ThrowingConsumerBuilderProbeStatsEnvironment(400L);
             setPrivateField(stream, "environment", env);
             setPrivateField(stream, "availableNowSnapshot", null);
 
             stream.prepareForTriggerAvailableNow();
 
-            RabbitMQStreamOffset latest = (RabbitMQStreamOffset) stream.latestOffset(
-                    new RabbitMQStreamOffset(Map.of("test-stream", 0L)),
-                    ReadLimit.allAvailable());
-            assertThat(latest.getStreamOffsets()).containsEntry("test-stream", 50L);
-            assertThat(env.probeBuilderCalls).isEqualTo(1);
+            @SuppressWarnings("unchecked")
+            Map<String, Long> snapshot =
+                    (Map<String, Long>) getPrivateField(stream, "availableNowSnapshot");
+            assertThat(snapshot).containsEntry("test-stream", 401L);
+            assertThat(env.consumerBuilderInvocations).isEqualTo(0);
         }
 
         @Test
@@ -1448,31 +1466,33 @@ class RabbitMQMicroBatchStreamTest {
         }
 
         @Test
-        void prepareForTriggerAvailableNowUsesBothStatsAndProbe() throws Exception {
-            // Both latestOffset and prepareForTriggerAvailableNow call stats + probe,
-            // taking max(statsTail, probedTail). stats=10+1=11, probe=[14]->15, max=15.
-            // discoverStreams() on first latestOffset call also calls queryStreamStats once
-            // for stream existence validation, giving queryStatsCalls=3 total:
+        void prepareForTriggerAvailableNowAndLatestOffsetCallStatsOnly() throws Exception {
+            // Stats-only resolution end to end: tail = committedOffset(10) + 1 = 11. The
+            // stream stats cache invalidation in prepareForTriggerAvailableNow forces a
+            // fresh query, so queryStatsCalls covers:
             //   1: validateConfiguredStreamExists in discoverStreams
             //   2: queryStreamTailOffsetForLatest in latestOffset
             //   3: queryStreamTailOffsetForAvailableNow in prepareForTriggerAvailableNow
-            // probeBuilderCalls=2: once in latestOffset, once in prepareForTriggerAvailableNow.
+            // No consumer-builder probe is created.
             RabbitMQMicroBatchStream stream = createStream(minimalOptions());
             ProbeCountingEnvironment env = new ProbeCountingEnvironment(10L, java.util.List.of(14L));
             setPrivateField(stream, "environment", env);
 
             RabbitMQStreamOffset start = new RabbitMQStreamOffset(Map.of("test-stream", 0L));
             RabbitMQStreamOffset first = (RabbitMQStreamOffset) stream.latestOffset(start, ReadLimit.allAvailable());
-            assertThat(first.getStreamOffsets()).containsEntry("test-stream", 15L);
+            assertThat(first.getStreamOffsets()).containsEntry("test-stream", 11L);
 
             stream.prepareForTriggerAvailableNow();
 
-            assertThat(env.probeBuilderCalls).isEqualTo(2);
+            assertThat(env.probeBuilderCalls).isEqualTo(0);
             assertThat(env.queryStatsCalls).isEqualTo(3);
         }
 
         @Test
-        void initialOffsetLatestDoesNotAdvancePastAvailableNowSnapshot() throws Exception {
+        void initialOffsetLatestSeedsFromAvailableNowSnapshot() throws Exception {
+            // For startingOffsets=latest with serverSideOffsetTracking=false, the snapshot
+            // freezes the tail at trigger start. Without probes the snapshot uses the stats
+            // committedOffset, then initialOffset returns that frozen value.
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
             opts.put("stream", "test-stream");
@@ -1480,11 +1500,7 @@ class RabbitMQMicroBatchStreamTest {
             opts.put("serverSideOffsetTracking", "false");
 
             RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
-            SequencedProbeCountingEnvironment env = new SequencedProbeCountingEnvironment(
-                    true,
-                    java.util.List.of(
-                            java.util.List.of(49L),
-                            java.util.List.of(99L)));
+            ProbeCountingEnvironment env = new ProbeCountingEnvironment(49L, java.util.List.of());
             setPrivateField(stream, "environment", env);
 
             stream.prepareForTriggerAvailableNow();
@@ -3162,6 +3178,67 @@ class RabbitMQMicroBatchStreamTest {
 
         @Override
         public com.rabbitmq.stream.StreamStats queryStreamStats(String stream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void storeOffset(String reference, String stream, long offset) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public boolean streamExists(String stream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public com.rabbitmq.stream.ProducerBuilder producerBuilder() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void close() {
+        }
+    }
+
+    /**
+     * Like {@link ThrowingConsumerBuilderEnvironment} but with a configurable
+     * committedOffset. Used to verify that latestOffset/prepareForTriggerAvailableNow
+     * never call {@code consumerBuilder()} (Stream C: stats-only resolution).
+     */
+    private static final class ThrowingConsumerBuilderProbeStatsEnvironment
+            implements com.rabbitmq.stream.Environment {
+        private final long committedOffset;
+        int consumerBuilderInvocations = 0;
+
+        private ThrowingConsumerBuilderProbeStatsEnvironment(long committedOffset) {
+            this.committedOffset = committedOffset;
+        }
+
+        @Override
+        public com.rabbitmq.stream.ConsumerBuilder consumerBuilder() {
+            consumerBuilderInvocations++;
+            throw new UnsupportedOperationException(
+                    "consumerBuilder must not be called from latestOffset paths");
+        }
+
+        @Override
+        public com.rabbitmq.stream.StreamStats queryStreamStats(String stream) {
+            return new FixedStreamStats(committedOffset);
+        }
+
+        @Override
+        public com.rabbitmq.stream.StreamCreator streamCreator() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void deleteStream(String stream) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void deleteSuperStream(String superStream) {
             throw new UnsupportedOperationException();
         }
 
