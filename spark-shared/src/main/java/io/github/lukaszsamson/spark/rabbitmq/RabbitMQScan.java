@@ -15,7 +15,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.*;
 import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.CancellationException;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -38,6 +38,11 @@ final class RabbitMQScan implements Scan {
     private static final long TAIL_PROBE_TIMEOUT_MS = 1_500L;
     private static final long MIN_TIMESTAMP_PROBE_TIMEOUT_MS = 250L;
     private static final long CHUNK_DRAIN_IDLE_MS = 50L;
+    // Drain runs to completion when a chunk arrives in a tight burst, but the broker can
+    // keep granting credits on a busy stream. Cap by total time and offset count so
+    // planning cannot stall and `endingOffsets=timestamp` cannot drift toward `latest`.
+    private static final long CHUNK_DRAIN_MAX_MS = 200L;
+    private static final int CHUNK_DRAIN_MAX_OFFSETS = 4_096;
     private static final long RESOLVER_DRAIN_TIMEOUT_MS = 5_000L;
     private static final int TAIL_PROBE_EXECUTOR_PARALLELISM = Math.max(
             1,
@@ -216,9 +221,24 @@ final class RabbitMQScan implements Scan {
             return ranges;
         }
 
+        // Each task counts down its latch from a `finally` block, so the latch reaching
+        // zero is a reliable signal that the task body has truly exited (success, error,
+        // or interrupt) and is no longer using the Environment. `Future.cancel(true)`
+        // alone flips a cancelled future to done immediately and `Future.get` then
+        // returns CancellationException without verifying the underlying thread has
+        // stopped — hence the latch.
         Map<String, Future<long[]>> futures = new LinkedHashMap<>();
+        Map<String, CountDownLatch> taskExited = new LinkedHashMap<>();
         for (String stream : streams) {
-            futures.put(stream, rangeResolverExecutor().submit(() -> resolveStreamOffsetRange(env, stream)));
+            CountDownLatch latch = new CountDownLatch(1);
+            taskExited.put(stream, latch);
+            futures.put(stream, rangeResolverExecutor().submit(() -> {
+                try {
+                    return resolveStreamOffsetRange(env, stream);
+                } finally {
+                    latch.countDown();
+                }
+            }));
         }
         try {
             for (Map.Entry<String, Future<long[]>> entry : futures.entrySet()) {
@@ -229,27 +249,23 @@ final class RabbitMQScan implements Scan {
             }
             return ranges;
         } catch (RuntimeException | Error fail) {
-            // A resolver failed; cancel and drain the rest before the outer finally
-            // releases the Environment back to the pool, so in-flight tasks do not
-            // continue using an Environment that may then be closed by eviction.
-            cancelAndDrainPendingResolvers(futures);
+            // A resolver failed; cancel all peers and wait for their bodies to exit
+            // (latch countdown) before letting the outer `finally` release the
+            // Environment, so an in-flight task cannot keep using a closed Environment.
+            cancelAndAwaitResolverTermination(futures, taskExited);
             throw fail;
         }
     }
 
-    private static void cancelAndDrainPendingResolvers(Map<String, Future<long[]>> futures) {
+    private static void cancelAndAwaitResolverTermination(
+            Map<String, Future<long[]>> futures,
+            Map<String, CountDownLatch> taskExited) {
         for (Future<long[]> future : futures.values()) {
-            if (!future.isDone()) {
-                future.cancel(true);
-            }
+            future.cancel(true);
         }
         long deadlineNanos = System.nanoTime()
                 + TimeUnit.MILLISECONDS.toNanos(RESOLVER_DRAIN_TIMEOUT_MS);
-        for (Map.Entry<String, Future<long[]>> entry : futures.entrySet()) {
-            Future<long[]> future = entry.getValue();
-            if (future.isDone()) {
-                continue;
-            }
+        for (Map.Entry<String, CountDownLatch> entry : taskExited.entrySet()) {
             long remainingNanos = deadlineNanos - System.nanoTime();
             if (remainingNanos <= 0) {
                 LOG.debug("Range resolver for stream '{}' did not terminate within {} ms after cancel; "
@@ -258,12 +274,13 @@ final class RabbitMQScan implements Scan {
                 continue;
             }
             try {
-                future.get(remainingNanos, TimeUnit.NANOSECONDS);
+                if (!entry.getValue().await(remainingNanos, TimeUnit.NANOSECONDS)) {
+                    LOG.debug("Range resolver for stream '{}' did not exit within drain budget",
+                            entry.getKey());
+                }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 return;
-            } catch (CancellationException | ExecutionException | TimeoutException ignored) {
-                // Best-effort wait for cancellation; the original failure is what we propagate.
             }
         }
     }
@@ -510,15 +527,31 @@ final class RabbitMQScan implements Scan {
             Long observed = observedOffsets.poll(timestampProbeTimeoutMs(), TimeUnit.MILLISECONDS);
             if (observed != null) {
                 long maxObserved = observed;
-                // Drain the rest of the matching chunk. With a single chunk's worth of
-                // initial credit the broker delivers all messages of that chunk in rapid
-                // succession; once the queue is briefly idle the chunk is drained.
-                Long next;
-                while ((next = observedOffsets.poll(
-                        CHUNK_DRAIN_IDLE_MS, TimeUnit.MILLISECONDS)) != null) {
+                // Drain additional offsets from the matching delivery burst. The broker
+                // delivers a whole chunk in rapid succession with `creditOnChunkArrival(1)`,
+                // but it also keeps granting credits, so a busy stream could otherwise feed
+                // us forever. Bound the drain by both an idle gap, a hard wall-clock budget,
+                // and an offset cap to keep `endingOffsets=timestamp` from drifting toward
+                // `latest`.
+                long drainDeadlineNanos = System.nanoTime()
+                        + TimeUnit.MILLISECONDS.toNanos(CHUNK_DRAIN_MAX_MS);
+                int drained = 0;
+                while (drained < CHUNK_DRAIN_MAX_OFFSETS) {
+                    long remainingNanos = drainDeadlineNanos - System.nanoTime();
+                    if (remainingNanos <= 0L) {
+                        break;
+                    }
+                    long pollNanos = Math.min(
+                            remainingNanos,
+                            TimeUnit.MILLISECONDS.toNanos(CHUNK_DRAIN_IDLE_MS));
+                    Long next = observedOffsets.poll(pollNanos, TimeUnit.NANOSECONDS);
+                    if (next == null) {
+                        break;
+                    }
                     if (next > maxObserved) {
                         maxObserved = next;
                     }
+                    drained++;
                 }
                 return maxObserved + 1L;
             }
