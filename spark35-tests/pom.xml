@@ -27,6 +27,13 @@
             <classifier>unshaded</classifier>
         </dependency>
         <dependency>
+            <groupId>io.github.lukaszsamson</groupId>
+            <artifactId>spark-rabbitmq-streams-connector-spark-shared</artifactId>
+            <version>${project.version}</version>
+            <classifier>unshaded</classifier>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
             <groupId>com.rabbitmq</groupId>
             <artifactId>stream-client</artifactId>
             <version>${rabbitmq.stream.client.version}</version>
@@ -79,16 +86,34 @@
                 <artifactId>maven-dependency-plugin</artifactId>
                 <executions>
                     <execution>
-                        <id>unpack-connector-classes</id>
+                        <id>unpack-shared-classes</id>
                         <phase>process-classes</phase>
                         <goals>
                             <goal>unpack-dependencies</goal>
                         </goals>
                         <configuration>
                             <includeGroupIds>io.github.lukaszsamson</includeGroupIds>
-                            <includeArtifactIds>spark-rabbitmq-streams-connector-spark35,spark-rabbitmq-streams-connector-spark-shared</includeArtifactIds>
+                            <includeArtifactIds>spark-rabbitmq-streams-connector-spark-shared</includeArtifactIds>
                             <includeClassifiers>unshaded</includeClassifiers>
                             <outputDirectory>${project.build.outputDirectory}</outputDirectory>
+                            <overWriteReleases>true</overWriteReleases>
+                            <overWriteSnapshots>true</overWriteSnapshots>
+                            <includes>io/github/lukaszsamson/spark/rabbitmq/**</includes>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>unpack-spark35-classes</id>
+                        <phase>process-classes</phase>
+                        <goals>
+                            <goal>unpack-dependencies</goal>
+                        </goals>
+                        <configuration>
+                            <includeGroupIds>io.github.lukaszsamson</includeGroupIds>
+                            <includeArtifactIds>spark-rabbitmq-streams-connector-spark35</includeArtifactIds>
+                            <includeClassifiers>unshaded</includeClassifiers>
+                            <outputDirectory>${project.build.outputDirectory}</outputDirectory>
+                            <overWriteReleases>true</overWriteReleases>
+                            <overWriteSnapshots>true</overWriteSnapshots>
                             <includes>io/github/lukaszsamson/spark/rabbitmq/**</includes>
                         </configuration>
                     </execution>

@@ -132,6 +132,7 @@ class BaseRabbitMQMicroBatchStream
     final Object mutableStateLock = new Object();
 
     record CachedTailProbe(long tailExclusive, long expiresAtNanos) {}
+    record TailRefresh(long tailExclusive, boolean confirmed) {}
     record LatestOffsetInvocationCache(
             String startOffsetJson,
             String readLimitKey,
@@ -888,19 +889,38 @@ class BaseRabbitMQMicroBatchStream
         }
 
         if (options.isFailOnDataLoss()) {
+            Map<String, Long> confirmedTailOffsets = new LinkedHashMap<>(tailOffsets);
             for (Map.Entry<String, Long> entry : tailOffsets.entrySet()) {
                 String stream = entry.getKey();
                 long startOff = effectiveStartMap.getOrDefault(stream, 0L);
                 long endOff = entry.getValue();
                 if (endOff < startOff) {
-                    validateStartOffset(stream, startOff, endOff);
-                    throw new IllegalStateException(
-                            "Tail offset " + endOff + " is before requested start offset "
-                                    + startOff + " in stream '" + stream + "'. "
-                                    + "Data may have been lost due to stream truncation or recreation. "
-                                    + "Set failOnDataLoss=false to advance.");
+                    TailRefresh refreshed = refreshTailOffsetForDataLossCheck(stream, endOff);
+                    if (refreshed.tailExclusive() >= startOff) {
+                        confirmedTailOffsets.put(
+                                stream,
+                                availableNowActive ? startOff : refreshed.tailExclusive());
+                        continue;
+                    }
+                    // Reuse validation for its retention/data-loss throw before reporting
+                    // an indeterminate tail that still sits behind the requested start.
+                    long validatedStart = validateStartOffset(stream, startOff, refreshed.tailExclusive());
+                    if (validatedStart < 0L || validatedStart > startOff || refreshed.confirmed()) {
+                        throw new IllegalStateException(
+                                "Tail offset " + refreshed.tailExclusive()
+                                        + " is before requested start offset "
+                                        + startOff + " in stream '" + stream + "'. "
+                                        + "Data may have been lost due to stream truncation or recreation. "
+                                        + "Set failOnDataLoss=false to advance.");
+                    }
+                    LOG.warn("Tail offset estimate {} is before requested start offset {} "
+                                    + "in stream '{}', but the requested start is still readable. "
+                                    + "Treating the tail as stale for this batch.",
+                            refreshed.tailExclusive(), startOff, stream);
+                    confirmedTailOffsets.put(stream, startOff);
                 }
             }
+            tailOffsets = confirmedTailOffsets;
         } else {
             // Ensure tail offsets never go backwards due to stale snapshots or retention.
             // With failOnDataLoss=false, clamp and let validation normalize stale starts.
@@ -1782,8 +1802,10 @@ class BaseRabbitMQMicroBatchStream
 
         if (probedTail == 0L && latestStartedOnEmptyStreams.contains(stream)) {
             try {
-                stats.firstOffset();
-                resolved = Math.max(resolved, resolveTailOffset(stats));
+                long firstAvailable = stats.firstOffset();
+                resolved = Math.max(
+                        resolved,
+                        Math.max(resolveTailOffset(stats), firstAvailable + 1L));
             } catch (NoOffsetException e) {
                 return 0L;
             } catch (RuntimeException e) {
@@ -1796,6 +1818,63 @@ class BaseRabbitMQMicroBatchStream
             latestStartedOnEmptyStreams.remove(stream);
         }
         return resolved;
+    }
+
+    private TailRefresh refreshTailOffsetForDataLossCheck(String stream, long currentTail) {
+        latestTailProbeCache.remove(stream);
+        Environment env = getEnvironment();
+        StreamStats stats;
+        try {
+            stats = env.queryStreamStats(stream);
+        } catch (com.rabbitmq.stream.StreamDoesNotExistException e) {
+            throw new IllegalStateException(
+                    "Stream '" + stream + "' does not exist. "
+                            + "It may have been deleted. Set failOnDataLoss=false to skip.", e);
+        } catch (Exception e) {
+            throw new IllegalStateException(
+                    "Failed to query stream stats for '" + stream + "'", e);
+        }
+
+        long refreshedTail = 0L;
+        boolean confirmed = false;
+        try {
+            refreshedTail = stats.committedOffset() + 1L;
+            confirmed = true;
+        } catch (NoOffsetException e) {
+            // Broker does not expose a precise tail for this stream yet.
+        } catch (RuntimeException e) {
+            LOG.debug("committedOffset() not available while refreshing tail for '{}': {}",
+                    stream, e.toString());
+        }
+        try {
+            refreshedTail = Math.max(refreshedTail, stats.committedChunkId());
+        } catch (NoOffsetException e) {
+            // Empty streams have a confirmed tail of 0.
+            confirmed = true;
+        }
+
+        long probedTail = probeTailOffsetFromLastMessageWithRetry(env, stream);
+        if (probedTail > 0L) {
+            refreshedTail = Math.max(refreshedTail, probedTail);
+            confirmed = true;
+            latestTailProbeCache.put(
+                    stream,
+                    new CachedTailProbe(
+                            probedTail,
+                            System.nanoTime()
+                                    + TimeUnit.MILLISECONDS.toNanos(options.getTailProbeCacheMs())));
+        } else {
+            latestTailProbeCache.remove(stream);
+        }
+
+        if (probedTail == 0L && latestStartedOnEmptyStreams.contains(stream)) {
+            try {
+                refreshedTail = Math.max(refreshedTail, stats.firstOffset() + 1L);
+            } catch (NoOffsetException e) {
+                confirmed = true;
+            }
+        }
+        return new TailRefresh(Math.max(currentTail, refreshedTail), confirmed);
     }
 
     private long probeTailOffsetForLatestWithCache(Environment env, String stream) {
