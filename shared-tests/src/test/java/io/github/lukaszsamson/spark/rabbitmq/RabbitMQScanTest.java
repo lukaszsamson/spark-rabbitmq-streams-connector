@@ -2,8 +2,10 @@ package io.github.lukaszsamson.spark.rabbitmq;
 
 import com.rabbitmq.stream.ConsumerBuilder;
 import com.rabbitmq.stream.Environment;
+import com.rabbitmq.stream.Message;
 import com.rabbitmq.stream.NoOffsetException;
 import com.rabbitmq.stream.ProducerBuilder;
+import com.rabbitmq.stream.Properties;
 import com.rabbitmq.stream.StreamCreator;
 import com.rabbitmq.stream.StreamDoesNotExistException;
 import com.rabbitmq.stream.StreamStats;
@@ -23,6 +25,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /**
  * Unit tests for {@link RabbitMQScan} planning logic and offset resolution
@@ -244,10 +248,9 @@ class RabbitMQScanTest {
 
         @Test
         void timestampEndPlanningReturnsFirstOffsetAtOrAfterEndingTimestamp() throws Exception {
-            // The probe lands at the first chunk where the last message has ts >= ending
-            // timestamp. The first message of that delivery whose timestamp clears the
-            // bound becomes the exclusive end, matching what the reader actually needs to
-            // include only messages that were published before the cutoff.
+            // Single observed message whose per-message creation_time clears the bound.
+            // The probe returns its offset as the exclusive end — the message itself is
+            // excluded (it was published at/after the requested cutoff).
             long endingTs = 1700000000000L;
             Map<String, String> opts = baseOptions();
             opts.put("endingOffsets", "timestamp");
@@ -267,11 +270,11 @@ class RabbitMQScanTest {
         }
 
         @Test
-        void timestampEndPlanningPicksFirstMessageWithTsAtOrAfterBound() throws Exception {
-            // Common broker case: messages within the matching chunk all share the chunk's
-            // aggregated timestamp, so the first message of the chunk already crosses the
-            // bound and the chunk is excluded as a whole. Earlier chunks (already
-            // committed before the cutoff) are read through the regular path.
+        void timestampEndPlanningPicksFirstMessageWithCreationTimeAtOrAfterBound() throws Exception {
+            // Per-message creation_time is honored: when the publisher records timestamps
+            // and a chunk straddles the bound (early messages still under, later messages
+            // already over), the exclusive end is the offset of the first late message.
+            // This is the GPT-9 case the data-loss fix targets.
             long endingTs = 1700000000000L;
             Map<String, String> opts = baseOptions();
             opts.put("endingOffsets", "timestamp");
@@ -280,18 +283,16 @@ class RabbitMQScanTest {
             RabbitMQScan scan = new RabbitMQScan(new ConnectorOptions(opts), schema());
 
             long[] offsets = {10L, 11L, 12L, 13L, 14L, 15L, 16L, 17L, 18L, 19L};
-            long[] timestamps = new long[offsets.length];
-            // First half before the bound, second half at/after — exclusive end is the
-            // first late-stamped message.
+            long[] creationTimes = new long[offsets.length];
             for (int i = 0; i < 5; i++) {
-                timestamps[i] = endingTs - 1L;
+                creationTimes[i] = endingTs - 1L;
             }
             for (int i = 5; i < offsets.length; i++) {
-                timestamps[i] = endingTs;
+                creationTimes[i] = endingTs;
             }
             Long end = resolveTimestampEndingOffsetIfSupported(scan,
                     new DelayedProbeEnvironment(50L, new Stats(0L, false, false, 99L),
-                            offsets, timestamps),
+                            offsets, creationTimes),
                     "s1", endingTs);
             if (end == null) {
                 return;
@@ -658,24 +659,32 @@ class RabbitMQScanTest {
     private static final class DelayedProbeEnvironment implements Environment {
         private final long delayMs;
         private final long[] offsets;
-        private final long[] timestamps;
+        private final long[] creationTimes;
         private final StreamStats stats;
 
         private DelayedProbeEnvironment(long delayMs, StreamStats stats, long... offsets) {
-            this(delayMs, stats, offsets, new long[offsets.length]);
+            // Default: per-message creation_time unset (-1) — the production probe will
+            // fall back to the chunk-level context timestamp, which is 0 in this fixture.
+            this(delayMs, stats, offsets, fillArray(offsets.length, -1L));
         }
 
         private DelayedProbeEnvironment(long delayMs, StreamStats stats,
-                long[] offsets, long[] timestamps) {
+                long[] offsets, long[] creationTimes) {
             this.delayMs = delayMs;
             this.stats = stats;
             this.offsets = offsets;
-            this.timestamps = timestamps;
+            this.creationTimes = creationTimes;
+        }
+
+        private static long[] fillArray(int length, long value) {
+            long[] result = new long[length];
+            java.util.Arrays.fill(result, value);
+            return result;
         }
 
         @Override
         public ConsumerBuilder consumerBuilder() {
-            return new DelayedProbeConsumerBuilder(delayMs, offsets, timestamps);
+            return new DelayedProbeConsumerBuilder(delayMs, offsets, creationTimes);
         }
 
         @Override
@@ -1127,13 +1136,13 @@ class RabbitMQScanTest {
     private static final class DelayedProbeConsumerBuilder implements ConsumerBuilder {
         private final long delayMs;
         private final long[] offsets;
-        private final long[] timestamps;
+        private final long[] creationTimes;
         private com.rabbitmq.stream.MessageHandler handler;
 
-        private DelayedProbeConsumerBuilder(long delayMs, long[] offsets, long[] timestamps) {
+        private DelayedProbeConsumerBuilder(long delayMs, long[] offsets, long[] creationTimes) {
             this.delayMs = delayMs;
             this.offsets = offsets;
-            this.timestamps = timestamps;
+            this.creationTimes = creationTimes;
         }
 
         @Override
@@ -1216,9 +1225,14 @@ class RabbitMQScanTest {
                     try {
                         Thread.sleep(delayMs);
                         for (int i = 0; i < offsets.length; i++) {
-                            handler.handle(
-                                    new ProbeContext(offsets[i], timestamps[i]),
-                                    null);
+                            // creationTimes[i] == -1 simulates an unset per-message
+                            // creation_time, which makes the production probe fall back
+                            // to the chunk-level context timestamp.
+                            Message message = mock(Message.class);
+                            Properties properties = mock(Properties.class);
+                            when(properties.getCreationTime()).thenReturn(creationTimes[i]);
+                            when(message.getProperties()).thenReturn(properties);
+                            handler.handle(new ProbeContext(offsets[i]), message);
                         }
                     } catch (InterruptedException e) {
                         Thread.currentThread().interrupt();
@@ -1252,15 +1266,9 @@ class RabbitMQScanTest {
 
     private static final class ProbeContext implements com.rabbitmq.stream.MessageHandler.Context {
         private final long offset;
-        private final long timestamp;
 
         private ProbeContext(long offset) {
-            this(offset, 0L);
-        }
-
-        private ProbeContext(long offset, long timestamp) {
             this.offset = offset;
-            this.timestamp = timestamp;
         }
 
         @Override
@@ -1270,7 +1278,7 @@ class RabbitMQScanTest {
 
         @Override
         public long timestamp() {
-            return timestamp;
+            return 0;
         }
 
         @Override

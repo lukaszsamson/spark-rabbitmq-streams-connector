@@ -2,7 +2,9 @@ package io.github.lukaszsamson.spark.rabbitmq;
 
 import com.rabbitmq.stream.ConsumerFlowStrategy;
 import com.rabbitmq.stream.Environment;
+import com.rabbitmq.stream.Message;
 import com.rabbitmq.stream.NoOffsetException;
+import com.rabbitmq.stream.Properties;
 import com.rabbitmq.stream.StreamDoesNotExistException;
 import com.rabbitmq.stream.StreamStats;
 import org.apache.spark.sql.connector.metric.CustomMetric;
@@ -495,20 +497,18 @@ final class RabbitMQScan implements Scan {
     /**
      * Resolve an ending offset by timestamp using a probe consumer.
      * Returns the offset of the first message whose timestamp is &gt;= the requested
-     * timestamp, used as an exclusive upper bound. The handler inspects each message's
-     * timestamp directly:
+     * timestamp, used as an exclusive upper bound.
      *
-     * <ul>
-     *   <li>When the publisher records per-message timestamps, the boundary is
-     *       message-precise — earlier messages in the matching chunk that are still
-     *       below the timestamp are included.</li>
-     *   <li>When the broker assigns chunk-aggregated timestamps (all messages in a
-     *       chunk share the same timestamp), the first message of the matching chunk
-     *       already satisfies {@code ts >= timestamp}, so the chunk is excluded as a
-     *       whole — matching the previous, well-tested behavior on the IT path.</li>
-     * </ul>
+     * <p>Per-message AMQP {@code creation_time} (when the publisher set it) takes
+     * precedence — that gives a message-precise boundary even within a chunk that
+     * straddles the bound, which is the {@code GPT-9} case we are fixing. When
+     * {@code creation_time} is unset on a message, we fall back to the chunk-level
+     * {@link com.rabbitmq.stream.MessageHandler.Context#timestamp() context
+     * timestamp}, in which case the matching chunk is excluded as a whole — that
+     * matches the original well-tested behavior on the IT path with broker-assigned
+     * chunk timestamps.
      *
-     * If only earlier messages are observed (none at/after the timestamp), all
+     * <p>If only earlier messages are observed (none at/after the timestamp), all
      * available data is before the cutoff and the stream tail is returned.
      */
     private long resolveTimestampEndingOffset(Environment env, String stream, long timestamp) {
@@ -521,7 +521,7 @@ final class RabbitMQScan implements Scan {
                     .offset(com.rabbitmq.stream.OffsetSpecification.timestamp(timestamp))
                     .noTrackingStrategy()
                     .messageHandler((context, message) -> {
-                        if (context.timestamp() >= timestamp
+                        if (messageOrChunkTimestamp(context, message) >= timestamp
                                 && firstOffsetAtOrAfter.compareAndSet(-1L, context.offset())) {
                             boundaryFound.countDown();
                         }
@@ -554,6 +554,26 @@ final class RabbitMQScan implements Scan {
         } finally {
             closeProbeQuietly(probe, stream);
         }
+    }
+
+    /**
+     * Per-message AMQP {@code creation_time} when the publisher set it, otherwise the
+     * chunk-level context timestamp. {@code Properties#getCreationTime()} returns a
+     * negative value when the property is unset (see {@code MessageToRowConverter}).
+     */
+    private static long messageOrChunkTimestamp(
+            com.rabbitmq.stream.MessageHandler.Context context,
+            Message message) {
+        if (message != null) {
+            Properties props = message.getProperties();
+            if (props != null) {
+                long creationTime = props.getCreationTime();
+                if (creationTime >= 0L) {
+                    return creationTime;
+                }
+            }
+        }
+        return context.timestamp();
     }
 
     private static void closeProbeQuietly(com.rabbitmq.stream.Consumer probe, String stream) {
