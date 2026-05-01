@@ -260,6 +260,14 @@ final class EnvironmentPool {
                 pool.remove(key, entry);
                 return;
             }
+            // If this entry is no longer the active mapping (e.g., closeAll cleared
+            // the pool, or the entry was otherwise replaced), don't resurrect it via
+            // a scheduled eviction — that would also recreate the scheduler if
+            // closeAll had shut it down. Whoever removed the entry is responsible
+            // for closing the Environment.
+            if (pool.get(key) != entry) {
+                return;
+            }
             // The future completed successfully (e.g., this acquirer was interrupted
             // after another thread built the environment). Without scheduling an
             // eviction, the entry would remain in the pool at refCount=0 forever

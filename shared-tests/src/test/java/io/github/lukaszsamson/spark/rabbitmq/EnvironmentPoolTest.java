@@ -584,6 +584,28 @@ class EnvironmentPoolTest {
         }
 
         @Test
+        void rollbackFailedAcquireDoesNotScheduleEvictionWhenEntryNotInPool() throws Exception {
+            // If the entry is no longer the active mapping (e.g., closeAll cleared
+            // the pool), rollback must not schedule an eviction — that would
+            // resurrect the entry and recreate the eviction scheduler post-shutdown.
+            EnvironmentPool pool = EnvironmentPool.getInstance();
+            ConnectorOptions options = opts("localhost:5552", "test-stream");
+            EnvironmentPool.EnvironmentKey key = EnvironmentPool.EnvironmentKey.from(options);
+            CountingEnvironment env = new CountingEnvironment();
+            Object entry = newEntry(env);
+            // Deliberately do NOT put the entry in the pool.
+
+            pool.shutdownEvictionScheduler();
+            assertThat(pool.isEvictionSchedulerShutdown()).isTrue();
+
+            invokeRollbackFailedAcquire(pool, key, entry);
+
+            assertThat(getRefCount(entry)).isEqualTo(0);
+            assertThat((Object) getEvictionTask(entry)).isNull();
+            assertThat(pool.isEvictionSchedulerShutdown()).isTrue();
+        }
+
+        @Test
         void rollbackFailedAcquireRemovesEntryWhenFutureFailed() throws Exception {
             EnvironmentPool pool = EnvironmentPool.getInstance();
             ConnectorOptions options = opts("localhost:5552", "test-stream");
