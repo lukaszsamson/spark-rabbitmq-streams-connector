@@ -70,7 +70,13 @@
                 <executions>
                     <execution>
                         <id>unshaded-jar</id>
-                        <phase>package</phase>
+                        <!--
+                            Bind to process-classes (instead of package) so that
+                            `mvn test -pl <module> -am` builds this classifier
+                            artifact in time for downstream test modules to
+                            resolve it via the reactor (Maven MDEP-98).
+                        -->
+                        <phase>process-classes</phase>
                         <goals>
                             <goal>jar</goal>
                         </goals>
