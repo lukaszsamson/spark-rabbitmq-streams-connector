@@ -18,6 +18,9 @@ import java.util.concurrent.LinkedBlockingQueue;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 
 /**
  * Unit tests for the SupportsRealTimeMode and SupportsRealTimeRead
@@ -142,6 +145,7 @@ class RealTimeModeTest {
             assertThat(p.getStream()).isEqualTo("test-stream");
             assertThat(p.getStartOffset()).isEqualTo(42L);
             assertThat(p.getEndOffset()).isEqualTo(Long.MAX_VALUE);
+            assertThat(p.isLateBindEndOffset()).isFalse();
         }
 
         @Test
@@ -482,6 +486,117 @@ class RealTimeModeTest {
         }
 
         @Test
+        void nextWithTimeoutStopsAtEndOffset() throws Exception {
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 0, 5, minimalOptions());
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(
+                    partition, partition.getOptions());
+
+            BlockingQueue<RabbitMQPartitionReader.QueuedMessage> queue = new LinkedBlockingQueue<>();
+            MessageHandler.Context boundaryContext = mock(MessageHandler.Context.class);
+            queue.add(new RabbitMQPartitionReader.QueuedMessage(
+                    CODEC.messageBuilder().addData("boundary".getBytes()).build(),
+                    5L, 0L, boundaryContext));
+
+            setPrivateField(reader, "consumer", new NoopConsumer());
+            setPrivateField(reader, "queue", queue);
+
+            SupportsRealTimeRead.RecordStatus status = reader.nextWithTimeout(5000L);
+            assertThat(status.hasRecord()).isFalse();
+            verify(boundaryContext, times(0)).processed();
+        }
+
+        @Test
+        void nextWithTimeoutFailsRetryablyWhenSingleActiveConsumerIsInactive() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("singleActiveConsumer", "true");
+            opts.put("consumerName", "consumer-a");
+            opts.put("pollTimeoutMs", "5");
+            ConnectorOptions options = new ConnectorOptions(opts);
+
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 0, 100, options);
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(
+                    partition, partition.getOptions());
+
+            setPrivateField(reader, "consumer", new NoopConsumer());
+            setPrivateField(reader, "queue", new LinkedBlockingQueue<>());
+            setPrivateField(reader, "singleActiveConsumerStateKnown",
+                    new java.util.concurrent.atomic.AtomicBoolean(true));
+            setPrivateField(reader, "singleActiveConsumerActive",
+                    new java.util.concurrent.atomic.AtomicBoolean(false));
+
+            assertThatThrownBy(() -> reader.nextWithTimeout(20L))
+                    .isInstanceOf(IOException.class)
+                    .hasMessageContaining("Single active consumer")
+                    .hasMessageContaining("inactive");
+        }
+
+        @Test
+        void nextWithTimeoutOnFilteredEmptyRangeTerminatesBeforeFullTimeout() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("filterValues", "alpha");
+            opts.put("filterValuePath", "application_properties.region");
+            opts.put("pollTimeoutMs", "30000");
+            ConnectorOptions options = new ConnectorOptions(opts);
+
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 0, 5, options);
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(
+                    partition, partition.getOptions());
+
+            setPrivateField(reader, "consumer", new NoopConsumer());
+            setPrivateField(reader, "queue", new LinkedBlockingQueue<>());
+            setPrivateField(reader, "environment", new NoConsumerEnvironment(5L));
+            setPrivateField(reader, "lastTailProbeNanos", System.nanoTime());
+            setPrivateField(reader, "lastTailProbeOffset", -1L);
+
+            long startNanos = System.nanoTime();
+            SupportsRealTimeRead.RecordStatus status = reader.nextWithTimeout(5_000L);
+            long elapsedMs = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(
+                    System.nanoTime() - startNanos);
+
+            assertThat(status.hasRecord()).isFalse();
+            assertThat(elapsedMs).isLessThan(1_000L);
+            assertThat((boolean) getPrivateField(reader, "finished")).isTrue();
+        }
+
+        @Test
+        void nextWithTimeoutOnTimestampEmptyRangeTerminatesBeforeFullTimeout() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("startingOffsets", "timestamp");
+            opts.put("startingTimestamp", "1700000000000");
+            opts.put("pollTimeoutMs", "30000");
+            ConnectorOptions options = new ConnectorOptions(opts);
+
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 0, 5, options, true);
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(
+                    partition, partition.getOptions());
+
+            setPrivateField(reader, "consumer", new NoopConsumer());
+            setPrivateField(reader, "queue", new LinkedBlockingQueue<>());
+            setPrivateField(reader, "environment", new NoConsumerEnvironment(5L));
+            setPrivateField(reader, "lastTailProbeNanos", System.nanoTime());
+            setPrivateField(reader, "lastTailProbeOffset", -1L);
+
+            long startNanos = System.nanoTime();
+            SupportsRealTimeRead.RecordStatus status = reader.nextWithTimeout(5_000L);
+            long elapsedMs = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(
+                    System.nanoTime() - startNanos);
+
+            assertThat(status.hasRecord()).isFalse();
+            assertThat(elapsedMs).isLessThan(1_000L);
+            assertThat((boolean) getPrivateField(reader, "finished")).isTrue();
+        }
+
+        @Test
         void nextWithTimeoutSkipsDedup() throws Exception {
             RabbitMQInputPartition partition = new RabbitMQInputPartition(
                     "test-stream", 0, Long.MAX_VALUE, minimalOptions());
@@ -708,6 +823,24 @@ class RealTimeModeTest {
         @Override
         public StreamStats queryStreamStats(String stream) {
             throw new NoOffsetException("empty");
+        }
+    }
+
+    private static final class NoConsumerEnvironment extends NoOpEnvironment {
+        private final long tailOffset;
+
+        private NoConsumerEnvironment(long tailOffset) {
+            this.tailOffset = tailOffset;
+        }
+
+        @Override
+        public StreamStats queryStreamStats(String stream) {
+            return new FixedStreamStats(tailOffset);
+        }
+
+        @Override
+        public ConsumerBuilder consumerBuilder() {
+            throw new AssertionError("tail probe should use the cached empty result");
         }
     }
 

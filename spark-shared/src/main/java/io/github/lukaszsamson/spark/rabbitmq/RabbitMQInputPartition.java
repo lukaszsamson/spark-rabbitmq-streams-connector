@@ -24,6 +24,7 @@ public final class RabbitMQInputPartition implements InputPartition {
     private final String messageSizeTrackerScope;
     private final LongAccumulator messageSizeBytesAccumulator;
     private final LongAccumulator messageSizeRecordsAccumulator;
+    private final boolean lateBindEndOffset;
 
     /**
      * @param stream the RabbitMQ stream name (or partition stream name for superstreams)
@@ -73,10 +74,21 @@ public final class RabbitMQInputPartition implements InputPartition {
     }
 
     public RabbitMQInputPartition(String stream, long startOffset, long endOffset,
+                                   ConnectorOptions options, boolean useConfiguredStartingOffset,
+                                   String[] preferredLocations, String messageSizeTrackerScope,
+                                   LongAccumulator messageSizeBytesAccumulator,
+                                   LongAccumulator messageSizeRecordsAccumulator) {
+        this(stream, startOffset, endOffset, options, useConfiguredStartingOffset,
+                preferredLocations, messageSizeTrackerScope, messageSizeBytesAccumulator,
+                messageSizeRecordsAccumulator, endOffset == Long.MAX_VALUE);
+    }
+
+    public RabbitMQInputPartition(String stream, long startOffset, long endOffset,
                                   ConnectorOptions options, boolean useConfiguredStartingOffset,
                                   String[] preferredLocations, String messageSizeTrackerScope,
                                   LongAccumulator messageSizeBytesAccumulator,
-                                  LongAccumulator messageSizeRecordsAccumulator) {
+                                  LongAccumulator messageSizeRecordsAccumulator,
+                                  boolean lateBindEndOffset) {
         this.stream = stream;
         this.startOffset = startOffset;
         this.endOffset = endOffset;
@@ -86,6 +98,7 @@ public final class RabbitMQInputPartition implements InputPartition {
         this.messageSizeTrackerScope = messageSizeTrackerScope;
         this.messageSizeBytesAccumulator = messageSizeBytesAccumulator;
         this.messageSizeRecordsAccumulator = messageSizeRecordsAccumulator;
+        this.lateBindEndOffset = lateBindEndOffset;
     }
 
     public String getStream() {
@@ -118,6 +131,10 @@ public final class RabbitMQInputPartition implements InputPartition {
 
     public LongAccumulator getMessageSizeRecordsAccumulator() {
         return messageSizeRecordsAccumulator;
+    }
+
+    public boolean isLateBindEndOffset() {
+        return lateBindEndOffset;
     }
 
     @Override

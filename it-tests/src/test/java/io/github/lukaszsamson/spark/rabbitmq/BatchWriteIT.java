@@ -353,10 +353,23 @@ class BatchWriteIT extends AbstractRabbitMQIT {
                         "io.github.lukaszsamson.spark.rabbitmq.TestAddressResolver")
                 .load();
 
-        List<String> values = readDf.collectAsList().stream()
-                .map(row -> new String((byte[]) row.getAs("value")))
-                .sorted()
-                .toList();
+        List<String> values = List.of();
+        long deadlineMs = System.currentTimeMillis() + 15_000;
+        while (System.currentTimeMillis() < deadlineMs) {
+            values = readDf.collectAsList().stream()
+                    .map(row -> new String((byte[]) row.getAs("value")))
+                    .sorted()
+                    .toList();
+            if (values.size() >= 20) {
+                break;
+            }
+            try {
+                Thread.sleep(200);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException(e);
+            }
+        }
 
         assertThat(values).hasSize(20);
         assertThat(values).allMatch(v -> v.startsWith("alpha-"));

@@ -64,20 +64,49 @@ final class RabbitMQPartitionReader extends BaseRabbitMQPartitionReader
                 return RecordStatus.newStatusWithoutArrivalTime(false);
             }
 
+            if (hasReachedPlannedEnd()) {
+                finished = true;
+                return RecordStatus.newStatusWithoutArrivalTime(false);
+            }
+
             // Check for consumer errors
             Throwable error = consumerError.get();
             if (error != null) {
                 throw new IOException("Consumer error on stream '" + stream + "'", error);
             }
+            if (isSingleActiveConsumerKnownInactive() && queue.isEmpty()) {
+                throw terminationFailure(false, false, true, 0L);
+            }
 
             long remainingMs = TimeUnit.NANOSECONDS.toMillis(deadlineNanos - System.nanoTime());
             if (remainingMs <= 0) {
+                boolean plannedEndReached = canCompleteEmptyPlannedRange()
+                        && hasStreamTailReachedPlannedEnd();
+                boolean dataLossProven = isPlannedRangeNoLongerReachableDueToDataLoss();
+                boolean sacInactive = isSingleActiveConsumerKnownInactive();
+                boolean rangeEndedBeforeTarget = !options.isFailOnDataLoss()
+                        && plannedRangeEndedBeforeTarget();
+                TerminationDecision decision = rangeEndedBeforeTarget
+                        ? TerminationDecision.COMPLETE
+                        : decideTermination(false, dataLossProven, plannedEndReached, sacInactive);
+                switch (decision) {
+                    case COMPLETE:
+                        if (dataLossProven || rangeEndedBeforeTarget) {
+                            dataLoss++;
+                        }
+                        finished = true;
+                        return RecordStatus.newStatusWithoutArrivalTime(false);
+                    case THROW:
+                        throw terminationFailure(false, dataLossProven, sacInactive, 0L);
+                    case CONTINUE:
+                        break;
+                }
                 return RecordStatus.newStatusWithoutArrivalTime(false);
             }
 
             QueuedMessage qm;
             try {
-                long pollMs = Math.min(remainingMs, pollTimeoutMs);
+                long pollMs = pollIntervalMs(remainingMs, pollTimeoutMs);
                 long pollStart = System.nanoTime();
                 qm = queue.poll(pollMs, TimeUnit.MILLISECONDS);
                 pollWaitMs += TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - pollStart);
@@ -94,21 +123,42 @@ final class RabbitMQPartitionReader extends BaseRabbitMQPartitionReader
                     return RecordStatus.newStatusWithoutArrivalTime(false);
                 }
                 if (consumerClosed.get()) {
-                    if (!options.isFailOnDataLoss() && isPlannedRangeNoLongerReachableDueToDataLoss()) {
-                        LOG.warn("Consumer for stream '{}' closed and planned range [{}, {}) is no longer " +
-                                        "reachable; completing split because failOnDataLoss=false",
-                                stream, startOffset, endOffset);
-                        dataLoss++;
-                        finished = true;
-                        return RecordStatus.newStatusWithoutArrivalTime(false);
+                    boolean dataLossProven = isPlannedRangeNoLongerReachableDueToDataLoss();
+                    TerminationDecision decision = decideTermination(
+                            false, dataLossProven, false, false);
+                    switch (decision) {
+                        case COMPLETE:
+                            LOG.warn("Consumer for stream '{}' closed and planned range [{}, {}) is no longer " +
+                                            "reachable; completing split because failOnDataLoss=false",
+                                    stream, startOffset, endOffset);
+                            dataLoss++;
+                            finished = true;
+                            return RecordStatus.newStatusWithoutArrivalTime(false);
+                        case THROW:
+                            throw terminationFailure(false, dataLossProven, false, 0L);
+                        case CONTINUE:
+                            break;
                     }
                     throw new IOException(
                             "Consumer for stream '" + stream + "' closed while waiting for data");
                 }
+                if (canCompleteEmptyPlannedRange() && hasStreamTailReachedPlannedEnd()) {
+                    finished = true;
+                    return RecordStatus.newStatusWithoutArrivalTime(false);
+                }
+                if (isSingleActiveConsumerKnownInactive()) {
+                    throw terminationFailure(false, false, true, 0L);
+                }
                 continue;
             }
 
-            // Credit flow: notify that this message has been consumed
+            // Stop at end offset (exclusive) without granting additional credit.
+            if (isAtOrBeyondPlannedEnd(qm.offset())) {
+                finished = true;
+                return RecordStatus.newStatusWithoutArrivalTime(false);
+            }
+
+            // Credit flow: notify that this message has been consumed.
             qm.context().processed();
 
             if (qm.offset() > lastObservedOffset) {

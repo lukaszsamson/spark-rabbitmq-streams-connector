@@ -81,7 +81,10 @@ final class RabbitMQMicroBatchStream extends BaseRabbitMQMicroBatchStream
                     stream, startOff, Long.MAX_VALUE, options,
                     useConfiguredStartingOffset(stream, startOff),
                     RabbitMQInputPartition.locationForStream(stream),
-                    messageSizeTrackerScope));
+                    messageSizeTrackerScope,
+                    messageSizeBytesAccumulator,
+                    messageSizeRecordsAccumulator,
+                    false));
         }
 
         LOG.info("Real-time mode: planned {} input partitions from start {}",

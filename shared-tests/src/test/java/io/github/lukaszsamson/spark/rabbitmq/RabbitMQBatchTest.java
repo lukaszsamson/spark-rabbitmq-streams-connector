@@ -279,6 +279,20 @@ class RabbitMQBatchTest {
         }
 
         @Test
+        void lateBoundMaxEndOffsetIsMarkedForBatchReaders() {
+            Map<String, long[]> ranges = new LinkedHashMap<>();
+            ranges.put("s1", new long[]{10, Long.MAX_VALUE});
+
+            RabbitMQBatch batch = new RabbitMQBatch(baseOptions(), SCHEMA, ranges);
+            InputPartition[] partitions = batch.planInputPartitions();
+
+            assertThat(partitions).hasSize(1);
+            RabbitMQInputPartition partition = (RabbitMQInputPartition) partitions[0];
+            assertThat(partition.getEndOffset()).isEqualTo(Long.MAX_VALUE);
+            assertThat(partition.isLateBindEndOffset()).isTrue();
+        }
+
+        @Test
         void splitPreservesContiguousRanges() {
             Map<String, long[]> ranges = Map.of("s1", new long[]{100, 350});
 

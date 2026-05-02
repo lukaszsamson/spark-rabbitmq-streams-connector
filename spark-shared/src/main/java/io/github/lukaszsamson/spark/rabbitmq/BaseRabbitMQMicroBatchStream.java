@@ -1860,15 +1860,11 @@ class BaseRabbitMQMicroBatchStream
                     "Failed to query stream stats for '" + stream + "'", e);
         }
 
-        // committedOffset() lags freshly-published messages on the broker, so stats
-        // alone can underestimate the tail and cause readers to miss data they could
-        // already consume. The probe-consumer fallback compensates by reading the last
-        // chunk; latestTailProbeCache deduplicates probes within tailProbeCacheMs so
-        // the cost stays bounded. The stats RPC is still cached separately via
-        // streamStatsCache so latestOffset/planInputPartitions don't double-query.
+        // Prefer the exact last-message probe when it succeeds. Stats can lag fresh
+        // publishes or overshoot after recreation, so use them only as fallback.
         long statsTail = resolveTailOffset(stats);
         long probedTail = probeTailOffsetForLatestWithCache(env, stream);
-        long resolved = Math.max(statsTail, probedTail);
+        long resolved = probedTail > 0L ? probedTail : statsTail;
 
         if (probedTail == 0L && latestStartedOnEmptyStreams.contains(stream)) {
             try {
@@ -1981,7 +1977,7 @@ class BaseRabbitMQMicroBatchStream
         } else {
             latestTailProbeCache.remove(stream);
         }
-        return Math.max(statsTail, probedTail);
+        return probedTail > 0L ? probedTail : statsTail;
     }
 
     /**
