@@ -51,6 +51,7 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
     final String messageSizeTrackerScope;
     final LongAccumulator messageSizeBytesAccumulator;
     final LongAccumulator messageSizeRecordsAccumulator;
+    final boolean lateBindEndOffset;
     final MessageToRowConverter converter;
     final MessagePostFilter postFilter;
 
@@ -107,6 +108,7 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
         this.messageSizeTrackerScope = partition.getMessageSizeTrackerScope();
         this.messageSizeBytesAccumulator = partition.getMessageSizeBytesAccumulator();
         this.messageSizeRecordsAccumulator = partition.getMessageSizeRecordsAccumulator();
+        this.lateBindEndOffset = partition.isLateBindEndOffset();
         this.converter = new MessageToRowConverter(options.getMetadataFields());
         this.postFilter = createPostFilter(options);
         this.queue = new ArrayBlockingQueue<>(options.getQueueCapacity());
@@ -388,7 +390,7 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
         // Late-bind endOffset for batch reads with endingOffsets=latest.
         // The driver passes Long.MAX_VALUE as a sentinel; resolve the actual
         // tail on the executor at read time (Kafka-style late binding).
-        if (endOffset == Long.MAX_VALUE) {
+        if (lateBindEndOffset && endOffset == Long.MAX_VALUE) {
             long resolved = probeTailFromExecutor(environment, stream);
             if (resolved <= startOffset) {
                 LOG.info("Late-bound endOffset for stream '{}' resolved to {} " +
@@ -920,9 +922,10 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
             return true;
         }
         try {
-            long statsTail = queryStreamTailOffsetFromStatsWithCache();
             long probedTail = probeLastMessageOffset();
-            long tail = Math.max(statsTail, probedTail);
+            long tail = probedTail >= 0L
+                    ? probedTail
+                    : queryStreamTailOffsetFromStatsWithCache();
             if (tail < 0) {
                 return endOffset <= startOffset;
             }
@@ -952,7 +955,7 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
                 return true;
             }
             long tail = probeLastMessageOffset();
-            return tail >= 0 && tail < startOffset;
+            return hasFinitePlannedEnd() && tail >= 0 && tail < startOffset;
         } catch (Exception e) {
             if (isMissingStreamException(e)) {
                 return true;

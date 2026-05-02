@@ -443,7 +443,7 @@ class RealTimeModeIT extends AbstractRabbitMQIT {
 
         try {
             awaitAtLeastPayloadsWithPrefix("phase1-", 30, 30_000);
-            waitForCheckpointCommit(checkpointDir, 30_000);
+            waitForCommittedSourceOffset(checkpointDir, sourceStream, 30L, 30_000);
         } finally {
             query1.stop();
         }
@@ -822,25 +822,49 @@ class RealTimeModeIT extends AbstractRabbitMQIT {
         }
     }
 
-    private static void waitForCheckpointCommit(Path checkpointDir, long timeoutMs) throws Exception {
+    private static void waitForCommittedSourceOffset(
+            Path checkpointDir, String stream, long expectedNextOffset, long timeoutMs) throws Exception {
         long deadline = System.currentTimeMillis() + timeoutMs;
-        while (!hasCheckpointCommit(checkpointDir) && System.currentTimeMillis() < deadline) {
+        long committed = latestCommittedSourceOffset(checkpointDir, stream);
+        while (committed < expectedNextOffset && System.currentTimeMillis() < deadline) {
             Thread.sleep(200);
+            committed = latestCommittedSourceOffset(checkpointDir, stream);
         }
-        assertThat(hasCheckpointCommit(checkpointDir))
-                .as("checkpoint commit should exist before restarting real-time query")
-                .isTrue();
+        assertThat(committed)
+                .as("checkpoint should commit stream %s at or beyond offset %s before restarting",
+                        stream, expectedNextOffset)
+                .isGreaterThanOrEqualTo(expectedNextOffset);
     }
 
-    private static boolean hasCheckpointCommit(Path checkpointDir) throws Exception {
+    private static long latestCommittedSourceOffset(Path checkpointDir, String stream) throws Exception {
+        Path offsetsDir = checkpointDir.resolve("offsets");
         Path commitsDir = checkpointDir.resolve("commits");
-        if (!Files.isDirectory(commitsDir)) {
-            return false;
+        if (!Files.isDirectory(offsetsDir) || !Files.isDirectory(commitsDir)) {
+            return -1L;
         }
-        try (java.util.stream.Stream<Path> files = Files.list(commitsDir)) {
-            return files.anyMatch(path -> !Files.isDirectory(path)
-                    && !path.getFileName().toString().startsWith("."));
+
+        long maxCommitted = -1L;
+        try (java.util.stream.Stream<Path> files = Files.list(offsetsDir)) {
+            for (Path offsetFile : files.collect(Collectors.toList())) {
+                String name = offsetFile.getFileName().toString();
+                if (Files.isDirectory(offsetFile) || name.startsWith(".") || !name.chars().allMatch(Character::isDigit)) {
+                    continue;
+                }
+                if (!Files.exists(commitsDir.resolve(name))) {
+                    continue;
+                }
+                for (String line : Files.readAllLines(offsetFile)) {
+                    if (!line.contains("\"" + stream + "\"")) {
+                        continue;
+                    }
+                    Long committed = RabbitMQStreamOffset.fromJson(line).getStreamOffsets().get(stream);
+                    if (committed != null) {
+                        maxCommitted = Math.max(maxCommitted, committed);
+                    }
+                }
+            }
         }
+        return maxCommitted;
     }
 
     private static void awaitQueryFailure(StreamingQuery query, long timeoutMs) throws Exception {

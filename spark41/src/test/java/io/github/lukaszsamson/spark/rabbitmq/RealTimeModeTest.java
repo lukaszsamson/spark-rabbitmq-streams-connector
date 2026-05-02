@@ -145,6 +145,7 @@ class RealTimeModeTest {
             assertThat(p.getStream()).isEqualTo("test-stream");
             assertThat(p.getStartOffset()).isEqualTo(42L);
             assertThat(p.getEndOffset()).isEqualTo(Long.MAX_VALUE);
+            assertThat(p.isLateBindEndOffset()).isFalse();
         }
 
         @Test

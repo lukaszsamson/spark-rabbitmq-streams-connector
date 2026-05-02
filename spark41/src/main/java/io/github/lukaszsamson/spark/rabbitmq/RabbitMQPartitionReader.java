@@ -97,7 +97,7 @@ final class RabbitMQPartitionReader extends BaseRabbitMQPartitionReader
                         finished = true;
                         return RecordStatus.newStatusWithoutArrivalTime(false);
                     case THROW:
-                        throw terminationFailure(false, dataLossProven, sacInactive, timeout);
+                        throw terminationFailure(false, dataLossProven, sacInactive, 0L);
                     case CONTINUE:
                         break;
                 }
@@ -135,7 +135,7 @@ final class RabbitMQPartitionReader extends BaseRabbitMQPartitionReader
                             finished = true;
                             return RecordStatus.newStatusWithoutArrivalTime(false);
                         case THROW:
-                            throw terminationFailure(false, dataLossProven, false, timeout);
+                            throw terminationFailure(false, dataLossProven, false, 0L);
                         case CONTINUE:
                             break;
                     }
