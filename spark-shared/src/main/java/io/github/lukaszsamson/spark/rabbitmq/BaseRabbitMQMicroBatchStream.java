@@ -96,6 +96,13 @@ class BaseRabbitMQMicroBatchStream
     volatile RabbitMQStreamOffset cachedLatestOffset;
     /** Cached true tail offset (before ReadLimit application). */
     volatile RabbitMQStreamOffset cachedTailOffset;
+    /**
+     * Cached merged consumed offsets reported by {@code mergeOffsets} in real-time mode.
+     * Used as a stop-time fallback for broker offset persistence when commit() has not yet
+     * run for the final batch. Kept distinct from {@link #cachedLatestOffset} so source-latest
+     * reporting is not contaminated by per-task consumer progress.
+     */
+    volatile RabbitMQStreamOffset cachedConsumedOffset;
     /** Short-lived cache of latestOffset(start, limit) result for repeated trigger calls. */
     volatile LatestOffsetInvocationCache latestOffsetInvocationCache;
 
@@ -1332,6 +1339,43 @@ class BaseRabbitMQMicroBatchStream
         return queryTailOffsets();
     }
 
+    /**
+     * Stats-only tail-offset query for periodic real-time metrics refresh.
+     *
+     * <p>Unlike {@link #queryTailOffsetsForReporting()} this path never spins up a
+     * tail-probe consumer; it only reads {@code committedOffset()} /
+     * {@code committedChunkId()} from a (possibly cached) {@link StreamStats}
+     * snapshot. Real-time mergeOffsets() may invoke this on every micro-batch
+     * boundary, and creating a probe consumer per boundary would be a serious
+     * resource regression for a metric that tolerates broker-side lag.
+     */
+    final Map<String, Long> queryTailOffsetsForMetrics() {
+        List<String> streams = discoverStreams();
+        Environment env = getEnvironment();
+        return queryTailOffsetsInParallel(
+                streams,
+                stream -> queryStreamTailOffsetForMetrics(env, stream));
+    }
+
+    private long queryStreamTailOffsetForMetrics(Environment env, String stream) {
+        StreamStats stats;
+        try {
+            stats = streamStatsCache.getOrLoad(env, stream);
+        } catch (com.rabbitmq.stream.StreamDoesNotExistException e) {
+            if (options.isFailOnDataLoss()) {
+                throw new IllegalStateException(
+                        "Stream '" + stream + "' does not exist. " +
+                                "It may have been deleted. Set failOnDataLoss=false to skip.", e);
+            }
+            LOG.debug("Stream '{}' does not exist, skipping metrics tail refresh", stream);
+            return 0L;
+        } catch (Exception e) {
+            throw new IllegalStateException(
+                    "Failed to query stream stats for '" + stream + "'", e);
+        }
+        return resolveTailOffset(stats);
+    }
+
     // Spark 3.5 compat: ReadLimit.maxBytes() does not exist in 3.5. Not called on 4.x paths.
     ReadLimit createReadMaxBytesLimit(long maxBytes) {
         try {
@@ -2020,7 +2064,7 @@ class BaseRabbitMQMicroBatchStream
         }
     }
 
-    private long resolveMissingStartOffset(
+    long resolveMissingStartOffset(
             String stream,
             String location,
             Map<String, Long> fromCheckpoint,
@@ -2307,18 +2351,28 @@ class BaseRabbitMQMicroBatchStream
         if (fromCheckpoint != null && !fromCheckpoint.isEmpty()) {
             return fromCheckpoint;
         }
-        RabbitMQStreamOffset latest = cachedLatestOffset;
-        if (shouldPersistCachedLatestOffsetsOnStop()
-                && latest != null
-                && !latest.getStreamOffsets().isEmpty()) {
-            LOG.debug("Falling back to cached latest offsets for stop-time broker persistence: {}",
-                    latest.getStreamOffsets());
-            return new LinkedHashMap<>(latest.getStreamOffsets());
+        if (shouldPersistCachedConsumedOffsetsOnStop()) {
+            RabbitMQStreamOffset consumed = cachedConsumedOffset;
+            if (consumed != null && !consumed.getStreamOffsets().isEmpty()) {
+                LOG.debug("Falling back to cached consumed offsets for stop-time broker persistence: {}",
+                        consumed.getStreamOffsets());
+                return new LinkedHashMap<>(consumed.getStreamOffsets());
+            }
+            // mergeOffsets() may not have fired before stop() in a single-batch real-time
+            // query. Fall back to cachedLatestOffset so a stop right after the source's
+            // first latestOffset() call still records broker-side progress instead of
+            // throwing away the consumer name's only chance to advance.
+            RabbitMQStreamOffset latest = cachedLatestOffset;
+            if (latest != null && !latest.getStreamOffsets().isEmpty()) {
+                LOG.debug("Falling back to cached latest offsets for stop-time broker persistence: {}",
+                        latest.getStreamOffsets());
+                return new LinkedHashMap<>(latest.getStreamOffsets());
+            }
         }
         return null;
     }
 
-    boolean shouldPersistCachedLatestOffsetsOnStop() {
+    boolean shouldPersistCachedConsumedOffsetsOnStop() {
         return false;
     }
 

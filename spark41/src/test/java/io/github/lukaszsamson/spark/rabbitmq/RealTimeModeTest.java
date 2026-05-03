@@ -64,11 +64,11 @@ class RealTimeModeTest {
         void prepareForRealTimeModeSetsFlag() throws Exception {
             RabbitMQMicroBatchStream stream = createStream(minimalOptions());
             assertThat(getPrivateField(stream, "realTimeMode")).isEqualTo(false);
-            assertThat(stream.shouldPersistCachedLatestOffsetsOnStop()).isFalse();
+            assertThat(stream.shouldPersistCachedConsumedOffsetsOnStop()).isFalse();
 
             stream.prepareForRealTimeMode();
             assertThat(getPrivateField(stream, "realTimeMode")).isEqualTo(true);
-            assertThat(stream.shouldPersistCachedLatestOffsetsOnStop()).isTrue();
+            assertThat(stream.shouldPersistCachedConsumedOffsetsOnStop()).isTrue();
         }
 
         @Test
@@ -269,6 +269,42 @@ class RealTimeModeTest {
             RabbitMQInputPartition p = (RabbitMQInputPartition) partitions[0];
             assertThat(p.isUseConfiguredStartingOffset()).isFalse();
         }
+
+        @Test
+        void planInputPartitionsTimestampDoesNotMarkMissingStartFallbackForConfiguredSeek()
+                throws Exception {
+            // Timestamp-start mode with a stream missing from the start map (e.g. a newly
+            // discovered superstream partition in real-time mode). resolveMissingStartOffset
+            // records its fallback in initialOffsets, which would otherwise trick
+            // useConfiguredStartingOffset into re-applying timestamp filtering to records
+            // that were never resolved via timestamp seek.
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("startingOffsets", "timestamp");
+            opts.put("startingTimestamp", "1234");
+            ConnectorOptions options = new ConnectorOptions(opts);
+
+            RabbitMQMicroBatchStream stream = createStream(options);
+            setPrivateField(stream, "streams", List.of("test-stream"));
+            setPrivateField(stream, "environment", new NoOpEnvironment());
+            // Pre-seed initialOffsets to mimic state after initialOffset() resolved the
+            // timestamp seek for this stream. resolveMissingStartOffset will return this
+            // value, and the bug being verified is precisely that startOff (== 42L) ==
+            // initialOffsets.get(stream) must NOT be treated as a configured-seek anchor
+            // when the partition came in via the fallback branch.
+            setPrivateField(stream, "initialOffsets", Map.of("test-stream", 42L));
+
+            // start map omits the stream — forces the fallback path.
+            RabbitMQStreamOffset start = new RabbitMQStreamOffset(Map.of());
+            InputPartition[] partitions = stream.planInputPartitions(start);
+
+            assertThat(partitions).hasSize(1);
+            RabbitMQInputPartition p = (RabbitMQInputPartition) partitions[0];
+            assertThat(p.isUseConfiguredStartingOffset())
+                    .as("fallback-resolved partitions must not re-apply the timestamp filter")
+                    .isFalse();
+        }
     }
 
     // ======================================================================
@@ -312,8 +348,9 @@ class RealTimeModeTest {
         }
 
         @Test
-        void mergeOffsetsUpdatesCachedLatestOffset() throws Exception {
+        void mergeOffsetsUpdatesCachedConsumedOffset() throws Exception {
             RabbitMQMicroBatchStream stream = createStream(minimalOptions());
+            assertThat(getPrivateField(stream, "cachedConsumedOffset")).isNull();
             assertThat(getPrivateField(stream, "cachedLatestOffset")).isNull();
 
             PartitionOffset[] offsets = new PartitionOffset[]{
@@ -322,11 +359,14 @@ class RealTimeModeTest {
 
             stream.mergeOffsets(offsets);
 
-            Object cached = getPrivateField(stream, "cachedLatestOffset");
-            assertThat(cached).isNotNull();
-            assertThat(cached).isInstanceOf(RabbitMQStreamOffset.class);
-            assertThat(((RabbitMQStreamOffset) cached).getStreamOffsets())
+            Object cachedConsumed = getPrivateField(stream, "cachedConsumedOffset");
+            assertThat(cachedConsumed).isNotNull();
+            assertThat(cachedConsumed).isInstanceOf(RabbitMQStreamOffset.class);
+            assertThat(((RabbitMQStreamOffset) cachedConsumed).getStreamOffsets())
                     .containsEntry("test-stream", 42L);
+            // cachedLatestOffset is reserved for source-latest reporting and must not be
+            // overwritten by per-task consumer progress.
+            assertThat(getPrivateField(stream, "cachedLatestOffset")).isNull();
         }
     }
 
