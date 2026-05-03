@@ -348,12 +348,24 @@ class BaseRabbitMQMicroBatchStream
             try {
                 long firstAvailable = resolveFirstAvailable(stream);
                 if (recoveredNextOffset < firstAvailable) {
-                    LOG.warn("Ignoring recovered stored offset {} for stream '{}' because it is "
-                                    + "before first available {}. Falling back to configured "
-                                    + "startingOffsets={}.",
-                            recoveredNextOffset, stream, firstAvailable, options.getStartingOffsets());
+                    if (options.isFailOnDataLoss()) {
+                        throw new IllegalStateException(
+                                "Recovered stored offset " + recoveredNextOffset
+                                        + " for stream '" + stream
+                                        + "' is before first available " + firstAvailable
+                                        + ". Broker-tracked progress was truncated by retention. "
+                                        + "Set failOnDataLoss=false to advance.");
+                    }
+                    LOG.warn("Broker-tracked progress was truncated by retention for stream '{}': "
+                                    + "stored next offset {} is before first available {}. "
+                                    + "Falling back to configured startingOffsets={} "
+                                    + "(failOnDataLoss=false).",
+                            stream, recoveredNextOffset, firstAvailable,
+                            options.getStartingOffsets());
                     continue;
                 }
+            } catch (IllegalStateException e) {
+                throw e;
             } catch (Exception e) {
                 LOG.debug("Failed to validate recovered stored offset for stream '{}': {}",
                         stream, e.getMessage());
@@ -396,6 +408,10 @@ class BaseRabbitMQMicroBatchStream
 
     @Override
     public void stop() {
+        if (!stopping.compareAndSet(false, true)) {
+            return;
+        }
+
         clearLatestOffsetInvocationCache();
 
         // Persist best-effort broker offsets before shutdown.
@@ -407,10 +423,6 @@ class BaseRabbitMQMicroBatchStream
             } catch (Exception e) {
                 LOG.warn("Failed to persist broker offsets during stop()", e);
             }
-        }
-
-        if (!stopping.compareAndSet(false, true)) {
-            return;
         }
 
         brokerCommitExecutor.shutdownNow();
