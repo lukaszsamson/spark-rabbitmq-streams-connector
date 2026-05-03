@@ -196,8 +196,12 @@ final class RabbitMQBatch implements Batch {
                              long start, long end, int numSplits) {
         long offsetSpan = (end == Long.MAX_VALUE) ? 0L : end - start;
         String[] location = RabbitMQInputPartition.locationForStream(stream);
+        // The whole range was anchored by the timestamp-start resolver; every split
+        // derived from it must carry the flag so the reader-side timestamp filter
+        // applies regardless of which split a straddling chunk lands in.
+        boolean useConfiguredStartingOffset =
+                options.getStartingOffsets() == StartingOffsetsMode.TIMESTAMP;
         if (numSplits <= 1 || offsetSpan <= 1) {
-            boolean useConfiguredStartingOffset = options.getStartingOffsets() == StartingOffsetsMode.TIMESTAMP;
             partitions.add(new RabbitMQInputPartition(stream, start, end, options,
                     useConfiguredStartingOffset, location));
             return;
@@ -211,8 +215,6 @@ final class RabbitMQBatch implements Batch {
             long splitSize = chunkSize + (i < remainder ? 1 : 0);
             if (splitSize == 0) break;
             long splitEnd = currentStart + splitSize;
-            boolean useConfiguredStartingOffset = options.getStartingOffsets() == StartingOffsetsMode.TIMESTAMP
-                    && currentStart == start;
             partitions.add(new RabbitMQInputPartition(stream, currentStart, splitEnd, options,
                     useConfiguredStartingOffset, location));
             currentStart = splitEnd;

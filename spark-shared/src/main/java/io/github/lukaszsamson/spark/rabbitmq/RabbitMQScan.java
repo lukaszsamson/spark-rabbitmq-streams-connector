@@ -469,19 +469,11 @@ final class RabbitMQScan implements Scan {
             return options.getEndingOffset();
         }
 
-        // LATEST: defer resolution to executor (Kafka-style late binding).
-        // Each executor resolves the tail at read time for the freshest possible value.
-        //
-        // Exception: when startingOffsets=timestamp, the start may resolve to the stream
-        // tail (no messages match). With late binding the range [tail, MAX_VALUE) looks
-        // non-empty, preventing empty-range detection at plan time. Resolve eagerly so
-        // that startOffset >= endOffset correctly identifies the empty range.
-        if (options.getStartingOffsets() == StartingOffsetsMode.TIMESTAMP
-                || options.getMinPartitions() != null
-                || options.getMaxRecordsPerPartition() != null) {
-            return resolveLatestOffset(env, stream, stats);
-        }
-        return Long.MAX_VALUE;
+        // LATEST for batch reads: bind eagerly so every task observes the same end.
+        // Late binding to MAX_VALUE caused per-task tail probes that diverged on slow-task
+        // startup, producing a non-snapshot read. Real-time streaming still uses late
+        // binding via a separate code path.
+        return resolveLatestOffset(env, stream, stats);
     }
 
     private long resolveLatestOffset(Environment env, String stream, StreamStats stats) {

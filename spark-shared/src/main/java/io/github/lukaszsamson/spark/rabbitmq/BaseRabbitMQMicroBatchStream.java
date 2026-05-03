@@ -626,11 +626,15 @@ class BaseRabbitMQMicroBatchStream
             int numSplits = splitsPerStream.getOrDefault(stream, 1);
             long offsetSpan = end - start;
             String[] location = RabbitMQInputPartition.locationForStream(stream);
+            // Anchor the timestamp-filter flag to the range start so every derived
+            // split carries it; otherwise only the first split would trigger the
+            // reader-side filter for chunks straddling the timestamp boundary.
+            boolean useConfiguredStart = useConfiguredStartingOffset(stream, start);
 
             if (numSplits <= 1 || offsetSpan <= 1) {
                 partitions.add(new RabbitMQInputPartition(
                         stream, start, end, options,
-                        useConfiguredStartingOffset(stream, start), location,
+                        useConfiguredStart, location,
                         messageSizeTrackerScope,
                         messageSizeBytesAccumulator,
                         messageSizeRecordsAccumulator));
@@ -646,7 +650,7 @@ class BaseRabbitMQMicroBatchStream
                 long splitEnd = currentStart + splitSize;
                 partitions.add(new RabbitMQInputPartition(
                         stream, currentStart, splitEnd, options,
-                        useConfiguredStartingOffset(stream, currentStart), location,
+                        useConfiguredStart, location,
                         messageSizeTrackerScope,
                         messageSizeBytesAccumulator,
                         messageSizeRecordsAccumulator));
@@ -677,10 +681,13 @@ class BaseRabbitMQMicroBatchStream
                                            long start, long end, int numSplits) {
         long offsetSpan = end - start;
         String[] location = RabbitMQInputPartition.locationForStream(stream);
+        // Compute once for the whole range so every split carries the timestamp-anchor
+        // flag, not just the first.
+        boolean useConfiguredStart = useConfiguredStartingOffset(stream, start);
         if (numSplits <= 1 || offsetSpan <= 1) {
             partitions.add(new RabbitMQInputPartition(
                     stream, start, end, options,
-                    useConfiguredStartingOffset(stream, start), location,
+                    useConfiguredStart, location,
                     messageSizeTrackerScope,
                     messageSizeBytesAccumulator,
                     messageSizeRecordsAccumulator));
@@ -695,7 +702,7 @@ class BaseRabbitMQMicroBatchStream
             long splitEnd = currentStart + splitSize;
             partitions.add(new RabbitMQInputPartition(
                     stream, currentStart, splitEnd, options,
-                    useConfiguredStartingOffset(stream, currentStart), location,
+                    useConfiguredStart, location,
                     messageSizeTrackerScope,
                     messageSizeBytesAccumulator,
                     messageSizeRecordsAccumulator));

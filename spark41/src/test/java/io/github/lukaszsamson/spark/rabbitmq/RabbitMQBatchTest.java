@@ -12,7 +12,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 class RabbitMQBatchTest {
 
     @Test
-    void batchTimestampMarksFirstPartitionForConfiguredSeek() {
+    void batchTimestampMarksAllSplitsForConfiguredSeek() {
+        // Every split derived from a timestamp-anchored range must carry the flag so the
+        // reader-side timestamp filter applies regardless of which split a chunk
+        // straddling the boundary lands in.
         Map<String, String> opts = new LinkedHashMap<>();
         opts.put("endpoints", "localhost:5552");
         opts.put("stream", "test-stream");
@@ -31,7 +34,7 @@ class RabbitMQBatchTest {
         RabbitMQInputPartition first = (RabbitMQInputPartition) planned[0];
         RabbitMQInputPartition second = (RabbitMQInputPartition) planned[1];
         assertThat(first.isUseConfiguredStartingOffset()).isTrue();
-        assertThat(second.isUseConfiguredStartingOffset()).isFalse();
+        assertThat(second.isUseConfiguredStartingOffset()).isTrue();
     }
 
     @Test
