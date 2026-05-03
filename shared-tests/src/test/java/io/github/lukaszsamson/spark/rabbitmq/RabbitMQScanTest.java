@@ -330,11 +330,13 @@ class RabbitMQScanTest {
             RabbitMQScan scan = new RabbitMQScan(new ConnectorOptions(opts), schema());
             StreamStats stats = new Stats(0L, false, false, 123L);
 
-            long end = assertTimeoutPreemptively(Duration.ofSeconds(5), () ->
+            long end = assertTimeoutPreemptively(Duration.ofSeconds(3), () ->
                     resolveEndOffset(scan,
                             new BlockingConsumerBuilderEnvironment(5_000L, stats),
                             "s1", stats));
-            assertThat(end).isGreaterThanOrEqualTo(123L);
+            // Probe times out (TAIL_PROBE_TIMEOUT_MS=1500ms) and returns 0; statsTail
+            // is committedOffset+1 = 124.
+            assertThat(end).isEqualTo(124L);
         }
 
         @Test
@@ -373,17 +375,16 @@ class RabbitMQScanTest {
 
         @Test
         void resolveEndOffsetResolvesEagerlyWithDefaultEndingOffsets() throws Exception {
-            // Default endingOffsets=latest is eagerly resolved for batch reads. With no
-            // committed offset and a probe environment that surfaces a tail message, the
-            // returned end reflects the probed tail rather than a late-binding sentinel.
+            // Default endingOffsets=latest is eagerly resolved for batch reads. Stats
+            // surface no committed offset, so statsTail falls back to 0; the probe
+            // emits offsets 11 and 12 and returns max+1 = 13.
             Map<String, String> opts = baseOptions();
             RabbitMQScan scan = new RabbitMQScan(new ConnectorOptions(opts), schema());
             StreamStats stats = new Stats(0L, true, true, 0L);
 
             long end = resolveEndOffset(scan, new ProbeTailEnvironment(), "s1", stats);
 
-            assertThat(end).isNotEqualTo(Long.MAX_VALUE);
-            assertThat(end).isGreaterThanOrEqualTo(0L);
+            assertThat(end).isEqualTo(13L);
         }
 
         @Test
