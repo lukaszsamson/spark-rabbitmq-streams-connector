@@ -1307,9 +1307,12 @@ class SuperStreamIT extends AbstractRabbitMQIT {
                 .add("routing_key", DataTypes.StringType, true)
                 .add("publishing_id", DataTypes.LongType, true);
 
+        // RabbitMQ Streams returns getLastPublishingId() = 0 for a producer that has
+        // never published, so the writer's nextPublishingId seed is 1 even on a
+        // fresh stream. Supply explicit ids starting at 1 to satisfy that floor.
         List<Row> data = new ArrayList<>();
         for (int i = 0; i < 8; i++) {
-            data.add(RowFactory.create(("dup-" + i).getBytes(), "0", (long) i));
+            data.add(RowFactory.create(("dup-" + i).getBytes(), "0", (long) (i + 1)));
         }
 
         // Per-writer monotonicity is enforced on publishing_id, so collapse to a
