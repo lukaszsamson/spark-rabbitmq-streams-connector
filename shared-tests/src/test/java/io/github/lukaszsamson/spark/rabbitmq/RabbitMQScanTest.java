@@ -135,10 +135,11 @@ class RabbitMQScanTest {
         }
 
         @Test
-        void resolveStartOffsetLatestReturnsZeroWhenNoDataAndEndIsMaxValue() throws Exception {
-            // When startingOffsets=latest but the stream is empty, start resolves to 0.
-            // endingOffsets=latest uses late binding (Long.MAX_VALUE sentinel); the actual
-            // end is resolved on the executor at read time.
+        void resolveStartOffsetLatestReturnsZeroWhenStreamIsEmpty() throws Exception {
+            // Empty stream + startingOffsets=latest: start resolves to 0 (statsTail with no
+            // committed offset and no probe message). endingOffsets=latest now resolves
+            // eagerly so that all batch tasks observe the same end; with an empty stream
+            // the resolved tail is also 0.
             Map<String, String> opts = baseOptions();
             opts.put("startingOffsets", "latest");
             RabbitMQScan scan = new RabbitMQScan(new ConnectorOptions(opts), schema());
@@ -149,7 +150,7 @@ class RabbitMQScanTest {
             long end = resolveEndOffset(scan, env, "s1", stats);
 
             assertThat(start).isEqualTo(0L);
-            assertThat(end).isEqualTo(Long.MAX_VALUE);
+            assertThat(end).isEqualTo(0L);
         }
 
         @Test
@@ -319,10 +320,11 @@ class RabbitMQScanTest {
         }
 
         @Test
-        void latestEndPlanningReturnsMaxValueForLateBoundingWithoutCallingProbe() throws Exception {
-            // endingOffsets=latest now uses late binding: returns Long.MAX_VALUE as a sentinel
-            // that executors resolve at read time. No tail probe is called at plan time,
-            // so a blocking consumer builder environment does not stall planning.
+        void latestEndPlanningResolvesEagerlyAndBoundsProbeLatency() throws Exception {
+            // endingOffsets=latest is eagerly resolved at plan time so all batch tasks
+            // observe the same end (snapshot semantics). The tail probe has its own
+            // bounded timeout, so a slow/blocking consumer builder still cannot stall
+            // planning indefinitely; the stats-derived tail is returned in that case.
             Map<String, String> opts = baseOptions();
             opts.put("endingOffsets", "latest");
             RabbitMQScan scan = new RabbitMQScan(new ConnectorOptions(opts), schema());
@@ -332,7 +334,9 @@ class RabbitMQScanTest {
                     resolveEndOffset(scan,
                             new BlockingConsumerBuilderEnvironment(5_000L, stats),
                             "s1", stats));
-            assertThat(end).isEqualTo(Long.MAX_VALUE);
+            // Probe times out (TAIL_PROBE_TIMEOUT_MS=1500ms) and returns 0; statsTail
+            // is committedOffset+1 = 124.
+            assertThat(end).isEqualTo(124L);
         }
 
         @Test
@@ -370,16 +374,17 @@ class RabbitMQScanTest {
         }
 
         @Test
-        void resolveEndOffsetReturnsMaxValueForLateBoundingWithDefaultEndingOffsets() throws Exception {
-            // Default endingOffsets=latest uses late binding (Long.MAX_VALUE sentinel).
-            // No probe is called at plan time; executors resolve the actual tail at read time.
+        void resolveEndOffsetResolvesEagerlyWithDefaultEndingOffsets() throws Exception {
+            // Default endingOffsets=latest is eagerly resolved for batch reads. Stats
+            // surface no committed offset, so statsTail falls back to 0; the probe
+            // emits offsets 11 and 12 and returns max+1 = 13.
             Map<String, String> opts = baseOptions();
             RabbitMQScan scan = new RabbitMQScan(new ConnectorOptions(opts), schema());
             StreamStats stats = new Stats(0L, true, true, 0L);
 
             long end = resolveEndOffset(scan, new ProbeTailEnvironment(), "s1", stats);
 
-            assertThat(end).isEqualTo(Long.MAX_VALUE);
+            assertThat(end).isEqualTo(13L);
         }
 
         @Test
