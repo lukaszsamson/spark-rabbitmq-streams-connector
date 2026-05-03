@@ -299,6 +299,7 @@ Type coercion notes:
 ## Speculative execution
 - Batch write keeps Spark's default commit coordinator behavior enabled.
 - Streaming deduplication is explicitly incompatible with speculation (`spark.speculation=true`) and fails fast when `producerName` is set.
+- Single-active-consumer (SAC) read mode is incompatible with concurrent task attempts within a SAC group. If `spark.speculation=true` (or task retries fire while a SAC handoff is in progress), the broker may reactivate a peer consumer at an offset earlier than the previously-active consumer's last emitted offset, replaying records beyond the at-least-once guarantee. The connector uses `noTrackingStrategy()`, so the broker has no per-group resume offset to advance past — duplicates are bounded only by the activation offset chosen at attach time. Disable speculation (and avoid concurrent attempts) when reading via SAC. The connector logs a warning at consumer activation when both SAC and speculation are observed.
 
 ## Commit coordinator
 - `StreamingWrite.useCommitCoordinator() = false` (Kafka parity).

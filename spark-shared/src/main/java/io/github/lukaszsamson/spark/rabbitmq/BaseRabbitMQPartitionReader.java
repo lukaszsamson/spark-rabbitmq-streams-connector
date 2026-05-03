@@ -1,6 +1,7 @@
 package io.github.lukaszsamson.spark.rabbitmq;
 
 import com.rabbitmq.stream.*;
+import org.apache.spark.SparkEnv;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.connector.metric.CustomTaskMetric;
 import org.apache.spark.sql.connector.read.PartitionReader;
@@ -423,6 +424,7 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
         builder.subscriptionListener(context -> context.offsetSpecification(
                 resolveSubscriptionOffsetSpec(context.offsetSpecification(), offsetSpec)));
         if (options.isSingleActiveConsumer()) {
+            warnIfSpeculationIncompatibleWithSac();
             builder.name(resolveSingleActiveConsumerName())
                     .singleActiveConsumer()
                     // SAC with noTrackingStrategy needs an explicit update listener
@@ -773,6 +775,27 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
     OffsetSpecification resolveSingleActiveConsumerActivationOffset(
             OffsetSpecification configuredOffsetSpec) {
         return resolveSubscriptionOffsetSpec(null, configuredOffsetSpec);
+    }
+
+    private void warnIfSpeculationIncompatibleWithSac() {
+        try {
+            SparkEnv sparkEnv = SparkEnv.get();
+            if (sparkEnv == null || sparkEnv.conf() == null) {
+                return;
+            }
+            if (sparkEnv.conf().getBoolean("spark.speculation", false)) {
+                LOG.warn("Single-active-consumer is enabled for stream '{}' while "
+                                + "'spark.speculation=true'. SAC is incompatible with concurrent "
+                                + "task attempts within a SAC group: a reactivation during "
+                                + "speculation or task retry can replay records beyond the "
+                                + "at-least-once guarantee. Disable speculation when reading "
+                                + "via SAC. See SPEC_V1.md (Speculative execution).",
+                        stream);
+            }
+        } catch (Throwable t) {
+            LOG.debug("Unable to inspect spark.speculation for SAC compatibility check: {}",
+                    t.toString());
+        }
     }
 
     boolean shouldSkipByTimestamp(long chunkTimestampMillis) {
