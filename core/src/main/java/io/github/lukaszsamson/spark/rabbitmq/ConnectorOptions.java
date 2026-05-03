@@ -544,8 +544,16 @@ public final class ConnectorOptions implements Serializable {
         validateCommon();
 
         if (filterValuePath != null && !filterValuePath.isEmpty()) {
-            throw new IllegalArgumentException(
-                    "'" + FILTER_VALUE_PATH + "' is not applicable to source reads");
+            // Source reads use filterValuePath as the deterministic post-filter
+            // predicate that suppresses Bloom-filter false positives from
+            // 'filterValues'. Require 'filterValues' so the configuration is
+            // meaningful.
+            if (filterValues == null || filterValues.isEmpty()) {
+                throw new IllegalArgumentException(
+                        "'" + FILTER_VALUE_PATH + "' on source reads requires '" +
+                                FILTER_VALUES + "' to be set");
+            }
+            ConnectorMessagePath.validate(filterValuePath, FILTER_VALUE_PATH);
         }
         if (filterValueExtractorClass != null && !filterValueExtractorClass.isEmpty()) {
             throw new IllegalArgumentException(

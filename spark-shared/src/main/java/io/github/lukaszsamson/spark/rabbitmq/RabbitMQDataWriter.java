@@ -728,36 +728,13 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
         if (appProps != null) {
             Object rk = appProps.get("routing_key");
             if (rk != null) {
-                return coerceRoutingValueToString(rk);
+                return MessageViewCoercion.coerceValueToString(rk);
             }
         }
         if (message.getProperties() != null && message.getProperties().getSubject() != null) {
             return message.getProperties().getSubject();
         }
         return null;
-    }
-
-    /**
-     * Coerce a raw application-property value into a deterministic string for routing.
-     * The row→message path produces only String values, but custom
-     * {@link ConnectorRoutingStrategy} or extension callers may surface byte[] or
-     * other AMQP-typed values that {@link Object#toString()} would render as a
-     * JVM-identity-hashed reference (and thus non-deterministic across restarts).
-     *
-     * <p>Mirrors the byte[]→base64 encoding used in {@code MessageToRowConverter} so
-     * that routing keys are stable and observable.
-     */
-    private static String coerceRoutingValueToString(Object value) {
-        if (value == null) {
-            return null;
-        }
-        if (value instanceof String s) {
-            return s;
-        }
-        if (value instanceof byte[] bytes) {
-            return java.util.Base64.getEncoder().encodeToString(bytes);
-        }
-        return value.toString();
     }
 
     private String confirmationFailureSummary() {

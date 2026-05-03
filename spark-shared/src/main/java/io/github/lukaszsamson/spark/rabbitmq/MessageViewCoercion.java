@@ -6,9 +6,13 @@ import com.rabbitmq.stream.Properties;
 import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.UUID;
 
 /**
- * Shared conversion helpers for creating {@link ConnectorMessageView} instances.
+ * Shared conversion helpers for creating {@link ConnectorMessageView} instances
+ * and for any other AMQP-value → String boundary that must produce stable,
+ * deterministic representations (extension views, custom routing strategies,
+ * extracted routing keys, etc.).
  */
 final class MessageViewCoercion {
 
@@ -29,7 +33,7 @@ final class MessageViewCoercion {
         }
         Map<String, String> out = new LinkedHashMap<>(source.size());
         for (Map.Entry<String, Object> entry : source.entrySet()) {
-            out.put(entry.getKey(), entry.getValue() != null ? entry.getValue().toString() : null);
+            out.put(entry.getKey(), coerceValueToString(entry.getValue()));
         }
         return out;
     }
@@ -49,10 +53,12 @@ final class MessageViewCoercion {
         putIfNotNull(out, "correlation_id", coerceIdToString(properties.getCorrelationId()));
         putIfNotNull(out, "content_type", properties.getContentType());
         putIfNotNull(out, "content_encoding", properties.getContentEncoding());
-        if (properties.getAbsoluteExpiryTime() > 0) {
+        // Use >= 0 to mirror MessageToRowConverter so the row view and the
+        // extension/property view agree on epoch-zero timestamps.
+        if (properties.getAbsoluteExpiryTime() >= 0) {
             out.put("absolute_expiry_time", Long.toString(properties.getAbsoluteExpiryTime()));
         }
-        if (properties.getCreationTime() > 0) {
+        if (properties.getCreationTime() >= 0) {
             out.put("creation_time", Long.toString(properties.getCreationTime()));
         }
         putIfNotNull(out, "group_id", properties.getGroupId());
@@ -63,14 +69,36 @@ final class MessageViewCoercion {
         return out;
     }
 
+    /**
+     * Coerce an AMQP message_id / correlation_id to a deterministic String.
+     * Delegates to {@link #coerceValueToString(Object)} so byte[] is base64
+     * and UUIDs use {@link UUID#toString()} rather than identity strings.
+     */
     static String coerceIdToString(Object id) {
-        if (id == null) {
+        return coerceValueToString(id);
+    }
+
+    /**
+     * Canonical AMQP value → String coercion shared across the connector.
+     *
+     * <p>byte[] is base64-encoded and UUIDs use their canonical
+     * {@link UUID#toString()} form; everything else falls back to
+     * {@code value.toString()}. Returns {@code null} for null input.
+     */
+    static String coerceValueToString(Object value) {
+        if (value == null) {
             return null;
         }
-        if (id instanceof byte[] bytes) {
+        if (value instanceof String s) {
+            return s;
+        }
+        if (value instanceof byte[] bytes) {
             return Base64.getEncoder().encodeToString(bytes);
         }
-        return id.toString();
+        if (value instanceof UUID uuid) {
+            return uuid.toString();
+        }
+        return value.toString();
     }
 
     static void putIfNotNull(Map<String, String> target, String key, String value) {

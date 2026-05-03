@@ -388,6 +388,7 @@ Type coercion notes:
 - `filterValues` (comma-separated; requires RabbitMQ 3.13+ and broker-side filtering enabled)
 - `filterMatchUnfiltered` (bool; default false)
 - `filterPostFilterClass` (string, optional; connector post-filter interface with full message view)
+- `filterValuePath` (string, optional; deterministic post-filter path used to suppress Bloom-filter false positives. Path syntax: `<root>.<field>` where `<root>` is one of `application_properties`, `message_annotations`, or `properties`, and `<field>` is a literal field name (e.g. `application_properties.region`). Requires `filterValues` to be set. Ignored if `filterPostFilterClass` is also set.)
 - `filterWarningOnMismatch` (bool; default true; log when post-filter drops messages due to Bloom false positives)
 - `pollTimeoutMs` (long; default 30000)
 - `maxWaitMs` (long; default 300000)
@@ -407,7 +408,7 @@ Type coercion notes:
 - `routingStrategy` (hash|key|custom)
 - `hashFunctionClass` (string; optional custom hash when `routingStrategy=hash`)
 - `partitionerClass` (string; for custom routing)
-- `filterValuePath` (string; producer-side filter path: `application_properties.*`, `message_annotations.*`, or `properties.*`)
+- `filterValuePath` (string; producer-side filter path. Syntax: `<root>.<field>` where `<root>` is one of `application_properties`, `message_annotations`, or `properties`, and `<field>` is a literal field name (e.g. `application_properties.region`).)
 - `filterValueExtractorClass` (string; custom producer-side filter extractor class)
 - `filterValueColumn` is removed (hard cutoff); connector fails fast if provided.
 - `filterPostFilterClassV2` is removed (hard cutoff); connector fails fast if provided.

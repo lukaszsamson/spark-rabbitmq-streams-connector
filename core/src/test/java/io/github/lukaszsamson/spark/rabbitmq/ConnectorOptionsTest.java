@@ -1169,15 +1169,35 @@ class ConnectorOptionsTest {
         }
 
         @Test
-        void rejectsFilterValuePathForSourceReads() {
+        void rejectsFilterValuePathForSourceReadsWithoutFilterValues() {
             var map = minimalStreamOptions();
             map.put("filterValuePath", "application_properties.region");
             var opts = new ConnectorOptions(map);
             assertThatThrownBy(opts::validateForSource)
                     .isInstanceOf(IllegalArgumentException.class)
                     .hasMessageContaining("filterValuePath")
-                    .hasMessageContaining("not applicable")
-                    .hasMessageContaining("source reads");
+                    .hasMessageContaining("filterValues");
+        }
+
+        @Test
+        void acceptsFilterValuePathForSourceReadsWithFilterValues() {
+            var map = minimalStreamOptions();
+            map.put("filterValues", "us-east,us-west");
+            map.put("filterValuePath", "application_properties.region");
+            var opts = new ConnectorOptions(map);
+            assertThatCode(opts::validateForSource).doesNotThrowAnyException();
+        }
+
+        @Test
+        void rejectsInvalidFilterValuePathRootForSourceReads() {
+            var map = minimalStreamOptions();
+            map.put("filterValues", "us-east");
+            map.put("filterValuePath", "headers.region");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateForSource)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("filterValuePath")
+                    .hasMessageContaining("root");
         }
 
         @Test
