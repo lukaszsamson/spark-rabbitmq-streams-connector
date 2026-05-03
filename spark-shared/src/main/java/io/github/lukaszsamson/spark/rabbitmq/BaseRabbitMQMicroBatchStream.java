@@ -131,6 +131,8 @@ class BaseRabbitMQMicroBatchStream
     final Set<String> latestStartedOnEmptyStreams = ConcurrentHashMap.newKeySet();
     /** Set once stop() begins to prevent new environment usage during shutdown. */
     final AtomicBoolean stopping = new AtomicBoolean(false);
+    /** Idempotence guard: ensures stop() body runs at most once across re-entrant calls. */
+    final AtomicBoolean stopEntered = new AtomicBoolean(false);
     /** Guards compound read-modify-write updates on mutable admission-control state. */
     final Object mutableStateLock = new Object();
     /**
@@ -345,30 +347,30 @@ class BaseRabbitMQMicroBatchStream
         for (Map.Entry<String, Long> entry : storedOffsets.entrySet()) {
             String stream = entry.getKey();
             long recoveredNextOffset = entry.getValue();
+            Long firstAvailable;
             try {
-                long firstAvailable = resolveFirstAvailable(stream);
-                if (recoveredNextOffset < firstAvailable) {
-                    if (options.isFailOnDataLoss()) {
-                        throw new IllegalStateException(
-                                "Recovered stored offset " + recoveredNextOffset
-                                        + " for stream '" + stream
-                                        + "' is before first available " + firstAvailable
-                                        + ". Broker-tracked progress was truncated by retention. "
-                                        + "Set failOnDataLoss=false to advance.");
-                    }
-                    LOG.warn("Broker-tracked progress was truncated by retention for stream '{}': "
-                                    + "stored next offset {} is before first available {}. "
-                                    + "Falling back to configured startingOffsets={} "
-                                    + "(failOnDataLoss=false).",
-                            stream, recoveredNextOffset, firstAvailable,
-                            options.getStartingOffsets());
-                    continue;
-                }
-            } catch (IllegalStateException e) {
-                throw e;
+                firstAvailable = resolveFirstAvailable(stream);
             } catch (Exception e) {
                 LOG.debug("Failed to validate recovered stored offset for stream '{}': {}",
                         stream, e.getMessage());
+                firstAvailable = null;
+            }
+            if (firstAvailable != null && recoveredNextOffset < firstAvailable) {
+                if (options.isFailOnDataLoss()) {
+                    throw new IllegalStateException(
+                            "Recovered stored offset " + recoveredNextOffset
+                                    + " for stream '" + stream
+                                    + "' is before first available " + firstAvailable
+                                    + ". Broker-tracked progress was truncated by retention. "
+                                    + "Set failOnDataLoss=false to advance.");
+                }
+                LOG.warn("Broker-tracked progress was truncated by retention for stream '{}': "
+                                + "stored next offset {} is before first available {}. "
+                                + "Falling back to configured startingOffsets={} "
+                                + "(failOnDataLoss=false).",
+                        stream, recoveredNextOffset, firstAvailable,
+                        options.getStartingOffsets());
+                continue;
             }
             sanitized.put(stream, recoveredNextOffset);
         }
@@ -408,7 +410,7 @@ class BaseRabbitMQMicroBatchStream
 
     @Override
     public void stop() {
-        if (!stopping.compareAndSet(false, true)) {
+        if (!stopEntered.compareAndSet(false, true)) {
             return;
         }
 
@@ -416,6 +418,8 @@ class BaseRabbitMQMicroBatchStream
 
         // Persist best-effort broker offsets before shutdown.
         // Prefer explicit source commits, then checkpoint-committed offsets.
+        // Done while stopping=false so getEnvironment() still serves the active
+        // environment for the final commit.
         Map<String, Long> committed = resolveStopPersistenceOffsets();
         if (committed != null && !committed.isEmpty()) {
             try {
@@ -424,6 +428,8 @@ class BaseRabbitMQMicroBatchStream
                 LOG.warn("Failed to persist broker offsets during stop()", e);
             }
         }
+
+        stopping.set(true);
 
         brokerCommitExecutor.shutdownNow();
         tailQueryExecutor.shutdownNow();

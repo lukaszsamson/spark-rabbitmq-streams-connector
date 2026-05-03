@@ -447,6 +447,7 @@ class RabbitMQMicroBatchStreamTest {
             opts.put("stream", "test-stream");
             opts.put("startingOffsets", "latest");
             opts.put("consumerName", "fresh-consumer");
+            opts.put("failOnDataLoss", "false");
 
             RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
             setPrivateField(stream, "environment", new StoredOffsetWithStatsEnvironment(
@@ -455,6 +456,27 @@ class RabbitMQMicroBatchStreamTest {
 
             RabbitMQStreamOffset offset = (RabbitMQStreamOffset) stream.initialOffset();
             assertThat(offset.getStreamOffsets()).containsEntry("test-stream", 101L);
+        }
+
+        @Test
+        void initialOffsetThrowsOnRecoveredStoredOffsetBeforeFirstAvailableWhenFailOnDataLoss()
+                throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("startingOffsets", "latest");
+            opts.put("consumerName", "fresh-consumer");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            setPrivateField(stream, "environment", new StoredOffsetWithStatsEnvironment(
+                    Map.of("test-stream", 0L),
+                    Map.of("test-stream", 100L)));
+
+            assertThatThrownBy(stream::initialOffset)
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("Broker-tracked progress was truncated by retention")
+                    .hasMessageContaining("test-stream")
+                    .hasMessageContaining("failOnDataLoss=false");
         }
 
         @Test
@@ -511,6 +533,7 @@ class RabbitMQMicroBatchStreamTest {
             opts.put("startingTimestamp", "1700000000000");
             opts.put("startingOffsetsByTimestampStrategy", "latest");
             opts.put("consumerName", "timestamp-consumer");
+            opts.put("failOnDataLoss", "false");
 
             RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
             setPrivateField(stream, "environment", new StoredOffsetWithStatsEnvironment(
