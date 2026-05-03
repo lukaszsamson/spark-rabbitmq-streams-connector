@@ -85,10 +85,26 @@ final class RabbitMQWrite implements Write {
         // and lets the broker silently drop already-stored ids on other partitions.
         // If the schema carries an explicit 'publishing_id' column, the user owns
         // monotonicity and assumes the per-partition risk; otherwise fail fast.
-        if (inputSchema != null && inputSchema.getFieldIndex("publishing_id").isDefined()) {
+        if (hasPublishingIdColumn(inputSchema)) {
             return;
         }
-        throw new IllegalStateException(
+        throw illegalSuperStreamDedupState();
+    }
+
+    private static boolean hasPublishingIdColumn(StructType inputSchema) {
+        if (inputSchema == null) {
+            return false;
+        }
+        for (String name : inputSchema.fieldNames()) {
+            if ("publishing_id".equalsIgnoreCase(name)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static IllegalStateException illegalSuperStreamDedupState() {
+        return new IllegalStateException(
                 "Auto-deduplication via 'producerName' is not supported for superstream batch " +
                         "writes: the publishing-id seed is taken from a single partition and " +
                         "cannot guarantee monotonicity across all routed partitions, which can " +
