@@ -170,24 +170,13 @@ public final class MessageToRowConverter implements Serializable {
 
     /**
      * Coerce an arbitrary application_properties / message_annotations value to a
-     * deterministic string. Mirrors {@link #coerceIdToString} so that byte[] is
+     * deterministic string. Delegates to the shared
+     * {@link MessageViewCoercion#coerceValueToString(Object)} so byte[] is
      * encoded as base64 and UUIDs use {@link UUID#toString()} rather than
      * {@code String.valueOf} which would emit JVM identity strings for byte[].
      */
     static String coerceValueToString(Object value) {
-        if (value == null) {
-            return null;
-        }
-        if (value instanceof String s) {
-            return s;
-        }
-        if (value instanceof byte[] bytes) {
-            return java.util.Base64.getEncoder().encodeToString(bytes);
-        }
-        if (value instanceof UUID uuid) {
-            return uuid.toString();
-        }
-        return value.toString();
+        return MessageViewCoercion.coerceValueToString(value);
     }
 
     // ---- Type coercion helpers ----
@@ -197,20 +186,8 @@ public final class MessageToRowConverter implements Serializable {
      * Supports: String, long (UnsignedLong), byte[] (Binary), UUID.
      */
     static UTF8String coerceIdToString(Object id) {
-        if (id == null) {
-            return null;
-        }
-        if (id instanceof String s) {
-            return UTF8String.fromString(s);
-        }
-        if (id instanceof UUID uuid) {
-            return UTF8String.fromString(uuid.toString());
-        }
-        if (id instanceof byte[] bytes) {
-            return UTF8String.fromString(java.util.Base64.getEncoder().encodeToString(bytes));
-        }
-        // Number types (UnsignedLong wraps long)
-        return UTF8String.fromString(id.toString());
+        String coerced = MessageViewCoercion.coerceValueToString(id);
+        return coerced != null ? UTF8String.fromString(coerced) : null;
     }
 
     /** Maximum input millis whose micros conversion still fits in a signed long. */

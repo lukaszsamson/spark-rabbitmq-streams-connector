@@ -717,7 +717,7 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
         if (appProps != null) {
             Object rk = appProps.get("routing_key");
             if (rk != null) {
-                return rk.toString();
+                return MessageViewCoercion.coerceValueToString(rk);
             }
         }
         if (message.getProperties() != null && message.getProperties().getSubject() != null) {

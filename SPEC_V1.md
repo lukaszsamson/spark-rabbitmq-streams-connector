@@ -387,6 +387,7 @@ Type coercion notes:
 - `filterValues` (comma-separated; requires RabbitMQ 3.13+ and broker-side filtering enabled)
 - `filterMatchUnfiltered` (bool; default false)
 - `filterPostFilterClass` (string, optional; connector post-filter interface with full message view)
+- `filterValuePath` (string, optional; deterministic post-filter path used to suppress Bloom-filter false positives. Path syntax: `application_properties.*`, `message_annotations.*`, or `properties.*`. Requires `filterValues` to be set. Ignored if `filterPostFilterClass` is also set.)
 - `filterWarningOnMismatch` (bool; default true; log when post-filter drops messages due to Bloom false positives)
 - `pollTimeoutMs` (long; default 30000)
 - `maxWaitMs` (long; default 300000)
