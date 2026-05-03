@@ -1870,6 +1870,39 @@ class ConnectorOptionsTest {
                     .hasMessageContaining("filterValueExtractorClass")
                     .hasMessageContaining("does not implement");
         }
+
+        @Test
+        void rejectsSubEntrySizeWithFilterValuePath() {
+            var map = minimalStreamOptions();
+            map.put("subEntrySize", "10");
+            map.put("filterValuePath", "application_properties.region");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateForSink)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("subEntrySize")
+                    .hasMessageContaining("filterValuePath");
+        }
+
+        @Test
+        void rejectsSubEntrySizeWithFilterValueExtractorClass() {
+            var map = minimalStreamOptions();
+            map.put("subEntrySize", "10");
+            map.put("filterValueExtractorClass", TestFilterValueExtractor.class.getName());
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateForSink)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("subEntrySize")
+                    .hasMessageContaining("filterValueExtractorClass");
+        }
+
+        @Test
+        void acceptsSubEntrySizeOneWithFilter() {
+            var map = minimalStreamOptions();
+            map.put("subEntrySize", "1");
+            map.put("filterValuePath", "application_properties.region");
+            var opts = new ConnectorOptions(map);
+            assertThatCode(opts::validateForSink).doesNotThrowAnyException();
+        }
     }
 
     // ========================================================================

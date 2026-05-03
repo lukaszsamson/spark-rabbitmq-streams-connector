@@ -35,6 +35,10 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
     private static final long DEFAULT_PUBLISHER_CONFIRM_TIMEOUT_MS = 30_000L;
     private static final long CLIENT_MIN_CONFIRM_TIMEOUT_MS = 1_000L;
     private static final int MAX_BROKER_REFERENCE_LENGTH = 255;
+    // Per-task LRU bound for KEY-route cache. metadata::route is cheap and the cache
+    // mostly dedupes within a single task; keep memory hygiene without surprising the
+    // routing strategy.
+    private static final int KEY_ROUTE_CACHE_MAX_ENTRIES = 10_000;
 
     private final ConnectorOptions options;
     private final int partitionId;
@@ -537,8 +541,15 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
                 }
             }
             case KEY -> {
-                java.util.concurrent.ConcurrentMap<String, java.util.List<String>> routesByKey =
-                        new java.util.concurrent.ConcurrentHashMap<>();
+                Map<String, java.util.List<String>> routesByKey =
+                        java.util.Collections.synchronizedMap(
+                                new java.util.LinkedHashMap<>(256, 0.75f, true) {
+                                    @Override
+                                    protected boolean removeEldestEntry(
+                                            Map.Entry<String, java.util.List<String>> eldest) {
+                                        return size() > KEY_ROUTE_CACHE_MAX_ENTRIES;
+                                    }
+                                });
                 routing.strategy((message, metadata) -> {
                     String routingKey = extractRoutingKey(message);
                     if (routingKey == null || routingKey.isEmpty()) {

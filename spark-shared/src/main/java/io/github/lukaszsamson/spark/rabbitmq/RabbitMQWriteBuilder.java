@@ -44,6 +44,6 @@ final class RabbitMQWriteBuilder
     public Write build() {
         RabbitMQDataWriterFactory factory = new RabbitMQDataWriterFactory(
                 options, inputSchema, queryId);
-        return new RabbitMQWrite(options, factory);
+        return new RabbitMQWrite(options, inputSchema, factory);
     }
 }

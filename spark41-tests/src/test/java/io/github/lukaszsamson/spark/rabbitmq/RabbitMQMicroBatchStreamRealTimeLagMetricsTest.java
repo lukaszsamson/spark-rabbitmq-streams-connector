@@ -56,9 +56,9 @@ class RabbitMQMicroBatchStreamRealTimeLagMetricsTest {
     }
 
     @Test
-    void stopPersistsRealTimeCachedLatestEvenWithoutExplicitCommit() throws IOException {
+    void stopPersistsRealTimeCachedConsumedEvenWithoutExplicitCommit() throws IOException {
         // In real-time mode, Spark's source.commit() is deferred to the next batch's start.
-        // If only 1 batch runs before stop(), commit() is never called. The cachedLatestOffset
+        // If only 1 batch runs before stop(), commit() is never called. The cachedConsumedOffset
         // (set by mergeOffsets after data delivery) should still be persisted as a safety net.
         Path checkpoint = Files.createTempDirectory("rt-stop-offset-test-");
         Map<String, String> opts = new LinkedHashMap<>();
@@ -73,7 +73,7 @@ class RabbitMQMicroBatchStreamRealTimeLagMetricsTest {
 
         Environment env = mock(Environment.class);
         stream.environment = env;
-        stream.cachedLatestOffset = new RabbitMQStreamOffset(Map.of("test-stream", 42L));
+        stream.cachedConsumedOffset = new RabbitMQStreamOffset(Map.of("test-stream", 42L));
 
         stream.stop();
 
@@ -82,9 +82,9 @@ class RabbitMQMicroBatchStreamRealTimeLagMetricsTest {
     }
 
     @Test
-    void stopDoesNotPersistCachedLatestInNonRealTimeMode() throws IOException {
-        // In regular micro-batch mode, cachedLatestOffset reflects the NEXT expected end
-        // (from latestOffset()), not actually processed data. It should NOT be persisted.
+    void stopDoesNotPersistCachedConsumedInNonRealTimeMode() throws IOException {
+        // In regular micro-batch mode, cachedConsumedOffset is never populated; even if it
+        // were, the non-real-time stop path must not persist it.
         Path checkpoint = Files.createTempDirectory("rt-stop-offset-test-");
         RabbitMQMicroBatchStream stream = new RabbitMQMicroBatchStream(
                 minimalOptions(), new StructType(), checkpoint.toString());
@@ -92,7 +92,7 @@ class RabbitMQMicroBatchStreamRealTimeLagMetricsTest {
 
         Environment env = mock(Environment.class);
         stream.environment = env;
-        stream.cachedLatestOffset = new RabbitMQStreamOffset(Map.of("test-stream", 42L));
+        stream.cachedConsumedOffset = new RabbitMQStreamOffset(Map.of("test-stream", 42L));
 
         stream.stop();
 

@@ -5,6 +5,7 @@ import org.apache.spark.sql.connector.metric.CustomMetric;
 import org.apache.spark.sql.connector.write.BatchWrite;
 import org.apache.spark.sql.connector.write.Write;
 import org.apache.spark.sql.connector.write.streaming.StreamingWrite;
+import org.apache.spark.sql.types.StructType;
 
 /**
  * Logical representation of a RabbitMQ Streams write operation.
@@ -18,9 +19,12 @@ final class RabbitMQWrite implements Write {
 
     private final RabbitMQDataWriterFactory writerFactory;
     private final ConnectorOptions options;
+    private final StructType inputSchema;
 
-    RabbitMQWrite(ConnectorOptions options, RabbitMQDataWriterFactory writerFactory) {
+    RabbitMQWrite(ConnectorOptions options, StructType inputSchema,
+                  RabbitMQDataWriterFactory writerFactory) {
         this.options = options;
+        this.inputSchema = inputSchema;
         this.writerFactory = writerFactory;
     }
 
@@ -34,6 +38,7 @@ final class RabbitMQWrite implements Write {
 
     @Override
     public BatchWrite toBatch() {
+        validateBatchSuperStreamDedupCompatibility(options, inputSchema);
         return new RabbitMQBatchWrite(writerFactory);
     }
 
@@ -64,5 +69,47 @@ final class RabbitMQWrite implements Write {
                 "Streaming deduplication with 'producerName' is incompatible with " +
                         "'spark.speculation=true'. RabbitMQ Streams allows only one live producer " +
                         "per producer name. Disable speculation or unset 'producerName'.");
+    }
+
+    static void validateBatchSuperStreamDedupCompatibility(ConnectorOptions options,
+                                                           StructType inputSchema) {
+        if (!options.isSuperStreamMode()) {
+            return;
+        }
+        String producerName = options.getProducerName();
+        if (producerName == null || producerName.isBlank()) {
+            return;
+        }
+        // Auto-dedup seeds nextPublishingId from a single partition's
+        // getLastPublishingId(); on a superstream, that is the MIN across partitions
+        // and lets the broker silently drop already-stored ids on other partitions.
+        // If the schema carries an explicit 'publishing_id' column, the user owns
+        // monotonicity and assumes the per-partition risk; otherwise fail fast.
+        if (hasPublishingIdColumn(inputSchema)) {
+            return;
+        }
+        throw illegalSuperStreamDedupState();
+    }
+
+    private static boolean hasPublishingIdColumn(StructType inputSchema) {
+        if (inputSchema == null) {
+            return false;
+        }
+        for (String name : inputSchema.fieldNames()) {
+            if ("publishing_id".equalsIgnoreCase(name)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static IllegalStateException illegalSuperStreamDedupState() {
+        return new IllegalStateException(
+                "Auto-deduplication via 'producerName' is not supported for superstream batch " +
+                        "writes: the publishing-id seed is taken from a single partition and " +
+                        "cannot guarantee monotonicity across all routed partitions, which can " +
+                        "cause silent broker-side message drops. Either unset 'producerName', " +
+                        "switch to a single-stream sink, or supply an explicit 'publishing_id' " +
+                        "column so monotonicity is per-row controlled.");
     }
 }
