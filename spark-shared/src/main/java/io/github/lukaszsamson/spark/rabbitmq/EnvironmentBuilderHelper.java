@@ -548,26 +548,31 @@ final class EnvironmentBuilderHelper {
         candidateTypes.add("JKS");
         candidateTypes.add("PKCS12");
 
-        GeneralSecurityException lastSecurityError = null;
-        IOException lastIoError = null;
+        Throwable lastError = null;
         for (String type : new LinkedHashSet<>(candidateTypes)) {
             try (FileInputStream in = new FileInputStream(path)) {
                 KeyStore keyStore = KeyStore.getInstance(type);
                 keyStore.load(in, passwordChars(password));
                 return keyStore;
-            } catch (GeneralSecurityException e) {
-                lastSecurityError = e;
-            } catch (IOException e) {
-                lastIoError = e;
+            } catch (GeneralSecurityException | IOException e) {
+                if (lastError != null) {
+                    e.addSuppressed(lastError);
+                }
+                lastError = e;
             }
         }
-        if (lastSecurityError != null) {
-            throw lastSecurityError;
+        if (lastError instanceof GeneralSecurityException gse) {
+            throw gse;
         }
-        if (lastIoError != null) {
-            throw lastIoError;
+        if (lastError instanceof IOException ioe) {
+            throw ioe;
         }
-        throw new GeneralSecurityException("Unable to load keystore: " + path);
+        GeneralSecurityException fallback =
+                new GeneralSecurityException("Unable to load keystore: " + path);
+        if (lastError != null) {
+            fallback.addSuppressed(lastError);
+        }
+        throw fallback;
     }
 
     private static char[] passwordChars(String password) {
