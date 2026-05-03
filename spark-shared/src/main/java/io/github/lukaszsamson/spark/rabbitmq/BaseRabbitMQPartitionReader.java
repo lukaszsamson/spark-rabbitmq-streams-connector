@@ -35,6 +35,7 @@ import java.util.concurrent.atomic.AtomicReference;
 class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
 
     static final Logger LOG = LoggerFactory.getLogger(BaseRabbitMQPartitionReader.class);
+    private static final AtomicBoolean SAC_SPECULATION_WARNED = new AtomicBoolean(false);
     /** Executor-side tail probe timeout — longer than driver-side (250ms) to allow for
      *  cold-start consumer setup (new environment, address resolution, etc.). */
     static final long EXECUTOR_TAIL_PROBE_WAIT_MS = 5_000L;
@@ -783,16 +784,19 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
             if (sparkEnv == null || sparkEnv.conf() == null) {
                 return;
             }
-            if (sparkEnv.conf().getBoolean("spark.speculation", false)) {
+            if (sparkEnv.conf().getBoolean("spark.speculation", false)
+                    && SAC_SPECULATION_WARNED.compareAndSet(false, true)) {
                 LOG.warn("Single-active-consumer is enabled for stream '{}' while "
                                 + "'spark.speculation=true'. SAC is incompatible with concurrent "
                                 + "task attempts within a SAC group: a reactivation during "
-                                + "speculation or task retry can replay records beyond the "
-                                + "at-least-once guarantee. Disable speculation when reading "
-                                + "via SAC. See SPEC_V1.md (Speculative execution).",
+                                + "speculation or task retry may re-emit records that a peer "
+                                + "consumer already delivered, increasing duplicates above what "
+                                + "at-least-once would normally produce. Disable speculation when "
+                                + "reading via SAC. See SPEC_V1.md (Speculative execution). "
+                                + "(This warning is logged at most once per executor JVM.)",
                         stream);
             }
-        } catch (Throwable t) {
+        } catch (Exception t) {
             LOG.debug("Unable to inspect spark.speculation for SAC compatibility check: {}",
                     t.toString());
         }
