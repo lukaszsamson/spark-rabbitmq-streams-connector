@@ -1297,13 +1297,19 @@ class SuperStreamIT extends AbstractRabbitMQIT {
         deleteSuperStream(dedupSuper);
         createSuperStream(dedupSuper, PARTITION_COUNT);
 
+        // Auto-dedup on a superstream batch (without publishing_id) is rejected by
+        // RabbitMQWrite#validateBatchSuperStreamDedupCompatibility because the
+        // single-partition seed cannot guarantee monotonicity across all partitions.
+        // The test routes every row to partition "0", so an explicit per-row
+        // publishing_id column is the supported way to carry dedup through retries.
         StructType schema = new StructType()
                 .add("value", DataTypes.BinaryType, false)
-                .add("routing_key", DataTypes.StringType, true);
+                .add("routing_key", DataTypes.StringType, true)
+                .add("publishing_id", DataTypes.LongType, true);
 
         List<Row> data = new ArrayList<>();
         for (int i = 0; i < 8; i++) {
-            data.add(RowFactory.create(("dup-" + i).getBytes(), "0"));
+            data.add(RowFactory.create(("dup-" + i).getBytes(), "0", (long) i));
         }
 
         Dataset<Row> df = spark.createDataFrame(data, schema);
