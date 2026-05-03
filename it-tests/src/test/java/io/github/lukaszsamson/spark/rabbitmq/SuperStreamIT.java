@@ -1312,7 +1312,12 @@ class SuperStreamIT extends AbstractRabbitMQIT {
             data.add(RowFactory.create(("dup-" + i).getBytes(), "0", (long) i));
         }
 
-        Dataset<Row> df = spark.createDataFrame(data, schema);
+        // Per-writer monotonicity is enforced on publishing_id, so collapse to a
+        // single writer with rows in publishing_id order regardless of Spark's
+        // default parallelism on the runner.
+        Dataset<Row> df = spark.createDataFrame(data, schema)
+                .repartition(1)
+                .sortWithinPartitions("publishing_id");
 
         stopRabbitMqApp();
         try {
