@@ -64,11 +64,11 @@ class RealTimeModeTest {
         void prepareForRealTimeModeSetsFlag() throws Exception {
             RabbitMQMicroBatchStream stream = createStream(minimalOptions());
             assertThat(getPrivateField(stream, "realTimeMode")).isEqualTo(false);
-            assertThat(stream.shouldPersistCachedLatestOffsetsOnStop()).isFalse();
+            assertThat(stream.shouldPersistCachedConsumedOffsetsOnStop()).isFalse();
 
             stream.prepareForRealTimeMode();
             assertThat(getPrivateField(stream, "realTimeMode")).isEqualTo(true);
-            assertThat(stream.shouldPersistCachedLatestOffsetsOnStop()).isTrue();
+            assertThat(stream.shouldPersistCachedConsumedOffsetsOnStop()).isTrue();
         }
 
         @Test
@@ -312,8 +312,9 @@ class RealTimeModeTest {
         }
 
         @Test
-        void mergeOffsetsUpdatesCachedLatestOffset() throws Exception {
+        void mergeOffsetsUpdatesCachedConsumedOffset() throws Exception {
             RabbitMQMicroBatchStream stream = createStream(minimalOptions());
+            assertThat(getPrivateField(stream, "cachedConsumedOffset")).isNull();
             assertThat(getPrivateField(stream, "cachedLatestOffset")).isNull();
 
             PartitionOffset[] offsets = new PartitionOffset[]{
@@ -322,11 +323,14 @@ class RealTimeModeTest {
 
             stream.mergeOffsets(offsets);
 
-            Object cached = getPrivateField(stream, "cachedLatestOffset");
-            assertThat(cached).isNotNull();
-            assertThat(cached).isInstanceOf(RabbitMQStreamOffset.class);
-            assertThat(((RabbitMQStreamOffset) cached).getStreamOffsets())
+            Object cachedConsumed = getPrivateField(stream, "cachedConsumedOffset");
+            assertThat(cachedConsumed).isNotNull();
+            assertThat(cachedConsumed).isInstanceOf(RabbitMQStreamOffset.class);
+            assertThat(((RabbitMQStreamOffset) cachedConsumed).getStreamOffsets())
                     .containsEntry("test-stream", 42L);
+            // cachedLatestOffset is reserved for source-latest reporting and must not be
+            // overwritten by per-task consumer progress.
+            assertThat(getPrivateField(stream, "cachedLatestOffset")).isNull();
         }
     }
 

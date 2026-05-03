@@ -66,10 +66,26 @@ final class RabbitMQMicroBatchStream extends BaseRabbitMQMicroBatchStream
         RabbitMQStreamOffset startOffset = (RabbitMQStreamOffset) start;
         List<String> streams = discoverStreams();
 
+        Map<String, Long> checkpointFallbackOffsets = null;
+        boolean checkpointFallbackLoaded = false;
+
         List<InputPartition> partitions = new ArrayList<>();
         for (String stream : streams) {
             Long knownStart = startOffset.getStreamOffsets().get(stream);
-            long startOff = knownStart != null ? knownStart : resolveStartingOffset(stream);
+            long startOff;
+            if (knownStart != null) {
+                startOff = knownStart;
+            } else {
+                if (!checkpointFallbackLoaded) {
+                    checkpointFallbackOffsets = loadCommittedOffsetsFromCheckpoint();
+                    checkpointFallbackLoaded = true;
+                }
+                startOff = resolveMissingStartOffset(
+                        stream,
+                        "planInputPartitions(Offset)",
+                        checkpointFallbackOffsets,
+                        true);
+            }
 
             // Validate against retention truncation
             startOff = validateStartOffset(stream, startOff, Long.MAX_VALUE);
@@ -100,7 +116,10 @@ final class RabbitMQMicroBatchStream extends BaseRabbitMQMicroBatchStream
             merged.merge(rpo.getStream(), rpo.getNextOffset(), Math::max);
         }
         RabbitMQStreamOffset result = new RabbitMQStreamOffset(merged);
-        cachedLatestOffset = result;
+        // Track consumed progress separately from cachedLatestOffset (source-latest reporting),
+        // so reportLatestOffset() / lag metrics keep reflecting the broker tail rather than
+        // the consumer's position.
+        cachedConsumedOffset = result;
         if (realTimeMode) {
             refreshTailOffsetsForRealTimeMetricsIfDue();
         }
@@ -118,7 +137,10 @@ final class RabbitMQMicroBatchStream extends BaseRabbitMQMicroBatchStream
                 return;
             }
             try {
-                Map<String, Long> tailOffsets = queryTailOffsetsForReporting();
+                // Stats-only path: avoids spinning up a tail-probe consumer on every metric
+                // refresh. Real-time triggers fire frequently and a probe per refresh would
+                // create excessive broker connections for a metric that tolerates lag.
+                Map<String, Long> tailOffsets = queryTailOffsetsForMetrics();
                 if (!tailOffsets.isEmpty()) {
                     cachedTailOffset = new RabbitMQStreamOffset(tailOffsets);
                 }
@@ -135,10 +157,10 @@ final class RabbitMQMicroBatchStream extends BaseRabbitMQMicroBatchStream
     // In real-time mode, Spark's source.commit() is deferred to the start of the NEXT batch
     // (cleanUpLastExecutedMicroBatch). If the query is stopped after only 1 batch, commit() is
     // never called and lastCommittedEndOffsets stays null. The checkpoint fallback may also fail
-    // if stop() races with the commit log write. As a safety net, allow cachedLatestOffset
+    // if stop() races with the commit log write. As a safety net, allow cachedConsumedOffset
     // (set by mergeOffsets() after actual data delivery) to be used for stop-time persistence.
     @Override
-    boolean shouldPersistCachedLatestOffsetsOnStop() {
+    boolean shouldPersistCachedConsumedOffsetsOnStop() {
         return realTimeMode;
     }
 
