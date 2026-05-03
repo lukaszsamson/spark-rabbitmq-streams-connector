@@ -1292,45 +1292,35 @@ class SuperStreamIT extends AbstractRabbitMQIT {
     // ---- S4: deduplication with super stream producer ----
 
     @Test
-    void batchWriteSuperStreamDedupAfterRetry() throws Exception {
+    void batchWriteSuperStreamWithExplicitPublishingId() throws Exception {
         String dedupSuper = uniqueStreamName();
         deleteSuperStream(dedupSuper);
         createSuperStream(dedupSuper, PARTITION_COUNT);
 
+        // Auto-dedup on a superstream batch (without publishing_id) is rejected by
+        // RabbitMQWrite#validateBatchSuperStreamDedupCompatibility because the
+        // single-partition seed cannot guarantee monotonicity across all routed
+        // partitions. With an explicit publishing_id column the user is on the hook
+        // for monotonicity and the broker dedupes by (producer, partition, id).
         StructType schema = new StructType()
                 .add("value", DataTypes.BinaryType, false)
-                .add("routing_key", DataTypes.StringType, true);
+                .add("routing_key", DataTypes.StringType, true)
+                .add("publishing_id", DataTypes.LongType, true);
 
+        // RabbitMQ Streams returns getLastPublishingId() = 0 for a producer that has
+        // never published, so the writer's nextPublishingId seed is 1 even on a
+        // fresh stream. Supply explicit ids starting at 1 to satisfy that floor.
         List<Row> data = new ArrayList<>();
         for (int i = 0; i < 8; i++) {
-            data.add(RowFactory.create(("dup-" + i).getBytes(), "0"));
+            data.add(RowFactory.create(("dup-" + i).getBytes(), "0", (long) (i + 1)));
         }
 
-        Dataset<Row> df = spark.createDataFrame(data, schema);
-
-        stopRabbitMqApp();
-        try {
-            assertThatThrownBy(() -> df.write()
-                    .format("rabbitmq_streams")
-                    .mode("append")
-                    .option("endpoints", streamEndpoint())
-                    .option("superstream", dedupSuper)
-                    .option("producerName", "ss-dedup")
-                    .option("publisherConfirmTimeoutMs", "500")
-                    .option("enqueueTimeoutMs", "200")
-                    .option("addressResolverClass",
-                            "io.github.lukaszsamson.spark.rabbitmq.TestAddressResolver")
-                    .save())
-                    .satisfies(t -> {
-                        String msg = t.getMessage() == null ? "" : t.getMessage();
-                        assertThat(msg).containsAnyOf(
-                                "Timed out waiting for publisher confirms",
-                                "Locator not available",
-                                "Connection is closed");
-                    });
-        } finally {
-            startRabbitMqApp();
-        }
+        // Per-writer monotonicity is enforced on publishing_id, so collapse to a
+        // single writer with rows in publishing_id order regardless of Spark's
+        // default parallelism on the runner.
+        Dataset<Row> df = spark.createDataFrame(data, schema)
+                .repartition(1)
+                .sortWithinPartitions("publishing_id");
 
         df.write()
                 .format("rabbitmq_streams")

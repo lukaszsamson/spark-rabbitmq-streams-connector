@@ -827,6 +827,20 @@ public final class ConnectorOptions implements Serializable {
             ExtensionLoader.load(filterValueExtractorClass, ConnectorFilterValueExtractor.class,
                     FILTER_VALUE_EXTRACTOR_CLASS);
         }
+
+        // Producer-side stream filtering requires per-message filter-value extraction,
+        // which is incompatible with sub-entry batching: the broker filters whole
+        // sub-entries, so the per-message filter cannot be applied.
+        boolean filterConfigured =
+                (filterValuePath != null && !filterValuePath.isEmpty())
+                        || (filterValueExtractorClass != null
+                                && !filterValueExtractorClass.isEmpty());
+        if (filterConfigured && subEntrySize != null && subEntrySize > 1) {
+            throw new IllegalArgumentException(
+                    "'" + SUB_ENTRY_SIZE + "' > 1 is incompatible with producer-side filtering ('"
+                            + FILTER_VALUE_PATH + "' or '" + FILTER_VALUE_EXTRACTOR_CLASS
+                            + "'). Sub-entry batching disables per-message filter extraction.");
+        }
     }
 
     // ---- Stream mode helpers ----

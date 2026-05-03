@@ -215,6 +215,44 @@ class RabbitMQWriteTest {
         }
 
         @Test
+        void toBatchFailsFastForSuperStreamDedupWithoutPublishingIdColumn() {
+            Map<String, String> map = new LinkedHashMap<>();
+            map.put("endpoints", "localhost:5552");
+            map.put("superstream", "my-super");
+            map.put("producerName", "dedup");
+            ConnectorOptions opts = new ConnectorOptions(map);
+            Write write = new RabbitMQWriteBuilder(opts, minimalSinkSchema(), "q").build();
+
+            assertThatThrownBy(write::toBatch)
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("superstream batch")
+                    .hasMessageContaining("producerName");
+        }
+
+        @Test
+        void toBatchAllowsSuperStreamDedupWhenPublishingIdColumnIsPresent() {
+            Map<String, String> map = new LinkedHashMap<>();
+            map.put("endpoints", "localhost:5552");
+            map.put("superstream", "my-super");
+            map.put("producerName", "dedup");
+            ConnectorOptions opts = new ConnectorOptions(map);
+            Write write = new RabbitMQWriteBuilder(
+                    opts, sinkSchemaWithPublishingId(), "q").build();
+
+            assertThatCode(write::toBatch).doesNotThrowAnyException();
+        }
+
+        @Test
+        void toBatchAllowsSingleStreamDedup() {
+            Map<String, String> map = minimalSinkMap();
+            map.put("producerName", "dedup");
+            ConnectorOptions opts = new ConnectorOptions(map);
+            Write write = new RabbitMQWriteBuilder(opts, minimalSinkSchema(), "q").build();
+
+            assertThatCode(write::toBatch).doesNotThrowAnyException();
+        }
+
+        @Test
         void supportedCustomMetricsIncludesWriteMetrics() {
             Write write = buildWrite();
             CustomMetric[] metrics = write.supportedCustomMetrics();
