@@ -2351,13 +2351,23 @@ class BaseRabbitMQMicroBatchStream
         if (fromCheckpoint != null && !fromCheckpoint.isEmpty()) {
             return fromCheckpoint;
         }
-        RabbitMQStreamOffset consumed = cachedConsumedOffset;
-        if (shouldPersistCachedConsumedOffsetsOnStop()
-                && consumed != null
-                && !consumed.getStreamOffsets().isEmpty()) {
-            LOG.debug("Falling back to cached consumed offsets for stop-time broker persistence: {}",
-                    consumed.getStreamOffsets());
-            return new LinkedHashMap<>(consumed.getStreamOffsets());
+        if (shouldPersistCachedConsumedOffsetsOnStop()) {
+            RabbitMQStreamOffset consumed = cachedConsumedOffset;
+            if (consumed != null && !consumed.getStreamOffsets().isEmpty()) {
+                LOG.debug("Falling back to cached consumed offsets for stop-time broker persistence: {}",
+                        consumed.getStreamOffsets());
+                return new LinkedHashMap<>(consumed.getStreamOffsets());
+            }
+            // mergeOffsets() may not have fired before stop() in a single-batch real-time
+            // query. Fall back to cachedLatestOffset so a stop right after the source's
+            // first latestOffset() call still records broker-side progress instead of
+            // throwing away the consumer name's only chance to advance.
+            RabbitMQStreamOffset latest = cachedLatestOffset;
+            if (latest != null && !latest.getStreamOffsets().isEmpty()) {
+                LOG.debug("Falling back to cached latest offsets for stop-time broker persistence: {}",
+                        latest.getStreamOffsets());
+                return new LinkedHashMap<>(latest.getStreamOffsets());
+            }
         }
         return null;
     }
