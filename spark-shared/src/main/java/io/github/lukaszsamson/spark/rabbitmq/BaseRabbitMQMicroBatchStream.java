@@ -129,9 +129,10 @@ class BaseRabbitMQMicroBatchStream
     final StreamStatsCache streamStatsCache;
     /** Streams whose initial latest offset was resolved while empty. */
     final Set<String> latestStartedOnEmptyStreams = ConcurrentHashMap.newKeySet();
-    /** Set once stop() begins to prevent new environment usage during shutdown. */
+    /** Gates {@link #getEnvironment()} during shutdown. Set after stop-time offset
+     *  persistence completes, so the final commit can still resolve the active env. */
     final AtomicBoolean stopping = new AtomicBoolean(false);
-    /** Idempotence guard: ensures stop() body runs at most once across re-entrant calls. */
+    /** Idempotence guard for {@link #stop()}: the first call wins, re-entrant calls return. */
     final AtomicBoolean stopEntered = new AtomicBoolean(false);
     /** Guards compound read-modify-write updates on mutable admission-control state. */
     final Object mutableStateLock = new Object();
@@ -350,6 +351,11 @@ class BaseRabbitMQMicroBatchStream
             Long firstAvailable;
             try {
                 firstAvailable = resolveFirstAvailable(stream);
+            } catch (IllegalStateException e) {
+                // Fatal/operational errors from resolveFirstAvailable (auth, missing stream
+                // with failOnDataLoss=true, query failure) must propagate. Only truly
+                // non-fatal exceptions are swallowed below to keep validation best-effort.
+                throw e;
             } catch (Exception e) {
                 LOG.debug("Failed to validate recovered stored offset for stream '{}': {}",
                         stream, e.getMessage());

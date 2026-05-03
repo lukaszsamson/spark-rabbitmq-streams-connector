@@ -432,8 +432,9 @@ class RabbitMQMicroBatchStreamTest {
 
             RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
             setPrivateField(stream, "streams", List.of("s1", "s2"));
-            setPrivateField(stream, "environment", new StoredOffsetEnvironment(
-                    Map.of("s1", 9L)));
+            setPrivateField(stream, "environment", new StoredOffsetWithStatsEnvironment(
+                    Map.of("s1", 9L),
+                    Map.of("s1", 0L, "s2", 0L)));
 
             RabbitMQStreamOffset offset = (RabbitMQStreamOffset) stream.initialOffset();
             assertThat(offset.getStreamOffsets()).containsEntry("s1", 10L);
