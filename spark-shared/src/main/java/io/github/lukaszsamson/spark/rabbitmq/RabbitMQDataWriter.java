@@ -35,6 +35,10 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
     private static final long DEFAULT_PUBLISHER_CONFIRM_TIMEOUT_MS = 30_000L;
     private static final long CLIENT_MIN_CONFIRM_TIMEOUT_MS = 1_000L;
     private static final int MAX_BROKER_REFERENCE_LENGTH = 255;
+    // Per-task LRU bound for KEY-route cache. metadata::route is cheap and the cache
+    // mostly dedupes within a single task; keep memory hygiene without surprising the
+    // routing strategy.
+    private static final int KEY_ROUTE_CACHE_MAX_ENTRIES = 10_000;
 
     private final ConnectorOptions options;
     private final int partitionId;
@@ -537,8 +541,15 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
                 }
             }
             case KEY -> {
-                java.util.concurrent.ConcurrentMap<String, java.util.List<String>> routesByKey =
-                        new java.util.concurrent.ConcurrentHashMap<>();
+                Map<String, java.util.List<String>> routesByKey =
+                        java.util.Collections.synchronizedMap(
+                                new java.util.LinkedHashMap<>(256, 0.75f, true) {
+                                    @Override
+                                    protected boolean removeEldestEntry(
+                                            Map.Entry<String, java.util.List<String>> eldest) {
+                                        return size() > KEY_ROUTE_CACHE_MAX_ENTRIES;
+                                    }
+                                });
                 routing.strategy((message, metadata) -> {
                     String routingKey = extractRoutingKey(message);
                     if (routingKey == null || routingKey.isEmpty()) {
@@ -717,13 +728,36 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
         if (appProps != null) {
             Object rk = appProps.get("routing_key");
             if (rk != null) {
-                return rk.toString();
+                return coerceRoutingValueToString(rk);
             }
         }
         if (message.getProperties() != null && message.getProperties().getSubject() != null) {
             return message.getProperties().getSubject();
         }
         return null;
+    }
+
+    /**
+     * Coerce a raw application-property value into a deterministic string for routing.
+     * The row→message path produces only String values, but custom
+     * {@link ConnectorRoutingStrategy} or extension callers may surface byte[] or
+     * other AMQP-typed values that {@link Object#toString()} would render as a
+     * JVM-identity-hashed reference (and thus non-deterministic across restarts).
+     *
+     * <p>Mirrors the byte[]→base64 encoding used in {@code MessageToRowConverter} so
+     * that routing keys are stable and observable.
+     */
+    private static String coerceRoutingValueToString(Object value) {
+        if (value == null) {
+            return null;
+        }
+        if (value instanceof String s) {
+            return s;
+        }
+        if (value instanceof byte[] bytes) {
+            return java.util.Base64.getEncoder().encodeToString(bytes);
+        }
+        return value.toString();
     }
 
     private String confirmationFailureSummary() {
