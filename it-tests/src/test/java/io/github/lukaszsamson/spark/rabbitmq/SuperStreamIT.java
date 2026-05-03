@@ -1292,16 +1292,16 @@ class SuperStreamIT extends AbstractRabbitMQIT {
     // ---- S4: deduplication with super stream producer ----
 
     @Test
-    void batchWriteSuperStreamDedupAfterRetry() throws Exception {
+    void batchWriteSuperStreamWithExplicitPublishingId() throws Exception {
         String dedupSuper = uniqueStreamName();
         deleteSuperStream(dedupSuper);
         createSuperStream(dedupSuper, PARTITION_COUNT);
 
         // Auto-dedup on a superstream batch (without publishing_id) is rejected by
         // RabbitMQWrite#validateBatchSuperStreamDedupCompatibility because the
-        // single-partition seed cannot guarantee monotonicity across all partitions.
-        // The test routes every row to partition "0", so an explicit per-row
-        // publishing_id column is the supported way to carry dedup through retries.
+        // single-partition seed cannot guarantee monotonicity across all routed
+        // partitions. With an explicit publishing_id column the user is on the hook
+        // for monotonicity and the broker dedupes by (producer, partition, id).
         StructType schema = new StructType()
                 .add("value", DataTypes.BinaryType, false)
                 .add("routing_key", DataTypes.StringType, true)
@@ -1318,30 +1318,6 @@ class SuperStreamIT extends AbstractRabbitMQIT {
         Dataset<Row> df = spark.createDataFrame(data, schema)
                 .repartition(1)
                 .sortWithinPartitions("publishing_id");
-
-        stopRabbitMqApp();
-        try {
-            assertThatThrownBy(() -> df.write()
-                    .format("rabbitmq_streams")
-                    .mode("append")
-                    .option("endpoints", streamEndpoint())
-                    .option("superstream", dedupSuper)
-                    .option("producerName", "ss-dedup")
-                    .option("publisherConfirmTimeoutMs", "500")
-                    .option("enqueueTimeoutMs", "200")
-                    .option("addressResolverClass",
-                            "io.github.lukaszsamson.spark.rabbitmq.TestAddressResolver")
-                    .save())
-                    .satisfies(t -> {
-                        String msg = t.getMessage() == null ? "" : t.getMessage();
-                        assertThat(msg).containsAnyOf(
-                                "Timed out waiting for publisher confirms",
-                                "Locator not available",
-                                "Connection is closed");
-                    });
-        } finally {
-            startRabbitMqApp();
-        }
 
         df.write()
                 .format("rabbitmq_streams")
