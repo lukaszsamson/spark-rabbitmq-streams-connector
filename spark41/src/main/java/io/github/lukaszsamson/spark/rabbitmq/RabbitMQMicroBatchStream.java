@@ -73,8 +73,10 @@ final class RabbitMQMicroBatchStream extends BaseRabbitMQMicroBatchStream
         for (String stream : streams) {
             Long knownStart = startOffset.getStreamOffsets().get(stream);
             long startOff;
+            boolean usedMissingStartFallback;
             if (knownStart != null) {
                 startOff = knownStart;
+                usedMissingStartFallback = false;
             } else {
                 if (!checkpointFallbackLoaded) {
                     checkpointFallbackOffsets = loadCommittedOffsetsFromCheckpoint();
@@ -85,6 +87,7 @@ final class RabbitMQMicroBatchStream extends BaseRabbitMQMicroBatchStream
                         "planInputPartitions(Offset)",
                         checkpointFallbackOffsets,
                         true);
+                usedMissingStartFallback = true;
             }
 
             // Validate against retention truncation
@@ -93,9 +96,19 @@ final class RabbitMQMicroBatchStream extends BaseRabbitMQMicroBatchStream
                 continue;
             }
 
+            // For timestamp-start mode, only honor the configured-seek flag when this
+            // partition's start came from the start map (i.e., the original timestamp
+            // anchor). resolveMissingStartOffset records its fallback in initialOffsets
+            // as a side effect, which would otherwise trick useConfiguredStartingOffset
+            // into re-applying timestamp filtering to records that were resolved via
+            // checkpoint or first-available — silently skipping data on newly discovered
+            // superstream partitions.
+            boolean configuredSeek = !usedMissingStartFallback
+                    && useConfiguredStartingOffset(stream, startOff);
+
             partitions.add(new RabbitMQInputPartition(
                     stream, startOff, Long.MAX_VALUE, options,
-                    useConfiguredStartingOffset(stream, startOff),
+                    configuredSeek,
                     RabbitMQInputPartition.locationForStream(stream),
                     messageSizeTrackerScope,
                     messageSizeBytesAccumulator,
