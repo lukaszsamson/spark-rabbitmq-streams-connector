@@ -1138,10 +1138,10 @@ class BatchReadIT extends AbstractRabbitMQIT {
         assertThat(df4.collectAsList()).hasSize(5);
     }
 
-    // ---- IT-OFFSET-007: no matched timestamp strategy parity with Kafka ----
+    // ---- IT-OFFSET-007: timestamp probe timeout strategy parity ----
 
     @Test
-    void batchReadTimestampNoMatchErrorsByDefault() {
+    void batchReadTimestampProbeTimeoutErrorsByDefault() {
         publishMessages(stream, 10, "ts-");
 
         long futureTimestamp = System.currentTimeMillis() + 24 * 60 * 60 * 1000L;
@@ -1152,33 +1152,35 @@ class BatchReadIT extends AbstractRabbitMQIT {
                 .option("stream", stream)
                 .option("startingOffsets", "timestamp")
                 .option("startingTimestamp", String.valueOf(futureTimestamp))
+                .option("pollTimeoutMs", "2000")
                 .option("metadataFields", "")
                 .option("addressResolverClass",
                         "io.github.lukaszsamson.spark.rabbitmq.TestAddressResolver")
                 .load()
                 .collectAsList())
-                .hasMessageContaining("No offset matched");
+                .hasMessageContaining("pollTimeoutMs");
     }
 
     @Test
-    void batchReadTimestampNoMatchLatestStrategyReturnsEmpty() {
+    void batchReadTimestampProbeTimeoutThrowsEvenWithLatestStrategy() {
         publishMessages(stream, 10, "ts-");
 
         long futureTimestamp = System.currentTimeMillis() + 24 * 60 * 60 * 1000L;
 
-        Dataset<Row> df = spark.read()
+        assertThatThrownBy(() -> spark.read()
                 .format("rabbitmq_streams")
                 .option("endpoints", streamEndpoint())
                 .option("stream", stream)
                 .option("startingOffsets", "timestamp")
                 .option("startingTimestamp", String.valueOf(futureTimestamp))
                 .option("startingOffsetsByTimestampStrategy", "latest")
+                .option("pollTimeoutMs", "2000")
                 .option("metadataFields", "")
                 .option("addressResolverClass",
                         "io.github.lukaszsamson.spark.rabbitmq.TestAddressResolver")
-                .load();
-
-        assertThat(df.collectAsList()).isEmpty();
+                .load()
+                .collectAsList())
+                .hasMessageContaining("pollTimeoutMs");
     }
 
     // ---- IT-OPT-006-source: invalid option combinations ----
