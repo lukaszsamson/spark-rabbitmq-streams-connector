@@ -314,187 +314,26 @@ class RabbitMQMicroBatchStreamTest {
         }
 
         @Test
-        void initialOffsetExplicitConsumerNameNonFatalLookupFailureFailsFast() throws Exception {
-            Map<String, String> opts = new LinkedHashMap<>();
-            opts.put("endpoints", "localhost:5552");
-            opts.put("stream", "test-stream");
-            opts.put("consumerName", "explicit");
-
-            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
-            Environment env = new ThrowingConsumerBuilderEnvironment(
-                    new RuntimeException("tracking consumer limit reached"));
-            setPrivateField(stream, "environment", env);
-
-            assertThatThrownBy(stream::initialOffset)
-                    .isInstanceOf(IllegalStateException.class)
-                    .hasMessageContaining("consumerName is explicitly configured");
-        }
-
-        @Test
-        void initialOffsetExplicitConsumerNameInterruptedLookupFailsFast()
+        void initialOffsetIgnoresBrokerStoredOffsetsAndUsesConfiguredStartingOffsets()
                 throws Exception {
+            // Broker-side stored offsets are write-only telemetry: they MUST NOT
+            // drive query recovery. Even when an explicit consumerName has stored
+            // progress on the broker, initialOffset() resolves from the configured
+            // startingOffsets.
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
             opts.put("stream", "test-stream");
-            opts.put("consumerName", "explicit");
+            opts.put("consumerName", "existing-consumer");
             opts.put("startingOffsets", "offset");
             opts.put("startingOffset", "7");
 
             RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
             setPrivateField(stream, "environment", new StoredOffsetWithStatsEnvironment(
-                    Map.of("test-stream", 99L), Map.of("test-stream", 0L)));
-            Thread.currentThread().interrupt();
-            try {
-                assertThatThrownBy(stream::initialOffset)
-                        .isInstanceOf(IllegalStateException.class)
-                        .hasMessageContaining("lookup failures are treated as fatal");
-                assertThat(Thread.currentThread().isInterrupted()).isTrue();
-            } finally {
-                Thread.interrupted(); // Clear interrupt status
-            }
-        }
-
-        @Test
-        void initialOffsetDerivedConsumerNameNonFatalLookupFallsBackToStartingOffsets() throws Exception {
-            Map<String, String> opts = new LinkedHashMap<>();
-            opts.put("endpoints", "localhost:5552");
-            opts.put("stream", "test-stream");
-            opts.put("startingOffsets", "offset");
-            opts.put("startingOffset", "7");
-
-            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
-            Environment env = new ThrowingConsumerBuilderEnvironment(
-                    new RuntimeException("tracking consumer limit reached"));
-            setPrivateField(stream, "environment", env);
+                    Map.of("test-stream", 999L),
+                    Map.of("test-stream", 0L)));
 
             RabbitMQStreamOffset offset = (RabbitMQStreamOffset) stream.initialOffset();
             assertThat(offset.getStreamOffsets()).containsEntry("test-stream", 7L);
-        }
-
-        @Test
-        void initialOffsetFatalLookupErrorFailsWithExplicitConsumerName() throws Exception {
-            Map<String, String> opts = new LinkedHashMap<>();
-            opts.put("endpoints", "localhost:5552");
-            opts.put("stream", "test-stream");
-            opts.put("consumerName", "explicit");
-
-            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
-            Environment env = new ThrowingConsumerBuilderEnvironment(
-                    new RuntimeException("authentication failed"));
-            setPrivateField(stream, "environment", env);
-
-            assertThatThrownBy(stream::initialOffset)
-                    .isInstanceOf(IllegalStateException.class)
-                    .hasMessageContaining("Failed to look up stored offset");
-        }
-
-        @Test
-        void initialOffsetFatalLookupErrorFailsWithDerivedConsumerName() throws Exception {
-            Map<String, String> opts = new LinkedHashMap<>();
-            opts.put("endpoints", "localhost:5552");
-            opts.put("stream", "test-stream");
-
-            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
-            Environment env = new ThrowingConsumerBuilderEnvironment(
-                    new RuntimeException("authentication failed"));
-            setPrivateField(stream, "environment", env);
-
-            assertThatThrownBy(stream::initialOffset)
-                    .isInstanceOf(IllegalStateException.class)
-                    .hasMessageContaining("Failed to look up stored offset");
-        }
-
-        @Test
-        void initialOffsetDerivedConsumerNameUnknownLookupFailureFailsFast() throws Exception {
-            Map<String, String> opts = new LinkedHashMap<>();
-            opts.put("endpoints", "localhost:5552");
-            opts.put("stream", "test-stream");
-            opts.put("startingOffsets", "offset");
-            opts.put("startingOffset", "7");
-
-            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
-            Environment env = new ThrowingConsumerBuilderEnvironment(
-                    new RuntimeException("dns resolution failed"));
-            setPrivateField(stream, "environment", env);
-
-            assertThatThrownBy(stream::initialOffset)
-                    .isInstanceOf(IllegalStateException.class)
-                    .hasMessageContaining("Failed to look up stored offset");
-        }
-
-        @Test
-        void initialOffsetMergesPartialStoredOffsetsWithFallback() throws Exception {
-            Map<String, String> opts = new LinkedHashMap<>();
-            opts.put("endpoints", "localhost:5552");
-            opts.put("stream", "test-stream");
-            opts.put("startingOffsets", "offset");
-            opts.put("startingOffset", "5");
-
-            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
-            setPrivateField(stream, "streams", List.of("s1", "s2"));
-            setPrivateField(stream, "environment", new StoredOffsetWithStatsEnvironment(
-                    Map.of("s1", 9L),
-                    Map.of("s1", 0L, "s2", 0L)));
-
-            RabbitMQStreamOffset offset = (RabbitMQStreamOffset) stream.initialOffset();
-            assertThat(offset.getStreamOffsets()).containsEntry("s1", 10L);
-            assertThat(offset.getStreamOffsets()).containsEntry("s2", 5L);
-        }
-
-        @Test
-        void initialOffsetLatestIgnoresRecoveredStoredOffsetBeforeFirstAvailable() throws Exception {
-            Map<String, String> opts = new LinkedHashMap<>();
-            opts.put("endpoints", "localhost:5552");
-            opts.put("stream", "test-stream");
-            opts.put("startingOffsets", "latest");
-            opts.put("consumerName", "fresh-consumer");
-            opts.put("failOnDataLoss", "false");
-
-            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
-            setPrivateField(stream, "environment", new StoredOffsetWithStatsEnvironment(
-                    Map.of("test-stream", 0L),
-                    Map.of("test-stream", 100L)));
-
-            RabbitMQStreamOffset offset = (RabbitMQStreamOffset) stream.initialOffset();
-            assertThat(offset.getStreamOffsets()).containsEntry("test-stream", 101L);
-        }
-
-        @Test
-        void initialOffsetThrowsOnRecoveredStoredOffsetBeforeFirstAvailableWhenFailOnDataLoss()
-                throws Exception {
-            Map<String, String> opts = new LinkedHashMap<>();
-            opts.put("endpoints", "localhost:5552");
-            opts.put("stream", "test-stream");
-            opts.put("startingOffsets", "latest");
-            opts.put("consumerName", "fresh-consumer");
-
-            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
-            setPrivateField(stream, "environment", new StoredOffsetWithStatsEnvironment(
-                    Map.of("test-stream", 0L),
-                    Map.of("test-stream", 100L)));
-
-            assertThatThrownBy(stream::initialOffset)
-                    .isInstanceOf(IllegalStateException.class)
-                    .hasMessageContaining("Broker-tracked progress was truncated by retention")
-                    .hasMessageContaining("test-stream")
-                    .hasMessageContaining("failOnDataLoss=false");
-        }
-
-        @Test
-        void initialOffsetLatestKeepsRecoveredStoredOffsetAtOrAfterFirstAvailable() throws Exception {
-            Map<String, String> opts = new LinkedHashMap<>();
-            opts.put("endpoints", "localhost:5552");
-            opts.put("stream", "test-stream");
-            opts.put("startingOffsets", "latest");
-            opts.put("consumerName", "existing-consumer");
-
-            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
-            setPrivateField(stream, "environment", new StoredOffsetWithStatsEnvironment(
-                    Map.of("test-stream", 120L),
-                    Map.of("test-stream", 100L)));
-
-            RabbitMQStreamOffset offset = (RabbitMQStreamOffset) stream.initialOffset();
-            assertThat(offset.getStreamOffsets()).containsEntry("test-stream", 121L);
         }
 
         @Test

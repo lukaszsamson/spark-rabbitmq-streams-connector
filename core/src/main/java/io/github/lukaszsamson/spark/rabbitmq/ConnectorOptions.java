@@ -1,5 +1,8 @@
 package io.github.lukaszsamson.spark.rabbitmq;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.io.Serializable;
 import java.util.*;
 import java.util.stream.Collectors;
@@ -14,6 +17,7 @@ import java.util.stream.Collectors;
  */
 public final class ConnectorOptions implements Serializable {
     private static final long serialVersionUID = 1L;
+    private static final Logger LOG = LoggerFactory.getLogger(ConnectorOptions.class);
     static final int MAX_BROKER_REFERENCE_LENGTH = 255;
 
     // ---- Option key constants ----
@@ -76,6 +80,13 @@ public final class ConnectorOptions implements Serializable {
     public static final String MAX_BYTES_PER_TRIGGER = "maxBytesPerTrigger";
     public static final String MIN_PARTITIONS = "minPartitions";
     public static final String MAX_RECORDS_PER_PARTITION = "maxRecordsPerPartition";
+    public static final String STORE_BROKER_OFFSETS = "storeBrokerOffsets";
+    /**
+     * Deprecated alias for {@link #STORE_BROKER_OFFSETS}. Retained for one
+     * release so existing user configurations parse. Emits a warning at parse
+     * time and is removed in a future major version.
+     */
+    @Deprecated
     public static final String SERVER_SIDE_OFFSET_TRACKING = "serverSideOffsetTracking";
     public static final String FILTER_VALUES = "filterValues";
     public static final String FILTER_MATCH_UNFILTERED = "filterMatchUnfiltered";
@@ -205,7 +216,7 @@ public final class ConnectorOptions implements Serializable {
     private final Long maxBytesPerTrigger;
     private final Integer minPartitions;
     private final Long maxRecordsPerPartition;
-    private final Boolean serverSideOffsetTracking;
+    private final Boolean storeBrokerOffsets;
     private final List<String> filterValues;
     private final boolean filterMatchUnfiltered;
     private final String filterPostFilterClass;
@@ -317,7 +328,7 @@ public final class ConnectorOptions implements Serializable {
         this.maxBytesPerTrigger = getLong(options, MAX_BYTES_PER_TRIGGER);
         this.minPartitions = getInteger(options, MIN_PARTITIONS);
         this.maxRecordsPerPartition = getLong(options, MAX_RECORDS_PER_PARTITION);
-        this.serverSideOffsetTracking = getNullableBoolean(options, SERVER_SIDE_OFFSET_TRACKING);
+        this.storeBrokerOffsets = parseStoreBrokerOffsetsWithDeprecationAlias(options);
         this.filterValues = parseCommaSeparated(getString(options, FILTER_VALUES));
         this.filterMatchUnfiltered = getBoolean(options, FILTER_MATCH_UNFILTERED,
                 DEFAULT_FILTER_MATCH_UNFILTERED);
@@ -864,16 +875,30 @@ public final class ConnectorOptions implements Serializable {
     }
 
     /**
-     * Returns the effective server-side offset tracking setting.
+     * Returns whether the connector should write last-processed offsets to the
+     * RabbitMQ broker on each Spark commit as best-effort observability.
+     *
+     * <p>This setting is purely write-only telemetry: stored broker offsets are
+     * <em>not</em> consulted to recover query progress. Spark checkpoints
+     * remain the sole source of truth for resume semantics.
      *
      * @param isStreaming {@code true} for streaming queries, {@code false} for batch
      * @return whether to store offsets in RabbitMQ broker on commit
      */
-    public boolean isServerSideOffsetTracking(boolean isStreaming) {
-        if (serverSideOffsetTracking != null) {
-            return serverSideOffsetTracking;
+    public boolean isStoreBrokerOffsets(boolean isStreaming) {
+        if (storeBrokerOffsets != null) {
+            return storeBrokerOffsets;
         }
         return isStreaming; // default: true for streaming, false for batch
+    }
+
+    /**
+     * @deprecated Renamed to {@link #isStoreBrokerOffsets(boolean)} since the
+     *     setting now controls only write-only telemetry, never recovery.
+     */
+    @Deprecated
+    public boolean isServerSideOffsetTracking(boolean isStreaming) {
+        return isStoreBrokerOffsets(isStreaming);
     }
 
     // ---- Getters: Common ----
@@ -936,7 +961,11 @@ public final class ConnectorOptions implements Serializable {
     public Long getMaxBytesPerTrigger() { return maxBytesPerTrigger; }
     public Integer getMinPartitions() { return minPartitions; }
     public Long getMaxRecordsPerPartition() { return maxRecordsPerPartition; }
-    public Boolean getServerSideOffsetTracking() { return serverSideOffsetTracking; }
+    public Boolean getStoreBrokerOffsets() { return storeBrokerOffsets; }
+
+    /** @deprecated Use {@link #getStoreBrokerOffsets()}. */
+    @Deprecated
+    public Boolean getServerSideOffsetTracking() { return storeBrokerOffsets; }
     public List<String> getFilterValues() { return filterValues; }
     public boolean isFilterMatchUnfiltered() { return filterMatchUnfiltered; }
     public String getFilterPostFilterClass() { return filterPostFilterClass; }
@@ -1013,6 +1042,27 @@ public final class ConnectorOptions implements Serializable {
         if ("false".equals(lower)) return false;
         throw new IllegalArgumentException(
                 "'" + key + "' must be 'true' or 'false', got: '" + value + "'");
+    }
+
+    private static Boolean parseStoreBrokerOffsetsWithDeprecationAlias(
+            Map<String, String> options) {
+        Boolean primary = getNullableBoolean(options, STORE_BROKER_OFFSETS);
+        Boolean legacy = getNullableBoolean(options, SERVER_SIDE_OFFSET_TRACKING);
+        if (legacy != null) {
+            LOG.warn("Option '{}' is deprecated and will be removed in a future "
+                            + "release; use '{}' instead. Note: this setting now controls "
+                            + "only best-effort write-only telemetry and never affects query "
+                            + "recovery.",
+                    SERVER_SIDE_OFFSET_TRACKING, STORE_BROKER_OFFSETS);
+            if (primary != null && !primary.equals(legacy)) {
+                throw new IllegalArgumentException(
+                        "Conflicting values for '" + STORE_BROKER_OFFSETS + "' (" + primary
+                                + ") and deprecated alias '" + SERVER_SIDE_OFFSET_TRACKING
+                                + "' (" + legacy + "); set only '" + STORE_BROKER_OFFSETS + "'.");
+            }
+            return primary != null ? primary : legacy;
+        }
+        return primary;
     }
 
     private static Boolean getNullableBoolean(Map<String, String> options, String key) {

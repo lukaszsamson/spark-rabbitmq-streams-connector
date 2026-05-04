@@ -43,14 +43,16 @@ final class RabbitMQScan implements Scan {
     private static final long TAIL_PROBE_TIMEOUT_MS = 1_500L;
     private static final long MIN_TIMESTAMP_PROBE_TIMEOUT_MS = 250L;
     private static final long RESOLVER_DRAIN_TIMEOUT_MS = 5_000L;
+    /** Max concurrency for broker-side helper executors. */
+    private static final int MAX_BROKER_HELPER_PARALLELISM = 20;
     private static final int TAIL_PROBE_EXECUTOR_PARALLELISM = Math.max(
             1,
             Math.min(Runtime.getRuntime().availableProcessors(),
-                    StoredOffsetLookup.MAX_CONCURRENT_LOOKUPS));
+                    MAX_BROKER_HELPER_PARALLELISM));
     private static final int RANGE_RESOLVER_EXECUTOR_PARALLELISM = Math.max(
             1,
             Math.min(Runtime.getRuntime().availableProcessors(),
-                    StoredOffsetLookup.MAX_CONCURRENT_LOOKUPS));
+                    MAX_BROKER_HELPER_PARALLELISM));
     private static final AtomicInteger TAIL_PROBE_THREAD_COUNTER = new AtomicInteger(0);
     private static final AtomicInteger RANGE_RESOLVER_THREAD_COUNTER = new AtomicInteger(0);
 
@@ -204,7 +206,7 @@ final class RabbitMQScan implements Scan {
 
     private Map<String, long[]> resolveOffsetRanges(Environment env, List<String> streams) {
         Map<String, long[]> ranges = new LinkedHashMap<>();
-        int parallelism = Math.min(streams.size(), StoredOffsetLookup.MAX_CONCURRENT_LOOKUPS);
+        int parallelism = Math.min(streams.size(), MAX_BROKER_HELPER_PARALLELISM);
         if (parallelism <= 1) {
             for (String stream : streams) {
                 long[] range = resolveStreamOffsetRange(env, stream);
