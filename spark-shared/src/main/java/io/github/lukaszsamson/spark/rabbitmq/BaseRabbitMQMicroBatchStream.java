@@ -1866,7 +1866,15 @@ class BaseRabbitMQMicroBatchStream
                     return Math.max(firstAvailable, observed);
                 }
 
-                return handleTimestampStartNoMatch(env, stream, firstAvailable, timestamp);
+                // Probe budget exhausted without a result. We cannot prove a no-match;
+                // falling back to tail/earliest could silently skip or over-include
+                // records. Fail planning so the operator can extend the budget.
+                throw new TimestampResolutionTimeoutException(
+                        "Timed out resolving starting timestamp " + timestamp
+                                + " for stream '" + stream + "' after "
+                                + timestampStartProbeTimeoutMs() + " ms. Increase '"
+                                + ConnectorOptions.POLL_TIMEOUT_MS
+                                + "' to extend the probe budget.");
             } catch (NoOffsetException e) {
                 return handleTimestampStartNoMatch(env, stream, firstAvailable, timestamp);
             } catch (InterruptedException e) {
@@ -1874,6 +1882,11 @@ class BaseRabbitMQMicroBatchStream
                 throw new IllegalStateException(
                         "Interrupted resolving timestamp start offset for stream '" + stream + "'",
                         e);
+            } catch (TimestampResolutionTimeoutException e) {
+                // Probe-budget exhaustion is operational, not transient broker state;
+                // do not retry, surface to the caller so the operator can extend the
+                // budget.
+                throw e;
             } catch (Exception e) {
                 if (attempt < maxAttempts) {
                     LOG.warn("Failed to resolve timestamp start offset for stream '{}' (attempt {}/{}): {}",

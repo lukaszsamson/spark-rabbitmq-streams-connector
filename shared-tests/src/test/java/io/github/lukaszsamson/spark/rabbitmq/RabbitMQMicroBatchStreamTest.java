@@ -527,24 +527,26 @@ class RabbitMQMicroBatchStreamTest {
         @Test
         void initialOffsetTimestampIgnoresRecoveredStoredOffsetBeforeFirstAvailable()
                 throws Exception {
+            // Timestamp mode must defer to the broker probe rather than reusing a
+            // stale stored offset. A probe consumer emits offset 150 (>= firstAvailable
+            // 100), and the planner returns max(firstAvailable, probed) — never the
+            // stale stored 0.
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
             opts.put("stream", "test-stream");
             opts.put("startingOffsets", "timestamp");
             opts.put("startingTimestamp", "1700000000000");
-            opts.put("startingOffsetsByTimestampStrategy", "latest");
             opts.put("consumerName", "timestamp-consumer");
             opts.put("failOnDataLoss", "false");
 
             RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
-            setPrivateField(stream, "environment", new StoredOffsetWithStatsEnvironment(
-                    Map.of("test-stream", 0L),
-                    Map.of("test-stream", 100L)));
+            setPrivateField(stream, "environment",
+                    new TimestampStartEnvironment(100L, java.util.List.of(150L)));
 
             RabbitMQStreamOffset offset = (RabbitMQStreamOffset) stream.initialOffset();
             assertThat(offset.getStreamOffsets().get("test-stream"))
-                    .as("timestamp mode should ignore stale recovered offsets and fallback")
-                    .isGreaterThanOrEqualTo(100L);
+                    .as("timestamp mode should ignore stale recovered offsets and use probe result")
+                    .isEqualTo(150L);
         }
 
         @Test
@@ -1166,12 +1168,16 @@ class RabbitMQMicroBatchStreamTest {
         }
 
         @Test
-        void resolveStartingOffsetTimestampWithoutMatchFailsByDefault() throws Exception {
+        void resolveStartingOffsetTimestampProbeTimeoutFailsByDefault() throws Exception {
+            // Probe never emits (empty offsets list) → INCONCLUSIVE timeout. Under
+            // GPT3-2 semantics the planner must not silently fall back: fail fast so
+            // the operator can extend the probe budget.
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
             opts.put("stream", "test-stream");
             opts.put("startingOffsets", "timestamp");
             opts.put("startingTimestamp", "4102444800000");
+            opts.put("pollTimeoutMs", "250");
 
             RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
             setPrivateField(stream, "environment",
@@ -1179,27 +1185,31 @@ class RabbitMQMicroBatchStreamTest {
 
             assertThatThrownBy(stream::initialOffset)
                     .isInstanceOf(IllegalStateException.class)
-                    .hasRootCauseMessage(
-                            "No offset matched the requested starting timestamp 4102444800000 "
-                                    + "for stream 'test-stream'. Set "
-                                    + "'startingOffsetsByTimestampStrategy=latest' to fall back to tail.");
+                    .hasMessageContaining("Timed out resolving starting timestamp")
+                    .hasMessageContaining("pollTimeoutMs");
         }
 
         @Test
-        void resolveStartingOffsetTimestampWithoutMatchUsesTailWhenStrategyLatest() throws Exception {
+        void resolveStartingOffsetTimestampProbeTimeoutFailsEvenWhenStrategyLatest() throws Exception {
+            // strategy=latest applies only to broker-confirmed no-match
+            // (NoOffsetException). A probe timeout is INCONCLUSIVE and must not silently
+            // jump to tail because that would skip records that may exist past the
+            // requested timestamp.
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
             opts.put("stream", "test-stream");
             opts.put("startingOffsets", "timestamp");
             opts.put("startingTimestamp", "4102444800000");
             opts.put("startingOffsetsByTimestampStrategy", "latest");
+            opts.put("pollTimeoutMs", "250");
 
             RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
             setPrivateField(stream, "environment",
                     new TimestampStartEnvironment(10L, java.util.List.of()));
 
-            RabbitMQStreamOffset offset = (RabbitMQStreamOffset) stream.initialOffset();
-            assertThat(offset.getStreamOffsets()).containsEntry("test-stream", 11L);
+            assertThatThrownBy(stream::initialOffset)
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("Timed out resolving starting timestamp");
         }
 
         @Test

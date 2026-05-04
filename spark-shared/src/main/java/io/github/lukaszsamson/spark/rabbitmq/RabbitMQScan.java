@@ -416,7 +416,14 @@ final class RabbitMQScan implements Scan {
             if (observed != null) {
                 return Math.max(firstAvailable, observed);
             }
-            return handleTimestampStartNoMatch(env, stream, firstAvailable, stats, timestamp);
+            // Probe budget exhausted without a result. We cannot prove a no-match;
+            // falling back to tail or earliest here would silently skip or over-include
+            // records. Fail planning so the operator can extend the budget.
+            throw new TimestampResolutionTimeoutException(
+                    "Timed out resolving starting timestamp " + timestamp
+                            + " for stream '" + stream + "' after " + timestampProbeTimeoutMs()
+                            + " ms. Increase '" + ConnectorOptions.POLL_TIMEOUT_MS
+                            + "' to extend the probe budget.");
         } catch (NoOffsetException e) {
             return handleTimestampStartNoMatch(env, stream, firstAvailable, stats, timestamp);
         } catch (InterruptedException e) {
@@ -527,10 +534,15 @@ final class RabbitMQScan implements Scan {
             if (boundaryFound.await(timestampProbeTimeoutMs(), TimeUnit.MILLISECONDS)) {
                 return firstOffsetAtOrAfter.get();
             }
-            // No message with ts >= requested timestamp arrived within the probe budget.
-            // Fall back to tail — all available data is before the cutoff.
-            StreamStats stats = env.queryStreamStats(stream);
-            return resolveLatestOffset(env, stream, stats);
+            // Probe budget exhausted without observing a message at or after the
+            // requested timestamp. We cannot prove all data is before the cutoff,
+            // so falling back to tail risks over-including records published after
+            // the bound. Fail planning instead.
+            throw new TimestampResolutionTimeoutException(
+                    "Timed out resolving ending timestamp " + timestamp
+                            + " for stream '" + stream + "' after " + timestampProbeTimeoutMs()
+                            + " ms. Increase '" + ConnectorOptions.POLL_TIMEOUT_MS
+                            + "' to extend the probe budget.");
         } catch (NoOffsetException e) {
             // Stream is empty
             return 0;
@@ -538,6 +550,8 @@ final class RabbitMQScan implements Scan {
             Thread.currentThread().interrupt();
             throw new IllegalStateException(
                     "Interrupted resolving ending timestamp for stream '" + stream + "'", e);
+        } catch (TimestampResolutionTimeoutException e) {
+            throw e;
         } catch (Exception e) {
             LOG.warn("Failed to resolve timestamp end offset for stream '{}': {}",
                     stream, e.getMessage());

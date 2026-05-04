@@ -220,31 +220,31 @@ class RabbitMQScanTest {
         }
 
         @Test
-        void timestampStartPlanningWithoutMatchingRecordFailsByDefault() {
+        void timestampStartPlanningProbeTimeoutFailsRegardlessOfStrategy() {
+            // A probe that never delivers an observed offset is INCONCLUSIVE — the
+            // planner cannot prove no-match and cannot silently fall back to tail or
+            // earliest without risking skipped/over-included records. Both the default
+            // strategy and strategy=latest must fail planning with an actionable error.
             Map<String, String> opts = baseOptions();
             opts.put("startingOffsets", "timestamp");
             opts.put("startingTimestamp", "4102444800000"); // 2100-01-01T00:00:00Z
+            opts.put("pollTimeoutMs", "250");
             RabbitMQScan scan = new RabbitMQScan(new ConnectorOptions(opts), schema());
 
             assertThatThrownBy(() -> resolveStreamOffsetRange(scan,
                     new DelayedProbeEnvironment(0L, new Stats(10L, false, false, 99L)),
                     "s1"))
                     .isInstanceOf(IllegalStateException.class)
-                    .hasMessageContaining("No offset matched");
-        }
+                    .hasMessageContaining("Timed out resolving starting timestamp")
+                    .hasMessageContaining("pollTimeoutMs");
 
-        @Test
-        void timestampStartPlanningWithoutMatchingRecordUsesTailWhenStrategyLatest() {
-            Map<String, String> opts = baseOptions();
-            opts.put("startingOffsets", "timestamp");
-            opts.put("startingTimestamp", "4102444800000"); // 2100-01-01T00:00:00Z
             opts.put("startingOffsetsByTimestampStrategy", "latest");
-            RabbitMQScan scan = new RabbitMQScan(new ConnectorOptions(opts), schema());
-
-            long[] range = resolveStreamOffsetRange(scan,
+            RabbitMQScan scanLatest = new RabbitMQScan(new ConnectorOptions(opts), schema());
+            assertThatThrownBy(() -> resolveStreamOffsetRange(scanLatest,
                     new DelayedProbeEnvironment(0L, new Stats(10L, false, false, 99L)),
-                    "s1");
-            assertThat(range).isNull();
+                    "s1"))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("Timed out resolving starting timestamp");
         }
 
         @Test
@@ -299,6 +299,35 @@ class RabbitMQScanTest {
                 return;
             }
             assertThat(end).isEqualTo(15L);
+        }
+
+        @Test
+        void timestampEndPlanningProbeTimeoutFailsPlanning() throws Exception {
+            // No message arrives at the probe within the budget — INCONCLUSIVE. The
+            // planner must fail rather than fall back to tail (which would over-include
+            // late-published records).
+            long endingTs = 1700000000000L;
+            Map<String, String> opts = baseOptions();
+            opts.put("endingOffsets", "timestamp");
+            opts.put("endingTimestamp", String.valueOf(endingTs));
+            opts.put("pollTimeoutMs", "250");
+            RabbitMQScan scan = new RabbitMQScan(new ConnectorOptions(opts), schema());
+
+            Long end = null;
+            try {
+                end = resolveTimestampEndingOffsetIfSupported(scan,
+                        new DelayedProbeEnvironment(0L, new Stats(0L, false, false, 99L)),
+                        "s1", endingTs);
+            } catch (java.lang.reflect.InvocationTargetException e) {
+                Throwable cause = e.getCause() != null ? e.getCause() : e;
+                assertThat(cause).isInstanceOf(IllegalStateException.class);
+                assertThat(cause.getMessage()).contains("Timed out resolving ending timestamp");
+                return;
+            }
+            // If the resolver method is not exposed reflectively, skip.
+            if (end != null) {
+                throw new AssertionError("Expected probe-timeout failure but got end=" + end);
+            }
         }
 
         @Test

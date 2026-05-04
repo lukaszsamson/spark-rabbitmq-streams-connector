@@ -134,6 +134,14 @@ Type coercion notes:
 - `timestamp` -> `OffsetSpecification.timestamp(epochMillis)` (may return messages before the timestamp)
 - For empty streams and `startingOffsets=latest`, the initial offset is the logical 0 (the next offset once the first message appears).
 
+### Timestamp probe semantics
+- The planner probes the broker with `OffsetSpecification.timestamp(epochMillis)` to resolve a starting or ending offset.
+- The probe budget is bounded by `pollTimeoutMs` (with implementation-defined min/max bounds).
+- Three outcomes are distinguished:
+  - **FOUND**: an offset is observed; planning continues with that offset.
+  - **CONFIRMED_NO_MATCH**: the broker signals via `NoOffsetException` that no offset matches. For starting offsets, `startingOffsetsByTimestampStrategy=latest` may fall back to tail. Default behavior is to fail planning.
+  - **INCONCLUSIVE_TIMEOUT**: the probe budget was exhausted without a result. Planning fails fast with `TimestampResolutionTimeoutException` regardless of strategy. The planner cannot prove no-match, so silently jumping to tail or earliest could skip or over-include records. Increase `pollTimeoutMs` to extend the probe budget.
+
 ### Partitioning and parallelism
 - Streams: one Spark input partition per stream by default.
 - Superstreams: one Spark input partition per partition stream.
