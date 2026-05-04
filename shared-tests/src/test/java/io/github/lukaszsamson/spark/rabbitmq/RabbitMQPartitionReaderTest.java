@@ -877,9 +877,92 @@ class RabbitMQPartitionReaderTest {
             @SuppressWarnings("unchecked")
             BlockingQueue<RabbitMQPartitionReader.QueuedMessage> queue =
                     (BlockingQueue<RabbitMQPartitionReader.QueuedMessage>) getPrivateField(reader, "queue");
-            assertThat(queue).isEmpty();
-            assertThat((long) getPrivateField(reader, "lastObservedOffset")).isEqualTo(4L);
+            // Post-filter drops are now order-preserving via a SkipMarker enqueue;
+            // observed-offset advance happens on the pull side.
+            assertThat(queue).hasSize(1);
+            RabbitMQPartitionReader.QueuedMessage marker = queue.peek();
+            assertThat(marker).isNotNull();
+            assertThat(marker.skipMarker()).isTrue();
+            assertThat(marker.offset()).isEqualTo(4L);
             verify(context, times(1)).processed();
+        }
+
+        @Test
+        void postFilterTailDropDoesNotCauseAcceptedRowToBeSkipped() throws Exception {
+            // GPT3-1 / Stream R3-A regression test: when the post-filter drops the
+            // last in-range offset (endOffset-1), the previously accepted row at
+            // endOffset-2 must still be emitted before the reader completes. The
+            // SkipMarker preserves arrival order on the bridge queue.
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("filterValues", "alpha");
+            opts.put("filterValuePath", "application_properties.region");
+            opts.put("filterWarningOnMismatch", "false");
+            opts.put("pollTimeoutMs", "5");
+            opts.put("maxWaitMs", "20");
+
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 0, 10, new ConnectorOptions(opts));
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
+
+            Message accepted = CODEC.messageBuilder()
+                    .addData("accepted".getBytes())
+                    .applicationProperties().entry("region", "alpha").messageBuilder()
+                    .build();
+            Message rejected = CODEC.messageBuilder()
+                    .addData("rejected".getBytes())
+                    .applicationProperties().entry("region", "beta").messageBuilder()
+                    .build();
+
+            MessageHandler.Context acceptedCtx = mock(MessageHandler.Context.class);
+            when(acceptedCtx.offset()).thenReturn(8L);
+            when(acceptedCtx.timestamp()).thenReturn(0L);
+
+            MessageHandler.Context rejectedCtx = mock(MessageHandler.Context.class);
+            when(rejectedCtx.offset()).thenReturn(9L);
+            when(rejectedCtx.timestamp()).thenReturn(0L);
+
+            // Order matters: accepted arrives first, then a tail-drop.
+            reader.enqueueFromCallback(acceptedCtx, accepted);
+            reader.enqueueFromCallback(rejectedCtx, rejected);
+
+            setPrivateField(reader, "consumer", new NoopConsumer());
+
+            assertThat(reader.next()).isTrue();
+            assertThat(reader.get().getLong(2)).isEqualTo(8L);
+
+            // Next call drains the SkipMarker, advances observed to 9, completes.
+            assertThat(reader.next()).isFalse();
+            assertThat((long) getPrivateField(reader, "lastObservedOffset")).isEqualTo(9L);
+        }
+
+        @Test
+        void advanceObservedNeverRegressesUnderConcurrentWriters() throws Exception {
+            // CLAUDE3-2 regression test: AtomicLong + accumulateAndGet ensures the
+            // monotonic invariant holds when two threads race.
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 0, 1_000_000, minimalOptions());
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
+
+            int iterations = 5_000;
+            Thread ascending = new Thread(() -> {
+                for (long i = 0; i < iterations; i++) {
+                    reader.advanceObserved(i);
+                }
+            });
+            Thread descending = new Thread(() -> {
+                for (long i = iterations - 1; i >= 0; i--) {
+                    reader.advanceObserved(i);
+                }
+            });
+            ascending.start();
+            descending.start();
+            ascending.join();
+            descending.join();
+
+            assertThat((long) getPrivateField(reader, "lastObservedOffset"))
+                    .isEqualTo(iterations - 1L);
         }
 
         @Test
@@ -1825,6 +1908,11 @@ class RabbitMQPartitionReaderTest {
             throws Exception {
         Field field = findField(target.getClass(), fieldName);
         field.setAccessible(true);
+        Object existing = field.get(target);
+        if (existing instanceof java.util.concurrent.atomic.AtomicLong && value instanceof Number) {
+            ((java.util.concurrent.atomic.AtomicLong) existing).set(((Number) value).longValue());
+            return;
+        }
         field.set(target, value);
     }
 
@@ -1832,7 +1920,11 @@ class RabbitMQPartitionReaderTest {
             throws Exception {
         Field field = findField(target.getClass(), fieldName);
         field.setAccessible(true);
-        return field.get(target);
+        Object value = field.get(target);
+        if (value instanceof java.util.concurrent.atomic.AtomicLong) {
+            return ((java.util.concurrent.atomic.AtomicLong) value).get();
+        }
+        return value;
     }
 
     private static Field findField(Class<?> clazz, String fieldName) throws NoSuchFieldException {

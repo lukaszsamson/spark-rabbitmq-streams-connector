@@ -17,6 +17,7 @@ import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -71,7 +72,10 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
     volatile long lastEmittedOffset = -1;
     // Broker chunk delivery can make this temporarily lower than startOffset;
     // reconnect resume clamps observed-only progress back to startOffset.
-    volatile long lastObservedOffset = -1;
+    // AtomicLong because the consumer callback thread (post-filter drop path) and
+    // the Spark task thread both advance this value; non-atomic read-test-write
+    // can lose updates and let a stale value satisfy hasReachedPlannedEnd().
+    AtomicLong lastObservedOffset = new AtomicLong(-1);
     boolean filteredTailReached = false;
     volatile boolean finished = false;
     long lastTailProbeNanos = -1L;
@@ -97,9 +101,25 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
      * A message queued by the consumer callback for pull-based reading.
      * Includes the {@link MessageHandler.Context} so that {@code processed()}
      * can be called on the pull side, tying credit grants to consumption rate.
+     *
+     * <p>{@code skipMarker} entries carry a dropped offset (post-filter reject or
+     * out-of-range) so the pull loop can advance {@code lastObservedOffset} in
+     * arrival order. They MUST NOT be treated as a Spark row and MUST NOT count
+     * toward byte/record budgets. For skip markers, {@code message} and
+     * {@code context} are {@code null}.
      */
     record QueuedMessage(Message message, long offset, long chunkTimestampMillis,
-                         MessageHandler.Context context) {}
+                         MessageHandler.Context context, boolean skipMarker) {
+
+        QueuedMessage(Message message, long offset, long chunkTimestampMillis,
+                      MessageHandler.Context context) {
+            this(message, offset, chunkTimestampMillis, context, false);
+        }
+
+        static QueuedMessage skip(long offset) {
+            return new QueuedMessage(null, offset, 0L, null, true);
+        }
+    }
 
     BaseRabbitMQPartitionReader(RabbitMQInputPartition partition, ConnectorOptions options) {
         this.stream = partition.getStream();
@@ -235,7 +255,7 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
                             } else {
                                 LOG.warn("Reached maxWaitMs={} while reading filtered/timestamp stream '{}'; " +
                                                 "tail indicates planned end reached at lastObservedOffset={} for endOffset={}",
-                                        maxWaitMs, stream, lastObservedOffset, endOffset);
+                                        maxWaitMs, stream, lastObservedOffset.get(), endOffset);
                             }
                             finished = true;
                             return false;
@@ -254,6 +274,14 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
                 continue;
             }
 
+
+            if (qm.skipMarker()) {
+                // Order-preserving post-filter drop: advance observed and continue.
+                // Does not count as a Spark row, does not consume credit
+                // (already granted on the callback side via context.processed()).
+                advanceObserved(qm.offset());
+                continue;
+            }
 
             if (consumerClosed.get()
                     && shouldDetectOffsetGapsAfterConsumerClosure()
@@ -285,9 +313,7 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
             // providing natural backpressure when the pull side is slow.
             qm.context().processed();
 
-            if (qm.offset() > lastObservedOffset) {
-                lastObservedOffset = qm.offset();
-            }
+            advanceObserved(qm.offset());
 
             // Skip messages before start offset (can happen with timestamp-based starting)
             if (qm.offset() < startOffset) {
@@ -687,8 +713,23 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
             return;
         }
         if (shouldDropByPostFilter(message)) {
-            if (context.offset() > lastObservedOffset) {
-                lastObservedOffset = context.offset();
+            // Enqueue an order-preserving skip marker so the pull side can
+            // observe the dropped offset in arrival order. Returning credit
+            // here (callback thread) keeps backflow correct: the marker itself
+            // does not consume credit on the pull side.
+            try {
+                if (!queue.offer(QueuedMessage.skip(context.offset()),
+                        options.getCallbackEnqueueTimeoutMs(), TimeUnit.MILLISECONDS)) {
+                    consumerError.compareAndSet(null,
+                            new IOException("Queue full: timed out enqueuing skip marker " +
+                                    "at offset " + context.offset() +
+                                    " on stream '" + stream + "'"));
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                consumerError.compareAndSet(null,
+                        new IOException("Interrupted while enqueuing skip marker at offset "
+                                + context.offset() + " on stream '" + stream + "'", e));
             }
             context.processed();
             return;
@@ -767,8 +808,9 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
         if (lastEmittedOffset >= 0) {
             return OffsetSpecification.offset(lastEmittedOffset + 1);
         }
-        if (lastObservedOffset >= 0) {
-            return OffsetSpecification.offset(Math.max(startOffset, lastObservedOffset + 1));
+        long observed = lastObservedOffset.get();
+        if (observed >= 0) {
+            return OffsetSpecification.offset(Math.max(startOffset, observed + 1));
         }
         return subscriptionOffsetSpec != null ? subscriptionOffsetSpec : configuredOffsetSpec;
     }
@@ -835,8 +877,14 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
             return true;
         }
         long lastPlannedOffset = endOffset - 1;
+        long observed = lastObservedOffset.get();
         return (lastEmittedOffset >= 0 && lastEmittedOffset >= lastPlannedOffset)
-                || (lastObservedOffset >= 0 && lastObservedOffset >= lastPlannedOffset);
+                || (observed >= 0 && observed >= lastPlannedOffset);
+    }
+
+    /** Monotonically advance lastObservedOffset to {@code offset} if higher. */
+    long advanceObserved(long offset) {
+        return lastObservedOffset.accumulateAndGet(offset, Math::max);
     }
 
     boolean isAtOrBeyondPlannedEnd(long offset) {
@@ -912,10 +960,11 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
     }
 
     long expectedNextObservedOffset() {
-        if (lastObservedOffset < startOffset) {
+        long observed = lastObservedOffset.get();
+        if (observed < startOffset) {
             return startOffset;
         }
-        return lastObservedOffset + 1;
+        return observed + 1;
     }
 
     long resolveStartingTimestampForStream() {
@@ -977,7 +1026,7 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
             StreamStats stats = env.queryStreamStats(stream);
             long first = stats.firstOffset();
             boolean startWasTruncatedBeforeAnyInRangeProgress =
-                    first > startOffset && lastObservedOffset < startOffset;
+                    first > startOffset && lastObservedOffset.get() < startOffset;
             if (startWasTruncatedBeforeAnyInRangeProgress) {
                 return true;
             }
@@ -997,7 +1046,7 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
         if (!hasFinitePlannedEnd() || endOffset <= startOffset) {
             return false;
         }
-        long lastObservedInRange = Math.min(lastObservedOffset, endOffset - 1);
+        long lastObservedInRange = Math.min(lastObservedOffset.get(), endOffset - 1);
         if (lastObservedInRange < startOffset) {
             return false;
         }
