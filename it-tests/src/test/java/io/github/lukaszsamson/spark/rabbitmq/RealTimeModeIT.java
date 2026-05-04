@@ -359,7 +359,7 @@ class RealTimeModeIT extends AbstractRabbitMQIT {
                 .option("stream", sourceStream)
                 .option("startingOffsets", "earliest")
                 .option("consumerName", consumerName)
-                .option("serverSideOffsetTracking", "true")
+                .option("storeBrokerOffsets", "true")
                 .option("metadataFields", "")
                 .option("addressResolverClass",
                         "io.github.lukaszsamson.spark.rabbitmq.TestAddressResolver")
@@ -720,7 +720,7 @@ class RealTimeModeIT extends AbstractRabbitMQIT {
                     // Use earliest to avoid a startup race where the first live message can
                     // be published before the real-time source consumer is fully attached.
                     .option("startingOffsets", "earliest")
-                    .option("serverSideOffsetTracking", "false")
+                    .option("storeBrokerOffsets", "false")
                     .option("metadataFields", "")
                     .option("addressResolverClass",
                             "io.github.lukaszsamson.spark.rabbitmq.TestAddressResolver")
