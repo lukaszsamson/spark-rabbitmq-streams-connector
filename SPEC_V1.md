@@ -192,8 +192,8 @@ Type coercion notes:
 ### Micro-batch planning
 - Use `SupportsAdmissionControl` to apply `ReadLimit`:
   - `maxRecordsPerTrigger` maps to `ReadLimit.maxRows(n)`; distribute evenly across non-empty partition streams, capped by each stream's offset range span.
-  - `maxBytesPerTrigger` maps to `ReadLimit.maxBytes(n)`; convert bytes to record budget using estimated bytes/message, then apply the same even distribution with per-stream caps.
-  - Byte estimation: maintain a running average message size from previous batches; the first batch uses `estimatedMessageSizeBytes` (default 1024).
+  - `maxBytesPerTrigger` maps to `ReadLimit.maxBytes(n)`; convert bytes to record budget using estimated bytes/message, then apply the same even distribution with per-stream caps. The byte cap is best-effort: it relies on a running-average message-size estimator that does not compute exact AMQP wire bytes (nested AMQP values use a small constant fallback), and a positive byte budget that is smaller than the estimated message size still admits at least one record.
+  - Byte estimation: maintain a running average message size from previous batches; the first batch uses `estimatedMessageSizeBytes` (default 1024). Nested AMQP values (`Map`/`List`/other non-scalar types) contribute a small fixed estimate rather than a recursive walk, so estimates are approximate and biased to be conservative.
   - Rounding strategy: allocate even base shares, then distribute remainder deterministically by stream order.
   - `getDefaultReadLimit()` returns `maxRows`, `maxBytes`, composite, or `allAvailable` depending on configured limits.
   - `latestOffset(start, ReadLimit)` dispatch:
@@ -380,7 +380,7 @@ Type coercion notes:
 - `endingTimestamp` (epoch millis >= 0; used when endingOffsets=timestamp)
 - `endingOffsetsByTimestamp` (JSON map stream->epoch millis >= 0; per-stream override when endingOffsets=timestamp)
 - `maxRecordsPerTrigger` (long)
-- `maxBytesPerTrigger` (long, best-effort; uses estimated message size)
+- `maxBytesPerTrigger` (long, best-effort; uses an estimated-message-size running average — approximate, not exact AMQP wire bytes; a positive budget smaller than the estimated message size still admits one record)
 - `minOffsetsPerTrigger` (long)
 - `maxTriggerDelay` (duration > 0; default 15m; max delay when `minOffsetsPerTrigger` is configured)
 - `minPartitions` (int)

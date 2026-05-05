@@ -118,6 +118,13 @@ public final class ReadLimitBudget {
             int estimatedMessageSize,
             long rotation) {
 
+        // A non-positive byte budget should make zero progress. Spark
+        // ReadMaxBytes semantics allow at least one record only when the
+        // budget is positive but smaller than the estimated message size.
+        if (byteBudget <= 0) {
+            return new LinkedHashMap<>(startOffsets);
+        }
+
         long recordBudget = Math.max(1, byteBudget / Math.max(1, estimatedMessageSize));
         return distributeRecordBudget(startOffsets, tailOffsets, recordBudget, rotation);
     }
