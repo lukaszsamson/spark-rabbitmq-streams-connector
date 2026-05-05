@@ -7,7 +7,7 @@ package io.github.lukaszsamson.spark.rabbitmq;
  * could not establish whether a matching offset exists, so silently jumping to
  * tail or earliest could skip or over-include records.
  */
-final class TimestampResolutionTimeoutException extends IllegalStateException {
+public final class TimestampResolutionTimeoutException extends IllegalStateException {
     private static final long serialVersionUID = 1L;
 
     TimestampResolutionTimeoutException(String message) {

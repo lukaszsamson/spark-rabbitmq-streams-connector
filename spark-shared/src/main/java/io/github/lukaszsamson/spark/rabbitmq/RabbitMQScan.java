@@ -507,8 +507,9 @@ final class RabbitMQScan implements Scan {
      * matches the original well-tested behavior on the IT path with broker-assigned
      * chunk timestamps.
      *
-     * <p>If only earlier messages are observed (none at/after the timestamp), all
-     * available data is before the cutoff and the stream tail is returned.
+     * <p>If the probe times out before observing any message at/after the timestamp,
+     * {@link TimestampResolutionTimeoutException} is thrown. The planner cannot prove
+     * all data is before the cutoff, so silently returning tail would over-include records.
      */
     private long resolveTimestampEndingOffset(Environment env, String stream, long timestamp) {
         AtomicLong firstOffsetAtOrAfter = new AtomicLong(-1L);

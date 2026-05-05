@@ -248,6 +248,39 @@ class RabbitMQScanTest {
         }
 
         @Test
+        void timestampStartBrokerConfirmedNoMatchFailsByDefault() {
+            // Broker immediately throws NoOffsetException during consumer open — this is
+            // CONFIRMED_NO_MATCH (not timeout). Default strategy must fail with "No offset matched".
+            Map<String, String> opts = baseOptions();
+            opts.put("startingOffsets", "timestamp");
+            opts.put("startingTimestamp", "1700000000000");
+            RabbitMQScan scan = new RabbitMQScan(new ConnectorOptions(opts), schema());
+            StreamStats stats = new Stats(0L, false, false, 20L);
+
+            assertThatThrownBy(() -> resolveStartOffset(scan,
+                    new ProbeNoOffsetEnvironment(), "s1", 0L, stats))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("No offset matched");
+        }
+
+        @Test
+        void timestampStartBrokerConfirmedNoMatchUsesTailWhenStrategyLatest() throws Exception {
+            // Broker-confirmed no-match (NoOffsetException) + strategy=latest must fall back
+            // to the stream tail — distinct from a timeout which always fails.
+            Map<String, String> opts = baseOptions();
+            opts.put("startingOffsets", "timestamp");
+            opts.put("startingTimestamp", "1700000000000");
+            opts.put("startingOffsetsByTimestampStrategy", "latest");
+            RabbitMQScan scan = new RabbitMQScan(new ConnectorOptions(opts), schema());
+            // committedOffset=20 → resolveTailOffset returns 21; tail probe via
+            // ProbeNoOffsetEnvironment also throws NoOffsetException (caught → 0)
+            StreamStats stats = new Stats(0L, false, false, 20L);
+
+            long start = resolveStartOffset(scan, new ProbeNoOffsetEnvironment(), "s1", 0L, stats);
+            assertThat(start).isEqualTo(21L); // Math.max(firstAvailable=0, tailOffset=21)
+        }
+
+        @Test
         void timestampEndPlanningReturnsFirstOffsetAtOrAfterEndingTimestamp() throws Exception {
             // Single observed message whose per-message creation_time clears the bound.
             // The probe returns its offset as the exclusive end — the message itself is

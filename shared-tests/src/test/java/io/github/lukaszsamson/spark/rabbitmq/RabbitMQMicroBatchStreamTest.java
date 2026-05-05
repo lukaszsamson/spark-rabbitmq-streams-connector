@@ -1186,7 +1186,7 @@ class RabbitMQMicroBatchStreamTest {
             assertThatThrownBy(stream::initialOffset)
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessageContaining("Timed out resolving starting timestamp")
-                    .hasMessageContaining("pollTimeoutMs");
+                    .hasMessageContaining("capped at");
         }
 
         @Test
@@ -1210,6 +1210,54 @@ class RabbitMQMicroBatchStreamTest {
             assertThatThrownBy(stream::initialOffset)
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessageContaining("Timed out resolving starting timestamp");
+        }
+
+        @Test
+        void resolveStartingOffsetTimestampBrokerNoMatchFailsByDefault() throws Exception {
+            // Broker immediately reports NoOffsetException during consumer open — this is
+            // CONFIRMED_NO_MATCH (not timeout). Default strategy must fail with "No offset matched".
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("startingOffsets", "timestamp");
+            opts.put("startingTimestamp", "1700000000000");
+            // Disable server-side offset tracking so the stored-offset lookup path is
+            // skipped and the first consumerBuilder() call is the timestamp probe.
+            opts.put("serverSideOffsetTracking", "false");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            setPrivateField(stream, "environment",
+                    new NoOffsetThenFixedProbeEnvironment(42L));
+
+            assertThatThrownBy(stream::initialOffset)
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("No offset matched");
+        }
+
+        @Test
+        void resolveStartingOffsetTimestampBrokerNoMatchUsesTailWhenStrategyLatest() throws Exception {
+            // Broker-confirmed no-match (NoOffsetException) + strategy=latest must fall back
+            // to the stream tail. Unlike a timeout (INCONCLUSIVE), CONFIRMED_NO_MATCH may
+            // legitimately mean all existing records are before the timestamp, so tail is safe.
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("startingOffsets", "timestamp");
+            opts.put("startingTimestamp", "1700000000000");
+            opts.put("startingOffsetsByTimestampStrategy", "latest");
+            // Disable server-side offset tracking so the stored-offset lookup path is
+            // skipped and the first consumerBuilder() call is the timestamp probe.
+            opts.put("serverSideOffsetTracking", "false");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            // NoOffsetThenFixedProbeEnvironment: 1st consumerBuilder() throws NoOffsetException
+            // (timestamp probe); 2nd consumerBuilder() emits probe offset 42L (tail probe).
+            // Tail = 42 + 1 = 43.
+            setPrivateField(stream, "environment",
+                    new NoOffsetThenFixedProbeEnvironment(42L));
+
+            RabbitMQStreamOffset offset = (RabbitMQStreamOffset) stream.initialOffset();
+            assertThat(offset.getStreamOffsets()).containsEntry("test-stream", 43L);
         }
 
         @Test

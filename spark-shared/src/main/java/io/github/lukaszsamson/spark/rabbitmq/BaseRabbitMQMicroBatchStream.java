@@ -1872,9 +1872,9 @@ class BaseRabbitMQMicroBatchStream
                 throw new TimestampResolutionTimeoutException(
                         "Timed out resolving starting timestamp " + timestamp
                                 + " for stream '" + stream + "' after "
-                                + timestampStartProbeTimeoutMs() + " ms. Increase '"
-                                + ConnectorOptions.POLL_TIMEOUT_MS
-                                + "' to extend the probe budget.");
+                                + timestampStartProbeTimeoutMs() + " ms. "
+                                + "The streaming start-offset probe budget is capped at "
+                                + MAX_TIMESTAMP_START_PROBE_TIMEOUT_MS + " ms.");
             } catch (NoOffsetException e) {
                 return handleTimestampStartNoMatch(env, stream, firstAvailable, timestamp);
             } catch (InterruptedException e) {
