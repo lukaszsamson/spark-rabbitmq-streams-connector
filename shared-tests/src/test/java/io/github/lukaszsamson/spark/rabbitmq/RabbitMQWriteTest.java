@@ -215,6 +215,29 @@ class RabbitMQWriteTest {
         }
 
         @Test
+        void toStreamingFailsFastWhenQueryIdIsBlankAndProducerNameIsSet() {
+            Map<String, String> optsMap = minimalSinkMap();
+            optsMap.put("producerName", "dedup");
+            ConnectorOptions opts = new ConnectorOptions(optsMap);
+
+            for (String blank : new String[]{null, "", "   "}) {
+                Write write = new RabbitMQWriteBuilder(opts, minimalSinkSchema(), blank).build();
+                assertThatThrownBy(write::toStreaming)
+                        .isInstanceOf(IllegalStateException.class)
+                        .hasMessageContaining("queryId")
+                        .hasMessageContaining("producerName");
+            }
+        }
+
+        @Test
+        void toStreamingAllowsBlankQueryIdWhenProducerNameNotSet() {
+            // Without producerName, dedup is disabled and the queryId is irrelevant.
+            ConnectorOptions opts = minimalSinkOptions();
+            Write write = new RabbitMQWriteBuilder(opts, minimalSinkSchema(), null).build();
+            assertThatCode(write::toStreaming).doesNotThrowAnyException();
+        }
+
+        @Test
         void toBatchFailsFastForSuperStreamDedupWithoutPublishingIdColumn() {
             Map<String, String> map = new LinkedHashMap<>();
             map.put("endpoints", "localhost:5552");
@@ -700,7 +723,15 @@ class RabbitMQWriteTest {
             }
 
             assertThat(producer.confirmedMessages()).isEqualTo(5);
-            assertThat(writer.commit()).isInstanceOf(RabbitMQWriterCommitMessage.class);
+            WriterCommitMessage commitMsg = writer.commit();
+            assertThat(commitMsg).isInstanceOf(RabbitMQWriterCommitMessage.class);
+
+            // Regression: GPT3-6. Commit message snapshots reflect post-drain state.
+            RabbitMQWriterCommitMessage rmqMsg = (RabbitMQWriterCommitMessage) commitMsg;
+            assertThat(rmqMsg.getRecordsWritten()).isEqualTo(5L);
+            assertThat(rmqMsg.getPublishConfirms()).isEqualTo(5L);
+            assertThat(rmqMsg.getPublishErrors()).isEqualTo(0L);
+            assertThat(rmqMsg.getConfirmationFailureCount()).isEqualTo(0L);
         }
 
         @Test
@@ -971,7 +1002,7 @@ class RabbitMQWriteTest {
         }
 
         @Test
-        void explicitPublishingIdColumnOverridesAutoPublishingId() throws Exception {
+        void explicitAndAutoPublishingIdSequencesAreIndependent() throws Exception {
             Map<String, String> opts = minimalSinkMap();
             opts.put("producerName", "dedup");
             ConnectorOptions options = new ConnectorOptions(opts);
@@ -985,9 +1016,33 @@ class RabbitMQWriteTest {
             writer.write(new GenericInternalRow(new Object[]{"a".getBytes(), 10L}));
             writer.write(new GenericInternalRow(new Object[]{"b".getBytes(), null}));
 
-            assertThat(producer.publishingIds).containsExactly(10L, 11L);
+            // Explicit id does not advance the auto-seed; auto continues from 6.
+            assertThat(producer.publishingIds).containsExactly(10L, 6L);
             long nextId = (long) getPrivateField(writer, "nextPublishingId");
-            assertThat(nextId).isEqualTo(12L);
+            assertThat(nextId).isEqualTo(7L);
+            long lastExplicit = (long) getPrivateField(writer, "lastExplicitPublishingId");
+            assertThat(lastExplicit).isEqualTo(10L);
+        }
+
+        @Test
+        void freshNamedProducerAcceptsExplicitPublishingIdZero() throws Exception {
+            // Regression: GPT3-5. A fresh named producer reports getLastPublishingId()=0
+            // and seeds nextPublishingId=1, but RabbitMQ allows the user to start
+            // a fresh producer's sequence at 0.
+            Map<String, String> opts = minimalSinkMap();
+            opts.put("producerName", "dedup");
+            ConnectorOptions options = new ConnectorOptions(opts);
+
+            CapturingPublishingIdProducer producer = new CapturingPublishingIdProducer();
+            RabbitMQDataWriter writer = new RabbitMQDataWriter(
+                    options, sinkSchemaWithPublishingId(), 0, 1, -1);
+            setPrivateField(writer, "producer", producer);
+            setPrivateField(writer, "nextPublishingId", 1L);
+
+            writer.write(new GenericInternalRow(new Object[]{"a".getBytes(), 0L}));
+            writer.write(new GenericInternalRow(new Object[]{"b".getBytes(), 1L}));
+
+            assertThat(producer.publishingIds).containsExactly(0L, 1L);
         }
 
         @Test
@@ -996,7 +1051,24 @@ class RabbitMQWriteTest {
             RabbitMQDataWriter writer = new RabbitMQDataWriter(
                     options, sinkSchemaWithPublishingId(), 0, 1, -1);
             setPrivateField(writer, "producer", new NoopProducer());
-            setPrivateField(writer, "nextPublishingId", 11L);
+            // Seed the high-water mark to simulate a prior accepted explicit id.
+            setPrivateField(writer, "lastExplicitPublishingId", 11L);
+
+            // Strict monotonicity: equal id must be rejected.
+            assertThatThrownBy(() -> writer.write(
+                    new GenericInternalRow(new Object[]{"a".getBytes(), 11L})))
+                    .isInstanceOf(IOException.class)
+                    .hasMessageContaining("publishing_id")
+                    .hasMessageContaining("monotonically increasing");
+        }
+
+        @Test
+        void rejectsExplicitPublishingIdBelowHighWaterMark() throws Exception {
+            ConnectorOptions options = minimalSinkOptions();
+            RabbitMQDataWriter writer = new RabbitMQDataWriter(
+                    options, sinkSchemaWithPublishingId(), 0, 1, -1);
+            setPrivateField(writer, "producer", new NoopProducer());
+            setPrivateField(writer, "lastExplicitPublishingId", 11L);
 
             assertThatThrownBy(() -> writer.write(
                     new GenericInternalRow(new Object[]{"a".getBytes(), 5L})))
@@ -1225,6 +1297,44 @@ class RabbitMQWriteTest {
                     .containsEntry("recordsWritten", 1L)
                     .containsEntry("publishConfirms", 0L)
                     .containsEntry("publishErrors", 1L);
+        }
+
+        @Test
+        void lateNegativeConfirmAfterCloseReconcileDoesNotDoubleCount() throws Exception {
+            // Regression: CLAUDE3-14. After the producer-state listener has
+            // reconciled outstanding sends as errors, a late negative
+            // confirmation must not bump confirmation/error counters again.
+            ConnectorOptions options = minimalSinkOptions();
+            RabbitMQDataWriter writer = new RabbitMQDataWriter(
+                    options, minimalSinkSchema(), 0, 1, -1);
+            CapturingProducerBuilder builder = new CapturingProducerBuilder();
+            DeferredConfirmationProducer producer = new DeferredConfirmationProducer();
+            builder.customProducer = producer;
+            seedEnvironmentPool(options, new BuilderEnvironment(builder));
+
+            writer.write(new GenericInternalRow(new Object[]{"x".getBytes()}));
+
+            // Simulate producer CLOSED transition while the confirm is in flight.
+            builder.listener.handle(new FakeStateListenerContext(
+                    com.rabbitmq.stream.Resource.State.OPEN,
+                    com.rabbitmq.stream.Resource.State.CLOSED));
+
+            assertThat(metricsByName(writer.currentMetricsValues()))
+                    .containsEntry("publishConfirms", 0L)
+                    .containsEntry("publishErrors", 1L);
+            long failureCountAfterClose = (long) ((java.util.concurrent.atomic.AtomicLong)
+                    getPrivateField(writer, "confirmationFailureCount")).get();
+
+            // Late negative confirmation arrives after the close-time
+            // reconciliation. It must be dropped silently — no double count.
+            producer.failPending((short) 7);
+
+            assertThat(metricsByName(writer.currentMetricsValues()))
+                    .containsEntry("publishConfirms", 0L)
+                    .containsEntry("publishErrors", 1L);
+            long failureCountAfterLate = (long) ((java.util.concurrent.atomic.AtomicLong)
+                    getPrivateField(writer, "confirmationFailureCount")).get();
+            assertThat(failureCountAfterLate).isEqualTo(failureCountAfterClose);
         }
 
         @Test

@@ -51,14 +51,27 @@ final class RabbitMQBatchWrite implements BatchWrite {
     public void commit(WriterCommitMessage[] messages) {
         long totalRecords = 0;
         long totalBytes = 0;
+        long totalWireBytes = 0;
+        long totalConfirms = 0;
+        long totalErrors = 0;
+        long totalLatencyMs = 0;
+        long totalFailureCount = 0;
         for (WriterCommitMessage msg : messages) {
             if (msg instanceof RabbitMQWriterCommitMessage rmqMsg) {
                 totalRecords += rmqMsg.getRecordsWritten();
                 totalBytes += rmqMsg.getBytesWritten();
+                totalWireBytes += rmqMsg.getEstimatedWireBytesWritten();
+                totalConfirms += rmqMsg.getPublishConfirms();
+                totalErrors += rmqMsg.getPublishErrors();
+                totalLatencyMs += rmqMsg.getWriteLatencyMs();
+                totalFailureCount += rmqMsg.getConfirmationFailureCount();
             }
         }
-        LOG.info("Batch write committed: {} partitions, {} total records, {} total bytes",
-                messages.length, totalRecords, totalBytes);
+        LOG.info("Batch write committed: {} partitions, {} records, {} payload bytes, " +
+                        "{} estimated wire bytes, {} confirms, {} errors, {} ms total latency, " +
+                        "{} confirmation failures",
+                messages.length, totalRecords, totalBytes, totalWireBytes,
+                totalConfirms, totalErrors, totalLatencyMs, totalFailureCount);
     }
 
     @Override

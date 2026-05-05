@@ -61,9 +61,24 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
     private final AtomicBoolean closeCalled = new AtomicBoolean(false);
     private final AtomicReference<SendConfirmTracker> activeSendConfirmTracker =
             new AtomicReference<>();
+    // All trackers with non-zero pending confirms. Producer-state CLOSED and
+    // requested close iterate this set to reconcile outstanding sends as
+    // errors; once reconciled, late confirmation callbacks must NOT
+    // double-count failures.
+    private final java.util.Set<SendConfirmTracker> activeSendConfirmTrackers =
+            java.util.concurrent.ConcurrentHashMap.newKeySet();
 
-    // Deduplication: monotonic publishing ID
+    // Deduplication: monotonic publishing ID for auto-assigned ids (when row's
+    // publishing_id is null). Set to >=0 once the producer is initialized with
+    // a name; remains -1 when dedup is disabled.
     private long nextPublishingId = -1;
+
+    // High-water mark for explicit publishing_id values seen on this writer.
+    // Independent from nextPublishingId so a fresh named producer can accept
+    // explicit publishing_id=0 even though the auto seed would be derived
+    // from getLastPublishingId(). RabbitMQ permits any non-negative monotonic
+    // sequence on a fresh producer.
+    private long lastExplicitPublishingId = -1L;
 
     // Metrics
     private long recordsWritten = 0;
@@ -123,18 +138,14 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
                     throw new IOException(
                             "Column 'publishing_id' must be >= 0, got: " + explicitPublishingId);
                 }
-                if (nextPublishingId >= 0 && explicitPublishingId < nextPublishingId) {
+                if (explicitPublishingId <= lastExplicitPublishingId) {
                     throw new IOException(
-                            "Column 'publishing_id' must be monotonically increasing per writer. " +
-                                    "Expected >= " + nextPublishingId + ", got: " + explicitPublishingId);
+                            "Column 'publishing_id' must be strictly monotonically increasing per " +
+                                    "writer. Expected > " + lastExplicitPublishingId +
+                                    ", got: " + explicitPublishingId);
                 }
                 builder.publishingId(explicitPublishingId);
-                if (nextPublishingId >= 0) {
-                    if (explicitPublishingId == Long.MAX_VALUE) {
-                        throw new IOException("Publishing ID space exhausted (reached Long.MAX_VALUE)");
-                    }
-                    nextPublishingId = explicitPublishingId + 1;
-                }
+                lastExplicitPublishingId = explicitPublishingId;
             } else if (nextPublishingId >= 0) {
                 if (nextPublishingId == Long.MAX_VALUE) {
                     throw new IOException("Publishing ID space exhausted (reached Long.MAX_VALUE)");
@@ -155,6 +166,7 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
             // Track at least one outstanding confirm; superstream routing can fan a
             // logical row out to multiple partition streams.
             SendConfirmTracker sendConfirmTracker = new SendConfirmTracker();
+            activeSendConfirmTrackers.add(sendConfirmTracker);
             outstandingConfirms.incrementAndGet();
             long sendStartNanos = System.nanoTime();
 
@@ -178,12 +190,13 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
                             publishConfirms.incrementAndGet();
                         }
                     } else if (!confirmationStatus.isConfirmed()) {
-                        confirmationFailureCount.incrementAndGet();
-                        lastConfirmationFailureCode.set(confirmationStatus.getCode());
-                        sendError.compareAndSet(null,
-                                new IOException("Message confirmation failed with code " +
-                                        confirmationStatus.getCode() +
-                                        " on partition " + partitionId));
+                        // Late negative confirmation arriving after the tracker was
+                        // already reconciled by close/CLOSED-state path. The
+                        // failure was already counted at reconciliation time;
+                        // log only to avoid double-counting metrics or sendError.
+                        LOG.debug("Late negative confirmation on partition {} after " +
+                                        "tracker reconciliation (code {}); not double-counting",
+                                partitionId, confirmationStatus.getCode());
                     }
                     synchronized (confirmMonitor) {
                         long remaining = outstandingConfirms.get();
@@ -268,11 +281,25 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
                             confirmationFailureSummary(), error);
         }
 
-        LOG.info("Committed partition {} (task {}): {} records, {} bytes",
-                partitionId, taskId, recordsWritten, payloadBytesWritten);
+        // Snapshot final metrics AFTER the confirm wait drains so the commit
+        // message reflects the post-commit state. Spark task-level
+        // currentMetricsValues() is sampled before commit() returns and is a
+        // pre-commit best-effort view.
+        long finalConfirms = publishConfirms.get();
+        long finalErrors = publishErrors.get();
+        long finalLatencyMs = writeLatencyMs.get();
+        long finalFailureCount = confirmationFailureCount.get();
+        long finalLastFailureCode = lastConfirmationFailureCode.get();
+
+        LOG.info("Committed partition {} (task {}): {} records, {} bytes, " +
+                        "{} confirms, {} errors, {} ms latency",
+                partitionId, taskId, recordsWritten, payloadBytesWritten,
+                finalConfirms, finalErrors, finalLatencyMs);
 
         return new RabbitMQWriterCommitMessage(
-                partitionId, taskId, recordsWritten, payloadBytesWritten);
+                partitionId, taskId, recordsWritten, payloadBytesWritten,
+                estimatedWireBytesWritten, finalConfirms, finalErrors,
+                finalLatencyMs, finalFailureCount, finalLastFailureCode);
     }
 
     @Override
@@ -399,7 +426,7 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
                     LOG.warn("Producer for partition {} is recovering ({}->{})",
                             partitionId, from, to);
                 } else if (to == Resource.State.CLOSED) {
-                    long unreconciled = reconcileOutstandingConfirmsAsErrors();
+                    long unreconciled = reconcileAllTrackersPendingAsErrors();
                     if (closeCalled.get()) {
                         if (unreconciled > 0) {
                             LOG.debug("Producer for partition {} closed after requested close " +
@@ -589,8 +616,21 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
         }
     }
 
+    /**
+     * Iterate every active SendConfirmTracker, draining each tracker's pending
+     * confirms as errors and decrementing {@link #outstandingConfirms}.
+     * Idempotent: trackers already reconciled report 0 pending.
+     */
+    private long reconcileAllTrackersPendingAsErrors() {
+        long total = 0;
+        for (SendConfirmTracker tracker : activeSendConfirmTrackers) {
+            total += tracker.reconcilePendingAsErrors();
+        }
+        return total;
+    }
+
     private void reconcileRequestedCloseOutstandingConfirms() {
-        long unreconciled = reconcileOutstandingConfirmsAsErrors();
+        long unreconciled = reconcileAllTrackersPendingAsErrors();
         if (unreconciled > 0) {
             LOG.debug("Producer for partition {} requested close reconciled {} outstanding confirms as errors",
                     partitionId, unreconciled);
@@ -647,11 +687,15 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
             if (!claimPendingConfirm()) {
                 return false;
             }
+            if (pendingConfirms.get() == 0) {
+                activeSendConfirmTrackers.remove(this);
+            }
             return reconcileOutstandingConfirm();
         }
 
         long reconcilePendingAsErrors() {
             long pending = pendingConfirms.getAndSet(0);
+            activeSendConfirmTrackers.remove(this);
             return reconcileOutstandingConfirmsAsErrors(pending);
         }
 
@@ -684,11 +728,13 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
         String derivedName;
         if (epochId >= 0) {
             String queryScope = sanitizeProducerToken(queryId);
-            if (queryScope != null) {
-                derivedName = baseName + "-q" + queryScope + "-p" + partitionId + "-e" + epochId;
-            } else {
-                derivedName = baseName + "-p" + partitionId + "-e" + epochId;
+            if (queryScope == null) {
+                throw new IllegalStateException(
+                        "Streaming deduplication with 'producerName' requires a non-blank Spark " +
+                                "queryId. The derived producer name would otherwise collide " +
+                                "across concurrent queries on the same partition.");
             }
+            derivedName = baseName + "-q" + queryScope + "-p" + partitionId + "-e" + epochId;
         } else {
             // Batch writes may run concurrent task attempts for one partition; include taskId
             // to avoid producer-name collisions (RabbitMQ permits only one live producer/name).

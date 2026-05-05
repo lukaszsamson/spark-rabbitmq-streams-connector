@@ -42,14 +42,27 @@ final class RabbitMQStreamingWrite implements StreamingWrite {
     public void commit(long epochId, WriterCommitMessage[] messages) {
         long totalRecords = 0;
         long totalBytes = 0;
+        long totalWireBytes = 0;
+        long totalConfirms = 0;
+        long totalErrors = 0;
+        long totalLatencyMs = 0;
+        long totalFailureCount = 0;
         for (WriterCommitMessage msg : messages) {
             if (msg instanceof RabbitMQWriterCommitMessage rmqMsg) {
                 totalRecords += rmqMsg.getRecordsWritten();
                 totalBytes += rmqMsg.getBytesWritten();
+                totalWireBytes += rmqMsg.getEstimatedWireBytesWritten();
+                totalConfirms += rmqMsg.getPublishConfirms();
+                totalErrors += rmqMsg.getPublishErrors();
+                totalLatencyMs += rmqMsg.getWriteLatencyMs();
+                totalFailureCount += rmqMsg.getConfirmationFailureCount();
             }
         }
-        LOG.info("Streaming write committed epoch {}: {} partitions, {} total records, {} total bytes",
-                epochId, messages.length, totalRecords, totalBytes);
+        LOG.info("Streaming write committed epoch {}: {} partitions, {} records, {} payload bytes, " +
+                        "{} estimated wire bytes, {} confirms, {} errors, {} ms total latency, " +
+                        "{} confirmation failures",
+                epochId, messages.length, totalRecords, totalBytes, totalWireBytes,
+                totalConfirms, totalErrors, totalLatencyMs, totalFailureCount);
     }
 
     @Override

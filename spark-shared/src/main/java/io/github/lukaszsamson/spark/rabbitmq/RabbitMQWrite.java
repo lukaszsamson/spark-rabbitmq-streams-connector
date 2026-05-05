@@ -20,12 +20,19 @@ final class RabbitMQWrite implements Write {
     private final RabbitMQDataWriterFactory writerFactory;
     private final ConnectorOptions options;
     private final StructType inputSchema;
+    private final String queryId;
 
     RabbitMQWrite(ConnectorOptions options, StructType inputSchema,
                   RabbitMQDataWriterFactory writerFactory) {
+        this(options, inputSchema, writerFactory, null);
+    }
+
+    RabbitMQWrite(ConnectorOptions options, StructType inputSchema,
+                  RabbitMQDataWriterFactory writerFactory, String queryId) {
         this.options = options;
         this.inputSchema = inputSchema;
         this.writerFactory = writerFactory;
+        this.queryId = queryId;
     }
 
     @Override
@@ -45,12 +52,28 @@ final class RabbitMQWrite implements Write {
     @Override
     public StreamingWrite toStreaming() {
         validateStreamingDedupSpeculationCompatibility(options);
+        validateStreamingDedupRequiresQueryId(options, queryId);
         return new RabbitMQStreamingWrite(writerFactory);
     }
 
     @Override
     public CustomMetric[] supportedCustomMetrics() {
         return RabbitMQSinkMetrics.SUPPORTED_METRICS;
+    }
+
+    static void validateStreamingDedupRequiresQueryId(ConnectorOptions options, String queryId) {
+        String producerName = options.getProducerName();
+        if (producerName == null || producerName.isBlank()) {
+            return;
+        }
+        if (queryId == null || queryId.isBlank()) {
+            throw new IllegalStateException(
+                    "Streaming deduplication with 'producerName' requires a non-blank Spark " +
+                            "queryId so the derived per-query producer name is unique across " +
+                            "queries. Spark normally provides this via " +
+                            "writeStream().queryName(...) or a checkpointed StreamingQuery; " +
+                            "verify the query has a stable queryId.");
+        }
     }
 
     static void validateStreamingDedupSpeculationCompatibility(ConnectorOptions options) {
