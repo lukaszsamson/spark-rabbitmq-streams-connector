@@ -699,7 +699,7 @@ class RabbitMQWriteTest {
             RabbitMQDataWriter writer = new RabbitMQDataWriter(
                     options, minimalSinkSchema(), 0, 1, -1);
             setPrivateField(writer, "producer", new NoopProducer());
-            setPrivateField(writer, "nextPublishingId", -1L);
+            // dedupEnabled defaults to false; no seed needed
 
             InternalRow row = new GenericInternalRow(new Object[]{"body".getBytes()});
 
@@ -749,8 +749,8 @@ class RabbitMQWriteTest {
             writer.write(new GenericInternalRow(new Object[]{"x".getBytes()}));
 
             assertThat(builder.name).isEqualTo("dedup-qstream-query-1-p2-e11");
-            long nextId = (long) getPrivateField(writer, "nextPublishingId");
-            assertThat(nextId).isEqualTo(1L);
+            long lastId = (long) getPrivateField(writer, "lastPublishingId");
+            assertThat(lastId).isEqualTo(0L);
         }
 
         @Test
@@ -992,17 +992,21 @@ class RabbitMQWriteTest {
             RabbitMQDataWriter writer = new RabbitMQDataWriter(
                     options, minimalSinkSchema(), 0, 1, -1);
             setPrivateField(writer, "producer", new PublishingIdProducer(5L));
-            setPrivateField(writer, "nextPublishingId", 6L);
+            setPrivateField(writer, "dedupEnabled", true);
+            setPrivateField(writer, "lastPublishingId", 5L);
 
             writer.write(new GenericInternalRow(new Object[]{"a".getBytes()}));
             writer.write(new GenericInternalRow(new Object[]{"b".getBytes()}));
 
-            long nextId = (long) getPrivateField(writer, "nextPublishingId");
-            assertThat(nextId).isEqualTo(8L);
+            long lastId = (long) getPrivateField(writer, "lastPublishingId");
+            assertThat(lastId).isEqualTo(7L);
         }
 
         @Test
-        void explicitAndAutoPublishingIdSequencesAreIndependent() throws Exception {
+        void explicitPublishingIdAdvancesUnifiedHWMForAutoIds() throws Exception {
+            // Regression: after an explicit id advances the HWM, the next auto id
+            // must continue from that HWM, not from a stale seed. Sending 10 then
+            // auto=6 would be non-monotonic and cause broker-side silent drops.
             Map<String, String> opts = minimalSinkMap();
             opts.put("producerName", "dedup");
             ConnectorOptions options = new ConnectorOptions(opts);
@@ -1011,33 +1015,35 @@ class RabbitMQWriteTest {
             RabbitMQDataWriter writer = new RabbitMQDataWriter(
                     options, sinkSchemaWithPublishingId(), 0, 1, -1);
             setPrivateField(writer, "producer", producer);
-            setPrivateField(writer, "nextPublishingId", 6L);
+            setPrivateField(writer, "dedupEnabled", true);
+            setPrivateField(writer, "lastPublishingId", 5L);
 
             writer.write(new GenericInternalRow(new Object[]{"a".getBytes(), 10L}));
             writer.write(new GenericInternalRow(new Object[]{"b".getBytes(), null}));
 
-            // Explicit id does not advance the auto-seed; auto continues from 6.
-            assertThat(producer.publishingIds).containsExactly(10L, 6L);
-            long nextId = (long) getPrivateField(writer, "nextPublishingId");
-            assertThat(nextId).isEqualTo(7L);
-            long lastExplicit = (long) getPrivateField(writer, "lastExplicitPublishingId");
-            assertThat(lastExplicit).isEqualTo(10L);
+            // Explicit id=10 advances the HWM; auto continues from 11, not 6.
+            assertThat(producer.publishingIds).containsExactly(10L, 11L);
+            long lastId = (long) getPrivateField(writer, "lastPublishingId");
+            assertThat(lastId).isEqualTo(11L);
         }
 
         @Test
         void freshNamedProducerAcceptsExplicitPublishingIdZero() throws Exception {
-            // Regression: GPT3-5. A fresh named producer reports getLastPublishingId()=0
-            // and seeds nextPublishingId=1, but RabbitMQ allows the user to start
-            // a fresh producer's sequence at 0.
+            // Regression: GPT3-5. A streaming epoch writer always resets its
+            // lastPublishingId to -1 at epoch start, so explicit publishing_id=0
+            // is a valid first message (0 > -1). Previously the code compared
+            // against the auto-seed (which started at 1 for batch), rejecting 0.
             Map<String, String> opts = minimalSinkMap();
             opts.put("producerName", "dedup");
             ConnectorOptions options = new ConnectorOptions(opts);
 
             CapturingPublishingIdProducer producer = new CapturingPublishingIdProducer();
+            // epochId=0 → streaming writer; lastPublishingId initialized to -1 at epoch start.
             RabbitMQDataWriter writer = new RabbitMQDataWriter(
-                    options, sinkSchemaWithPublishingId(), 0, 1, -1);
+                    options, sinkSchemaWithPublishingId(), 0, 1, 0, "q-1");
             setPrivateField(writer, "producer", producer);
-            setPrivateField(writer, "nextPublishingId", 1L);
+            setPrivateField(writer, "dedupEnabled", true);
+            setPrivateField(writer, "lastPublishingId", -1L);
 
             writer.write(new GenericInternalRow(new Object[]{"a".getBytes(), 0L}));
             writer.write(new GenericInternalRow(new Object[]{"b".getBytes(), 1L}));
@@ -1051,8 +1057,8 @@ class RabbitMQWriteTest {
             RabbitMQDataWriter writer = new RabbitMQDataWriter(
                     options, sinkSchemaWithPublishingId(), 0, 1, -1);
             setPrivateField(writer, "producer", new NoopProducer());
-            // Seed the high-water mark to simulate a prior accepted explicit id.
-            setPrivateField(writer, "lastExplicitPublishingId", 11L);
+            // Seed the unified HWM to simulate a prior accepted id.
+            setPrivateField(writer, "lastPublishingId", 11L);
 
             // Strict monotonicity: equal id must be rejected.
             assertThatThrownBy(() -> writer.write(
@@ -1068,7 +1074,7 @@ class RabbitMQWriteTest {
             RabbitMQDataWriter writer = new RabbitMQDataWriter(
                     options, sinkSchemaWithPublishingId(), 0, 1, -1);
             setPrivateField(writer, "producer", new NoopProducer());
-            setPrivateField(writer, "lastExplicitPublishingId", 11L);
+            setPrivateField(writer, "lastPublishingId", 11L);
 
             assertThatThrownBy(() -> writer.write(
                     new GenericInternalRow(new Object[]{"a".getBytes(), 5L})))

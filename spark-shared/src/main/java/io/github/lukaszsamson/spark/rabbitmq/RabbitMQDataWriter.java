@@ -68,17 +68,16 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
     private final java.util.Set<SendConfirmTracker> activeSendConfirmTrackers =
             java.util.concurrent.ConcurrentHashMap.newKeySet();
 
-    // Deduplication: monotonic publishing ID for auto-assigned ids (when row's
-    // publishing_id is null). Set to >=0 once the producer is initialized with
-    // a name; remains -1 when dedup is disabled.
-    private long nextPublishingId = -1;
+    // Unified high-water mark for all publishing IDs (explicit and auto).
+    // Value -1 means "before first ID, next valid is 0".
+    // For streaming (epochId >= 0): always reset to -1 on init (fresh epoch).
+    // For batch with named producer: set to getLastPublishingId() after init.
+    // When dedup is disabled (no producer name): stays at -1, only updated by
+    // explicit IDs for monotonicity validation.
+    private long lastPublishingId = -1L;
 
-    // High-water mark for explicit publishing_id values seen on this writer.
-    // Independent from nextPublishingId so a fresh named producer can accept
-    // explicit publishing_id=0 even though the auto seed would be derived
-    // from getLastPublishingId(). RabbitMQ permits any non-negative monotonic
-    // sequence on a fresh producer.
-    private long lastExplicitPublishingId = -1L;
+    // True once a named producer has been built and dedup auto-IDs are active.
+    private boolean dedupEnabled = false;
 
     // Metrics
     private long recordsWritten = 0;
@@ -138,19 +137,20 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
                     throw new IOException(
                             "Column 'publishing_id' must be >= 0, got: " + explicitPublishingId);
                 }
-                if (explicitPublishingId <= lastExplicitPublishingId) {
+                if (explicitPublishingId <= lastPublishingId) {
                     throw new IOException(
                             "Column 'publishing_id' must be strictly monotonically increasing per " +
-                                    "writer. Expected > " + lastExplicitPublishingId +
+                                    "writer. Expected > " + lastPublishingId +
                                     ", got: " + explicitPublishingId);
                 }
                 builder.publishingId(explicitPublishingId);
-                lastExplicitPublishingId = explicitPublishingId;
-            } else if (nextPublishingId >= 0) {
-                if (nextPublishingId == Long.MAX_VALUE) {
+                lastPublishingId = explicitPublishingId;
+            } else if (dedupEnabled) {
+                if (lastPublishingId == Long.MAX_VALUE) {
                     throw new IOException("Publishing ID space exhausted (reached Long.MAX_VALUE)");
                 }
-                builder.publishingId(nextPublishingId++);
+                lastPublishingId++;
+                builder.publishingId(lastPublishingId);
             }
             Message message = converter.convert(record, builder);
 
@@ -472,13 +472,19 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
             // Initialize dedup publishing ID
             if (derivedName != null) {
                 long lastId = producer.getLastPublishingId();
-                if (lastId == Long.MAX_VALUE && epochId < 0) {
-                    throw new IllegalStateException(
-                            "Producer '" + derivedName + "' has exhausted publishing ID space");
+                if (epochId >= 0) {
+                    // Streaming: always start fresh at the epoch boundary.
+                    lastPublishingId = -1L;
+                } else {
+                    if (lastId == Long.MAX_VALUE) {
+                        throw new IllegalStateException(
+                                "Producer '" + derivedName + "' has exhausted publishing ID space");
+                    }
+                    lastPublishingId = lastId;
                 }
-                nextPublishingId = epochId >= 0 ? 0L : lastId + 1;
+                dedupEnabled = true;
                 LOG.info("Dedup enabled for partition {} with producer '{}', starting publishingId={}",
-                        partitionId, derivedName, nextPublishingId);
+                        partitionId, derivedName, lastPublishingId + 1);
             }
 
             LOG.info("Initialized producer for partition {} (task {}, epoch {})",
@@ -524,7 +530,8 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
                 environment = null;
             }
         }
-        nextPublishingId = -1L;
+        dedupEnabled = false;
+        lastPublishingId = -1L;
     }
 
     private long effectivePublisherConfirmTimeoutMs() {
@@ -611,8 +618,9 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
         SendConfirmTracker sendConfirmTracker = activeSendConfirmTracker.get();
         if (sendConfirmTracker != null && expectedConfirmCount > 1) {
             long additionalConfirms = expectedConfirmCount - 1L;
-            sendConfirmTracker.addExpectedConfirms(additionalConfirms);
-            outstandingConfirms.addAndGet(additionalConfirms);
+            if (sendConfirmTracker.tryAddExpectedConfirms(additionalConfirms)) {
+                outstandingConfirms.addAndGet(additionalConfirms);
+            }
         }
     }
 
@@ -679,8 +687,17 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
     private final class SendConfirmTracker {
         private final AtomicLong pendingConfirms = new AtomicLong(1);
 
-        void addExpectedConfirms(long additionalConfirms) {
-            pendingConfirms.addAndGet(additionalConfirms);
+        boolean tryAddExpectedConfirms(long additionalConfirms) {
+            while (true) {
+                long current = pendingConfirms.get();
+                if (current <= 0) {
+                    // Already reconciled by close/CLOSED path; do not resurrect.
+                    return false;
+                }
+                if (pendingConfirms.compareAndSet(current, current + additionalConfirms)) {
+                    return true;
+                }
+            }
         }
 
         boolean reconcileConfirmation() {
@@ -722,7 +739,7 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
      */
     private String deriveProducerName() {
         String baseName = options.getProducerName();
-        if (baseName == null || baseName.isEmpty()) {
+        if (baseName == null || baseName.isBlank()) {
             return null;
         }
         String derivedName;
