@@ -711,6 +711,32 @@ class RowToMessageConverterTest {
         }
 
         @Test
+        void mixedCaseRoutingKeyMapEntryDedupedAgainstColumn() {
+            var converter = new RowToMessageConverter(schemaWithAppPropertiesAndRoutingKey());
+            var mapData = createStringMap("Routing_Key", "map-rk", "k1", "v1");
+            InternalRow row = new GenericInternalRow(new Object[]{
+                    "body".getBytes(), mapData, UTF8String.fromString("column-rk")
+            });
+
+            MessageBuilder builder = org.mockito.Mockito.mock(
+                    MessageBuilder.class, org.mockito.Mockito.RETURNS_SELF);
+            MessageBuilder.ApplicationPropertiesBuilder apb = org.mockito.Mockito.mock(
+                    MessageBuilder.ApplicationPropertiesBuilder.class,
+                    org.mockito.Mockito.RETURNS_SELF);
+            org.mockito.Mockito.when(builder.applicationProperties()).thenReturn(apb);
+            org.mockito.Mockito.when(apb.messageBuilder()).thenReturn(builder);
+
+            converter.convert(row, builder);
+
+            // Mixed-case map entry must be dropped — only the explicit column wins.
+            org.mockito.Mockito.verify(apb).entry("routing_key", "column-rk");
+            org.mockito.Mockito.verify(apb).entry("k1", "v1");
+            org.mockito.Mockito.verify(apb, org.mockito.Mockito.never())
+                    .entry(org.mockito.Mockito.eq("Routing_Key"),
+                            org.mockito.Mockito.anyString());
+        }
+
+        @Test
         void convertsMessageAnnotations() {
             var converter = new RowToMessageConverter(schemaWithMsgAnnotations());
             var mapData = createStringMap("ann1", "val1");

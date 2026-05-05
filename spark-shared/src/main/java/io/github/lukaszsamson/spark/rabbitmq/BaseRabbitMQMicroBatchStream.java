@@ -2308,6 +2308,7 @@ class BaseRabbitMQMicroBatchStream
                     env.storeOffset(consumerName, stream, lastProcessed);
                     LOG.debug("Stored offset {} for consumer '{}' on stream '{}'",
                             lastProcessed, consumerName, stream);
+                    streamStatsCache.invalidate(stream);
                 } catch (Exception e) {
                     if (!options.isFailOnDataLoss() && isMissingStreamException(e)) {
                         LOG.debug("Skipping broker offset store for deleted stream '{}' " +

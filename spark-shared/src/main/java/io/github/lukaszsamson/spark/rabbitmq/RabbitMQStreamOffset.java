@@ -85,6 +85,10 @@ public final class RabbitMQStreamOffset extends Offset {
             }
             String stream = unescapeJson(matcher.group(1));
             long offset = Long.parseLong(matcher.group(2));
+            if (offsets.containsKey(stream)) {
+                throw new IllegalArgumentException(
+                        "Duplicate stream key in offset JSON: " + stream);
+            }
             offsets.put(stream, offset);
             position = matcher.end();
 

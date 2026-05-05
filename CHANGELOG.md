@@ -52,3 +52,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `netty.eventLoopGroup`, `netty.byteBufAllocator`, `netty.channelCustomizer`,
   and `netty.bootstrapCustomizer`.
 - Sink schema support for optional `publishing_id` per-row dedup publishing ID override.
+
+### Changed
+- Reject `minOffsetsPerTrigger > maxRecordsPerTrigger` at source validation
+  (Kafka-parity message). Previously the conflict was silently accepted.
+- `RabbitMQStreamOffset.fromJson` now rejects duplicate stream keys instead of
+  silently keeping only the last value.
+- Sink: matching of an `application_properties` `routing_key` map entry against
+  the explicit `routing_key` column is now case-insensitive, so mixed-case
+  variants no longer produce a duplicate wire entry.
+
+### Fixed
+- Broker offset persistence now invalidates the per-stream stats cache after a
+  successful `storeOffset`, so subsequent planning observes the new committed
+  offset instead of a stale cached snapshot.

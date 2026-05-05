@@ -260,7 +260,7 @@ public final class RowToMessageConverter implements Serializable {
             var valueArray = mapData.valueArray();
             for (int i = 0; i < mapData.numElements(); i++) {
                 String key = keyArray.getUTF8String(i).toString();
-                if (routingKey != null && "routing_key".equals(key)) {
+                if (routingKey != null && "routing_key".equalsIgnoreCase(key)) {
                     // Explicit routing_key column wins; skip the map entry to
                     // avoid emitting two routing_key entries on the wire.
                     continue;

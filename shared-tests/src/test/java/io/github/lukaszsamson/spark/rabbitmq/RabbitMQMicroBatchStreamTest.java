@@ -1944,6 +1944,28 @@ class RabbitMQMicroBatchStreamTest {
                     .count();
             assertThat(s1Stores).isEqualTo(2L);
         }
+
+        @Test
+        void persistBrokerOffsetsInvalidatesStreamStatsCache() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            CacheInvalidationOffsetTrackingEnvironment env =
+                    new CacheInvalidationOffsetTrackingEnvironment();
+            setPrivateField(stream, "environment", env);
+
+            StreamStatsCache cache = (StreamStatsCache) getPrivateField(stream, "streamStatsCache");
+            cache.getOrLoad(env, "test-stream");
+            int queriesBeforeCommit = env.queryStatsCalls;
+
+            stream.commit(new RabbitMQStreamOffset(Map.of("test-stream", 10L)));
+
+            cache.getOrLoad(env, "test-stream");
+            assertThat(env.queryStatsCalls).isGreaterThan(queriesBeforeCommit);
+            assertThat(env.recordedOffsets).containsExactly(Map.entry("test-stream", 9L));
+        }
     }
 
     @Nested
@@ -3926,6 +3948,21 @@ class RabbitMQMicroBatchStreamTest {
         public com.rabbitmq.stream.StreamStats queryStreamStats(String stream) {
             queryStatsCalls++;
             throw new UnsupportedOperationException();
+        }
+    }
+
+    private static final class CacheInvalidationOffsetTrackingEnvironment
+            extends OffsetTrackingEnvironment {
+        int queryStatsCalls;
+
+        @Override
+        public com.rabbitmq.stream.StreamStats queryStreamStats(String stream) {
+            queryStatsCalls++;
+            return new com.rabbitmq.stream.StreamStats() {
+                @Override public long firstOffset() { return 0L; }
+                @Override public long committedOffset() { return 0L; }
+                @Override public long committedChunkId() { return 0L; }
+            };
         }
     }
 
