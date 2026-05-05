@@ -70,3 +70,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   tail. Both behaviors could skip or over-include records under operational
   delay. Increase `pollTimeoutMs` to extend the probe budget when a timeout is
   observed.
+- Reject `minOffsetsPerTrigger > maxRecordsPerTrigger` at source validation
+  (Kafka-parity message). Previously the conflict was silently accepted.
+- `RabbitMQStreamOffset.fromJson` now rejects duplicate stream keys instead of
+  silently keeping only the last value.
+- Sink: matching of an `application_properties` `routing_key` map entry against
+  the explicit `routing_key` column is now case-insensitive, so mixed-case
+  variants no longer produce a duplicate wire entry.
+
+### Fixed
+- Broker offset persistence now invalidates the per-stream stats cache after a
+  successful `storeOffset`, so subsequent planning observes the new committed
+  offset instead of a stale cached snapshot.

@@ -159,6 +159,14 @@ class RabbitMQStreamOffsetTest {
             assertThatThrownBy(() -> RabbitMQStreamOffset.fromJson("{\"orders\":42,}"))
                     .isInstanceOf(IllegalArgumentException.class);
         }
+
+        @Test
+        void duplicateStreamKeyThrows() {
+            assertThatThrownBy(() -> RabbitMQStreamOffset.fromJson("{\"orders\":100,\"orders\":200}"))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("Duplicate stream key")
+                    .hasMessageContaining("orders");
+        }
     }
 
     @Nested
