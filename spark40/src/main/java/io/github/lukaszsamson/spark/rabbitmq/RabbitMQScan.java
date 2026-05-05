@@ -413,7 +413,14 @@ final class RabbitMQScan implements Scan {
             if (observed != null) {
                 return Math.max(firstAvailable, observed);
             }
-            return handleTimestampStartNoMatch(env, stream, firstAvailable, stats, timestamp);
+            // Probe budget exhausted without a result. Falling back here would silently
+            // skip or over-include records, so fail planning so the operator can extend
+            // the budget.
+            throw new TimestampResolutionTimeoutException(
+                    "Timed out resolving starting timestamp " + timestamp
+                            + " for stream '" + stream + "' after " + timestampProbeTimeoutMs()
+                            + " ms. Increase '" + ConnectorOptions.POLL_TIMEOUT_MS
+                            + "' to extend the probe budget.");
         } catch (NoOffsetException e) {
             return handleTimestampStartNoMatch(env, stream, firstAvailable, stats, timestamp);
         } catch (InterruptedException e) {
@@ -490,8 +497,9 @@ final class RabbitMQScan implements Scan {
      * matches the original well-tested behavior on the IT path with broker-assigned
      * chunk timestamps.
      *
-     * <p>If only earlier messages are observed (none at/after the timestamp), all
-     * available data is before the cutoff and the stream tail is returned.
+     * <p>If the probe times out before observing any message at/after the timestamp,
+     * {@link TimestampResolutionTimeoutException} is thrown. The planner cannot prove
+     * all data is before the cutoff, so silently returning tail would over-include records.
      */
     private long resolveTimestampEndingOffset(Environment env, String stream, long timestamp) {
         AtomicLong firstOffsetAtOrAfter = new AtomicLong(-1L);
@@ -517,18 +525,23 @@ final class RabbitMQScan implements Scan {
             if (boundaryFound.await(timestampProbeTimeoutMs(), TimeUnit.MILLISECONDS)) {
                 return firstOffsetAtOrAfter.get();
             }
-            // No message with ts >= requested timestamp arrived within the probe budget.
-            // Fall back to tail — all available data is before the cutoff. Use the same
-            // tail resolver as endingOffsets=latest (stats + last-message probe) so a
-            // broker reporting only committedChunkId still produces a tail-inclusive end.
-            StreamStats tailStats = env.queryStreamStats(stream);
-            return resolveLatestOffset(env, stream, tailStats);
+            // Probe budget exhausted without observing a message at or after the
+            // requested timestamp. We cannot prove all data is before the cutoff,
+            // so falling back to tail risks over-including records published after
+            // the bound. Fail planning instead.
+            throw new TimestampResolutionTimeoutException(
+                    "Timed out resolving ending timestamp " + timestamp
+                            + " for stream '" + stream + "' after " + timestampProbeTimeoutMs()
+                            + " ms. Increase '" + ConnectorOptions.POLL_TIMEOUT_MS
+                            + "' to extend the probe budget.");
         } catch (NoOffsetException e) {
             return 0;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new IllegalStateException(
                     "Interrupted resolving ending timestamp for stream '" + stream + "'", e);
+        } catch (TimestampResolutionTimeoutException e) {
+            throw e;
         } catch (Exception e) {
             LOG.warn("Failed to resolve timestamp end offset for stream '{}': {}",
                     stream, e.getMessage());
