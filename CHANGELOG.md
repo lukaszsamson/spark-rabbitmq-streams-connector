@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+### Changed
+- **Breaking:** Broker-stored offsets are no longer used for query recovery. On a fresh start (no Spark checkpoint), the connector resolves initial offsets from configured `startingOffsets` / `startingOffsetsByTimestamp` only, matching Kafka source semantics. Users that previously relied on broker-stored offsets to resume across query restarts must rely on Spark checkpoints (or set `startingOffsets` explicitly).
+- **Breaking (option rename):** `serverSideOffsetTracking` is renamed to `storeBrokerOffsets` and its semantics are clarified as best-effort write-only telemetry. The old name remains accepted as a deprecated alias for one release and emits a warning at parse time.
+
+### Removed
+- Internal `StoredOffsetLookup` helper and its temporary tracking-consumer offset-recovery path.
+
 ### Added
 - Spark DataSource V2 connector for RabbitMQ Streams (`rabbitmq_streams` provider name).
 - Batch read and write support for streams and superstreams.
@@ -15,8 +22,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Sink schema with `value`, optional routing key, AMQP properties, and application properties.
 - Offset handling: `earliest`, `latest`, `offset`, and `timestamp` starting modes.
 - Spark checkpoint integration as source of truth for offsets.
-- Optional server-side offset tracking via RabbitMQ `storeOffset()`.
-- Broker offset recovery on startup (checkpoint > broker > startingOffsets).
+- Optional broker offset telemetry via `storeBrokerOffsets` (write-only).
 - Admission control via `maxRecordsPerTrigger` and `maxBytesPerTrigger`.
 - `Trigger.AvailableNow` support with tail offset snapshot.
 - `minPartitions` for splitting streams into multiple Spark partitions by offset ranges.

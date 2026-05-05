@@ -467,6 +467,54 @@ class ConnectorOptionsTest {
         }
 
         @Test
+        void parsesStoreBrokerOffsets() {
+            var map = minimalStreamOptions();
+            map.put("storeBrokerOffsets", "false");
+            var opts = new ConnectorOptions(map);
+            assertThat(opts.getStoreBrokerOffsets()).isFalse();
+            assertThat(opts.isStoreBrokerOffsets(true)).isFalse();
+            assertThat(opts.isStoreBrokerOffsets(false)).isFalse();
+        }
+
+        @Test
+        void storeBrokerOffsetsDefaultsBasedOnMode() {
+            var opts = new ConnectorOptions(minimalStreamOptions());
+            assertThat(opts.getStoreBrokerOffsets()).isNull();
+            assertThat(opts.isStoreBrokerOffsets(true)).isTrue();
+            assertThat(opts.isStoreBrokerOffsets(false)).isFalse();
+        }
+
+        @Test
+        void serverSideOffsetTrackingIsAcceptedAsDeprecatedAliasForStoreBrokerOffsets() {
+            var map = minimalStreamOptions();
+            map.put("serverSideOffsetTracking", "true");
+            var opts = new ConnectorOptions(map);
+            assertThat(opts.getStoreBrokerOffsets()).isTrue();
+            assertThat(opts.isStoreBrokerOffsets(true)).isTrue();
+            assertThat(opts.isStoreBrokerOffsets(false)).isTrue();
+        }
+
+        @Test
+        void storeBrokerOffsetsTakesPrecedenceWhenBothOptionsSetToSameValue() {
+            var map = minimalStreamOptions();
+            map.put("storeBrokerOffsets", "true");
+            map.put("serverSideOffsetTracking", "true");
+            var opts = new ConnectorOptions(map);
+            assertThat(opts.getStoreBrokerOffsets()).isTrue();
+        }
+
+        @Test
+        void conflictingStoreBrokerOffsetsAndLegacyAliasThrows() {
+            var map = minimalStreamOptions();
+            map.put("storeBrokerOffsets", "true");
+            map.put("serverSideOffsetTracking", "false");
+            assertThatThrownBy(() -> new ConnectorOptions(map))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("storeBrokerOffsets")
+                    .hasMessageContaining("serverSideOffsetTracking");
+        }
+
+        @Test
         void parsesFilterValues() {
             var map = minimalStreamOptions();
             map.put("filterValues", "foo,bar,baz");

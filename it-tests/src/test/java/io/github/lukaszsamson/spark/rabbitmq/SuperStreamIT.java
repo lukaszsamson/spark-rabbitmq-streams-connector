@@ -1610,7 +1610,7 @@ class SuperStreamIT extends AbstractRabbitMQIT {
                 // This scenario validates duplicate handling across partition recreation.
                 // Broker-side offset persistence is orthogonal here and can perturb tail planning
                 // between batches, which makes the test flaky without changing the behavior under test.
-                .option("serverSideOffsetTracking", "false")
+                .option("storeBrokerOffsets", "false")
                 .option("maxRecordsPerTrigger", "8")
                 .option("maxWaitMs", "5000")
                 .option("metadataFields", "")
@@ -1681,7 +1681,7 @@ class SuperStreamIT extends AbstractRabbitMQIT {
                 .option("failOnDataLoss", "false")
                 // Churn validation is about reader progress/duplicates; broker offset storage
                 // can block while a partition is deleted and make this stress test timing-sensitive.
-                .option("serverSideOffsetTracking", "false")
+                .option("storeBrokerOffsets", "false")
                 .option("maxRecordsPerTrigger", "8")
                 .option("maxWaitMs", "5000")
                 .option("metadataFields", "")

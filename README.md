@@ -232,7 +232,7 @@ By default, unrecognized columns cause an error. Set `ignoreUnknownColumns=true`
 | `maxTriggerDelay` | string | 15m | Max delay before processing a micro-batch regardless of `minOffsetsPerTrigger` (must be > 0). Duration format (e.g. `30s`, `5m`, `1h`) |
 | `minPartitions` | int | — | Minimum Spark input partitions (splits streams by offset ranges) |
 | `maxRecordsPerPartition` | long | — | Max records per Spark input partition. Streams with more records are split into smaller partitions. Can be combined with `minPartitions` |
-| `serverSideOffsetTracking` | bool | true (streaming) / false (batch) | Store offsets in RabbitMQ broker on commit |
+| `storeBrokerOffsets` | bool | true (streaming) / false (batch) | Best-effort write-only telemetry: store last-processed offsets in RabbitMQ broker on commit. Stored offsets are **never** used for query recovery (Spark checkpoint is the sole source of truth). Deprecated alias: `serverSideOffsetTracking`. |
 | `singleActiveConsumer` | bool | false | Enable single active consumer (requires `consumerName`) |
 | `pollTimeoutMs` | long | 30000 | Queue poll timeout per pull |
 | `maxWaitMs` | long | 300000 | Max wait before failing a reader task |
@@ -286,12 +286,13 @@ The connector provides at-least-once semantics for both source and sink:
 
 On startup, the connector resolves starting offsets in this order:
 1. **Spark checkpoint** (if present) — always takes precedence
-2. **RabbitMQ stored offset** (if `consumerName` is set and broker has a stored offset)
-3. **`startingOffsets` option** — fallback
+2. **`startingOffsets` / `startingOffsetsByTimestamp` option** — used when no checkpoint exists
 
-### Server-side offset tracking
+Broker-stored offsets (RabbitMQ `storeOffset`) are **never** consulted for query recovery. This matches Kafka source semantics: Spark checkpoint is the sole source of truth and configured `startingOffsets` is honored on a fresh start even when broker offsets exist for the same `consumerName`.
 
-When `serverSideOffsetTracking=true` (default for streaming), the connector stores the last-processed offset in RabbitMQ on each Spark commit via `Environment.storeOffset()`. This is best-effort metadata — Spark checkpoint remains the source of truth.
+### Broker offset telemetry
+
+When `storeBrokerOffsets=true` (default for streaming), the connector stores the last-processed offset in RabbitMQ on each Spark commit via `Environment.storeOffset()`. This is **write-only** observability metadata, useful for monitoring tools (e.g. `rabbitmq-streams`); it does not influence query resume. The previous name `serverSideOffsetTracking` remains accepted as a deprecated alias and will be removed in a future major version.
 
 ### Offset serialization
 

@@ -176,20 +176,14 @@ Type coercion notes:
 - Spark checkpoints are the source of truth.
 - On startup:
   - If a Spark checkpoint exists, use it.
-  - Else, if RabbitMQ offset tracking has an entry for the configured consumer name, use it (handle `NoOffsetException`).
-    - For superstreams, create a temporary named consumer per partition stream with a **tracking-enabled strategy** (manual tracking), call `storedOffset()`, then close it.
-    - For single streams, create a temporary named consumer with a **tracking-enabled strategy** (manual tracking), call `storedOffset()`, then close it.
-    - RabbitMQ client requires tracking-enabled consumers for `storedOffset()`; `noTrackingStrategy()` must not be used for lookup consumers.
-    - If stored offsets cannot be queried:
-      - For auth/config/connection errors, fail fast regardless of `consumerName`.
-      - For tracking-consumer limits or other non-fatal lookup constraints, fail fast when `consumerName` is explicitly set; otherwise fall back to `startingOffsets` with a warning.
-  - Else, use `startingOffsets`.
+  - Else, use `startingOffsets` / `startingOffsetsByTimestamp` to resolve initial offsets per stream.
+  - Broker-stored offsets are never consulted for query recovery. RabbitMQ `storeOffset` writes are write-only telemetry: they may be observed externally (e.g. via `rabbitmq-streams` CLI) but do not influence what Spark reads on resume. Configured `startingOffsets` is honored even when broker offsets exist for the same `consumerName`.
 - During consumption:
   - Use `noTrackingStrategy()` to avoid storing offsets ahead of Spark commits.
 - On commit (`MicroBatchStream.commit`):
   - Persist offsets in Spark checkpoint (required by Spark).
-  - If `serverSideOffsetTracking` is true, store last-processed offsets in RabbitMQ via `Environment.storeOffset(reference, stream, offset)` as best-effort metadata (streams and superstreams).
-  - If `serverSideOffsetTracking` is false, do not write broker offsets.
+  - If `storeBrokerOffsets` is true (default for streaming), store last-processed offsets in RabbitMQ via `Environment.storeOffset(reference, stream, offset)` as best-effort observability metadata (streams and superstreams). This is purely write-only and does not drive recovery.
+  - If `storeBrokerOffsets` is false, do not write broker offsets.
   - Store offsets concurrently across partition streams to avoid commit latency amplification.
   - Consider asynchronous best-effort storage to avoid blocking commit; Spark checkpoint remains the source of truth.
 
@@ -392,7 +386,7 @@ Type coercion notes:
 - `minOffsetsPerTrigger` (long)
 - `maxTriggerDelay` (duration > 0; default 15m; max delay when `minOffsetsPerTrigger` is configured)
 - `minPartitions` (int)
-- `serverSideOffsetTracking` (bool; default true for streaming, false for batch; commit-time storage only, not auto-tracking)
+- `storeBrokerOffsets` (bool; default true for streaming, false for batch; best-effort write-only telemetry — stored offsets are NOT used for query recovery. Deprecated alias: `serverSideOffsetTracking`.)
 - `filterValues` (comma-separated; requires RabbitMQ 3.13+ and broker-side filtering enabled)
 - `filterMatchUnfiltered` (bool; default false)
 - `filterPostFilterClass` (string, optional; connector post-filter interface with full message view)
@@ -445,15 +439,10 @@ Type coercion notes:
   - RabbitMQ storeOffset: `storeOffset("consumer", "orders", 199)` (last processed)
 
 ## Startup offset discovery
-- If no Spark checkpoint exists, attempt to read a stored broker offset for the consumer name.
-- If no broker offset exists (`NoOffsetException`), fall back to `startingOffsets`.
-- `Environment` does not expose a direct `queryOffset()` API; stored offset lookup uses temporary named consumers per stream/partition (startup cost: one consumer create/close per partition stream).
-- Internal client APIs are not used for offset queries (unstable).
-- Stored offset lookup failure classes:
-  - Fatal: auth/config/connection errors (fail fast).
-  - Non-fatal: tracking-consumer limits or bounded-concurrency limits (eligible for fallback when `consumerName` is not explicit).
-  - Timeouts/consumer creation failures are treated as fatal unless explicitly configured as non-fatal.
-- For superstreams with many partitions, stored-offset lookup must be bounded to avoid hitting tracking-consumer limits (50 per connection): perform lookup with a bounded concurrency pool and reuse connections across partition-offset lookup operations; if limits are exceeded, fail fast when `consumerName` is explicit, otherwise fall back to `startingOffsets` with a warning.
+- If a Spark checkpoint exists, it is the sole source of resume offsets.
+- Otherwise, initial offsets are resolved from configured `startingOffsets` / `startingOffsetsByTimestamp`.
+- Broker-stored offsets are **never** read for recovery, even when `consumerName` is set and the broker has a stored offset for it. This matches Kafka source semantics and avoids the operational hazards of dual sources of truth (checkpoint vs. broker) diverging across query restarts.
+- `storeOffset` writes performed during commits are observability metadata only; they may be inspected with the `rabbitmq-streams` CLI but do not influence what Spark reads on the next start.
 
 ## Compatibility and packaging
 - Spark 4.0 and 4.1 DataSource V2 APIs.
@@ -562,7 +551,7 @@ Deliverables:
 Acceptance criteria:
 - `latestOffset(start)` returns `start` when no data
 - Commit updates Spark checkpoint reliably
-- Broker offset tracking behavior matches `serverSideOffsetTracking`
+- Broker offset tracking behavior matches `storeBrokerOffsets` (write-only telemetry; never consulted on resume)
 - Restart scenarios preserve at-least-once semantics in tests
 
 ### Milestone 5: Admission Control, Trigger.AvailableNow, and Metrics

@@ -90,7 +90,7 @@ class StreamingIT extends AbstractRabbitMQIT {
                 .option("endpoints", streamEndpoint())
                 .option("stream", sourceStream)
                 .option("startingOffsets", "earliest")
-                .option("serverSideOffsetTracking", "false")
+                .option("storeBrokerOffsets", "false")
                 .option("metadataFields", "")
                 .option("addressResolverClass",
                         "io.github.lukaszsamson.spark.rabbitmq.TestAddressResolver")
@@ -544,7 +544,7 @@ class StreamingIT extends AbstractRabbitMQIT {
                 .option("endpoints", streamEndpoint())
                 .option("stream", sourceStream)
                 .option("startingOffsets", "earliest")
-                .option("serverSideOffsetTracking", "false")
+                .option("storeBrokerOffsets", "false")
                 .option("metadataFields", "")
                 .option("addressResolverClass",
                         "io.github.lukaszsamson.spark.rabbitmq.TestAddressResolver")
@@ -584,7 +584,7 @@ class StreamingIT extends AbstractRabbitMQIT {
                 .option("endpoints", streamEndpoint())
                 .option("stream", sourceStream)
                 .option("startingOffsets", "earliest")
-                .option("serverSideOffsetTracking", "false")
+                .option("storeBrokerOffsets", "false")
                 .option("metadataFields", "")
                 .option("addressResolverClass",
                         "io.github.lukaszsamson.spark.rabbitmq.TestAddressResolver")
@@ -659,7 +659,7 @@ class StreamingIT extends AbstractRabbitMQIT {
                 .option("stream", sourceStream)
                 .option("startingOffsets", "earliest")
                 .option("consumerName", consumerName)
-                .option("serverSideOffsetTracking", "true")
+                .option("storeBrokerOffsets", "true")
                 .option("metadataFields", "")
                 .option("addressResolverClass",
                         "io.github.lukaszsamson.spark.rabbitmq.TestAddressResolver")
@@ -704,7 +704,7 @@ class StreamingIT extends AbstractRabbitMQIT {
                 .option("stream", sourceStream)
                 .option("startingOffsets", "earliest")
                 .option("consumerName", consumerName)
-                .option("serverSideOffsetTracking", "false")
+                .option("storeBrokerOffsets", "false")
                 .option("metadataFields", "")
                 .option("addressResolverClass",
                         "io.github.lukaszsamson.spark.rabbitmq.TestAddressResolver")
@@ -732,12 +732,12 @@ class StreamingIT extends AbstractRabbitMQIT {
     }
 
     @Test
-    void streamingRecoveryFromBrokerStoredOffsets() throws Exception {
+    void streamingFreshQueryIgnoresBrokerStoredOffsetsAndStartsFromConfiguredOffset() throws Exception {
         String consumerName = "it-recovery-" + System.currentTimeMillis();
         publishMessages(sourceStream, 40);
         Thread.sleep(200);
 
-        // Phase 1: Process all messages with server-side offset tracking
+        // Phase 1: Process all 40 messages with broker offset telemetry enabled
         Path outputDir1 = Files.createTempDirectory("spark-output-phase1-");
 
         StreamingQuery query1 = spark.readStream()
@@ -746,7 +746,7 @@ class StreamingIT extends AbstractRabbitMQIT {
                 .option("stream", sourceStream)
                 .option("startingOffsets", "earliest")
                 .option("consumerName", consumerName)
-                .option("serverSideOffsetTracking", "true")
+                .option("storeBrokerOffsets", "true")
                 .option("metadataFields", "")
                 .option("addressResolverClass",
                         "io.github.lukaszsamson.spark.rabbitmq.TestAddressResolver")
@@ -773,8 +773,9 @@ class StreamingIT extends AbstractRabbitMQIT {
         publishMessages(sourceStream, 20, "phase2-");
         Thread.sleep(200);
 
-        // Phase 3: Start a NEW query (different checkpoint!) with same consumerName
-        // It should recover from broker-stored offsets and only read the new messages
+        // Phase 3: Start a NEW query with a fresh Spark checkpoint.
+        // Broker-stored offsets are write-only telemetry and MUST NOT drive recovery.
+        // The query must start from startingOffsets=earliest and read all 60 messages.
         Path newCheckpointDir = Files.createTempDirectory("spark-checkpoint-recovery-");
         Path outputDir2 = Files.createTempDirectory("spark-output-phase2-");
 
@@ -784,7 +785,7 @@ class StreamingIT extends AbstractRabbitMQIT {
                 .option("stream", sourceStream)
                 .option("startingOffsets", "earliest")
                 .option("consumerName", consumerName)
-                .option("serverSideOffsetTracking", "true")
+                .option("storeBrokerOffsets", "true")
                 .option("metadataFields", "")
                 .option("addressResolverClass",
                         "io.github.lukaszsamson.spark.rabbitmq.TestAddressResolver")
@@ -800,14 +801,9 @@ class StreamingIT extends AbstractRabbitMQIT {
 
         Dataset<Row> phase2Result = spark.read().schema(outputSchema)
                 .parquet(outputDir2.toString());
-        assertThat(phase2Result.count()).isEqualTo(20);
-
-        List<String> phase2Values = phase2Result.collectAsList().stream()
-                .map(row -> new String((byte[]) row.getAs("value")))
-                .toList();
-        assertThat(phase2Values)
-                .as("broker recovery should resume at new data, not re-read phase 1 payloads")
-                .allMatch(value -> value.startsWith("phase2-"));
+        assertThat(phase2Result.count())
+                .as("fresh query ignores broker offsets and reads all messages from startingOffsets=earliest")
+                .isEqualTo(60);
     }
 
     @Test
@@ -1351,12 +1347,12 @@ class StreamingIT extends AbstractRabbitMQIT {
     // ---- IT-ALO-004: broker-offset recovery with exact resume point ----
 
     @Test
-    void streamingRecoveryFromBrokerOffsetsExactResume() throws Exception {
+    void streamingBrokerOffsetIsStoredButNotUsedForFreshQueryRecovery() throws Exception {
         String consumerName = "it-exact-recovery-" + System.currentTimeMillis();
         publishMessages(sourceStream, 60);
         Thread.sleep(200);
 
-        // Phase 1: Read all with server-side tracking
+        // Phase 1: Read all 60 messages with broker offset telemetry enabled
         Path outputDir1 = Files.createTempDirectory("spark-output-exact1-");
 
         StreamingQuery query1 = spark.readStream()
@@ -1365,7 +1361,7 @@ class StreamingIT extends AbstractRabbitMQIT {
                 .option("stream", sourceStream)
                 .option("startingOffsets", "earliest")
                 .option("consumerName", consumerName)
-                .option("serverSideOffsetTracking", "true")
+                .option("storeBrokerOffsets", "true")
                 .option("metadataFields", "")
                 .option("addressResolverClass",
                         "io.github.lukaszsamson.spark.rabbitmq.TestAddressResolver")
@@ -1383,18 +1379,18 @@ class StreamingIT extends AbstractRabbitMQIT {
                 .parquet(outputDir1.toString()).count();
         assertThat(phase1Count).isEqualTo(60);
 
-        // Get the last offset from phase 1
+        // Broker stored offset matches the last processed offset (write-only telemetry works)
         long phase1MaxOffset = spark.read().schema(MINIMAL_OUTPUT_SCHEMA)
                 .parquet(outputDir1.toString())
                 .collectAsList().stream()
                 .mapToLong(row -> row.getAs("offset"))
                 .max().orElse(-1);
-
-        // Broker stored offset should equal last processed offset exactly.
         long storedOffset = queryStoredOffset(consumerName, sourceStream);
         assertThat(storedOffset).isEqualTo(phase1MaxOffset);
 
-        // Phase 2: Publish more, recover from broker offset (new checkpoint)
+        // Phase 2: Publish 40 more messages; start a fresh query (new checkpoint).
+        // The broker-stored offset is telemetry only and must not drive recovery.
+        // startingOffsets=earliest means the fresh query reads ALL 100 messages.
         publishMessages(sourceStream, 40, "phase2-");
         Thread.sleep(200);
 
@@ -1407,7 +1403,7 @@ class StreamingIT extends AbstractRabbitMQIT {
                 .option("stream", sourceStream)
                 .option("startingOffsets", "earliest")
                 .option("consumerName", consumerName)
-                .option("serverSideOffsetTracking", "true")
+                .option("storeBrokerOffsets", "true")
                 .option("metadataFields", "")
                 .option("addressResolverClass",
                         "io.github.lukaszsamson.spark.rabbitmq.TestAddressResolver")
@@ -1421,16 +1417,18 @@ class StreamingIT extends AbstractRabbitMQIT {
 
         query2.awaitTermination(120_000);
 
-        // Should have exactly 40 new messages
         Dataset<Row> phase2Result = spark.read().schema(MINIMAL_OUTPUT_SCHEMA)
                 .parquet(outputDir2.toString());
-        assertThat(phase2Result.count()).isEqualTo(40);
+        assertThat(phase2Result.count())
+                .as("fresh query ignores broker offset and reads all messages from startingOffsets=earliest")
+                .isEqualTo(100);
 
-        // Phase 2 should start after the stored offset (no overlap with phase 1)
         long phase2MinOffset = phase2Result.collectAsList().stream()
                 .mapToLong(row -> row.getAs("offset"))
                 .min().orElse(-1);
-        assertThat(phase2MinOffset).isGreaterThan(storedOffset);
+        assertThat(phase2MinOffset)
+                .as("fresh query starts from offset 0 (earliest), not after the stored broker offset")
+                .isEqualTo(0L);
     }
 
     // ---- IT-ALO-005: derived consumerName fallback path on non-fatal lookup failure ----
@@ -1463,7 +1461,7 @@ class StreamingIT extends AbstractRabbitMQIT {
                 .option("startingOffsets", "earliest")
                 .option("environmentId", envId)
                 .option("pollTimeoutMs", String.valueOf(pollTimeoutMs))
-                .option("serverSideOffsetTracking", "true")
+                .option("storeBrokerOffsets", "true")
                 .option("metadataFields", "")
                 .option("addressResolverClass",
                         "io.github.lukaszsamson.spark.rabbitmq.TestAddressResolver")
@@ -1521,7 +1519,7 @@ class StreamingIT extends AbstractRabbitMQIT {
                 .option("startingOffsets", "earliest")
                 .option("pollTimeoutMs", "300")
                 .option("recoveryBackOffDelayPolicy", "PT1S")
-                .option("serverSideOffsetTracking", "false")
+                .option("storeBrokerOffsets", "false")
                 .option("metadataFields", "")
                 .option("addressResolverClass",
                         "io.github.lukaszsamson.spark.rabbitmq.TestAddressResolver")
@@ -1593,7 +1591,7 @@ class StreamingIT extends AbstractRabbitMQIT {
                 .option("consumerName", consumerName)
                 .option("pollTimeoutMs", "300")
                 .option("recoveryBackOffDelayPolicy", "PT1S")
-                .option("serverSideOffsetTracking", "true")
+                .option("storeBrokerOffsets", "true")
                 .option("metadataFields", "")
                 .option("addressResolverClass",
                         "io.github.lukaszsamson.spark.rabbitmq.TestAddressResolver")
@@ -1630,6 +1628,8 @@ class StreamingIT extends AbstractRabbitMQIT {
         publishMessages(sourceStream, 12, "named-reco-next-");
         Thread.sleep(200);
 
+        // A fresh query (new Spark checkpoint) with startingOffsets=earliest reads ALL messages.
+        // Broker-stored offsets are write-only telemetry and never drive recovery.
         Path resumedOutputDir = Files.createTempDirectory("spark-output-named-retry-resume-");
         Path resumedCheckpoint = Files.createTempDirectory("spark-checkpoint-named-retry-resume-");
         StreamingQuery resumedQuery = spark.readStream()
@@ -1638,7 +1638,7 @@ class StreamingIT extends AbstractRabbitMQIT {
                 .option("stream", sourceStream)
                 .option("startingOffsets", "earliest")
                 .option("consumerName", consumerName)
-                .option("serverSideOffsetTracking", "true")
+                .option("storeBrokerOffsets", "true")
                 .option("metadataFields", "")
                 .option("addressResolverClass",
                         "io.github.lukaszsamson.spark.rabbitmq.TestAddressResolver")
@@ -1654,7 +1654,9 @@ class StreamingIT extends AbstractRabbitMQIT {
         long resumedCount = spark.read().schema(MINIMAL_OUTPUT_SCHEMA)
                 .parquet(resumedOutputDir.toString())
                 .count();
-        assertThat(resumedCount).isEqualTo(12L);
+        assertThat(resumedCount)
+                .as("fresh query ignores broker offset; reads all messages from startingOffsets=earliest")
+                .isEqualTo(2_012L);
 
         EnvironmentPool.getInstance().closeAll();
     }
@@ -1678,7 +1680,7 @@ class StreamingIT extends AbstractRabbitMQIT {
                     .option("endpoints", streamEndpoint())
                     .option("stream", sourceStream)
                     .option("startingOffsets", "earliest")
-                    .option("serverSideOffsetTracking", "true")
+                    .option("storeBrokerOffsets", "true")
                     .option("environmentId", envId)
                     .option("metadataFields", "")
                     .option("addressResolverClass",
@@ -1752,7 +1754,7 @@ class StreamingIT extends AbstractRabbitMQIT {
                 .option("endpoints", streamEndpoint())
                 .option("stream", sourceStream)
                 .option("startingOffsets", "earliest")
-                .option("serverSideOffsetTracking", "false")
+                .option("storeBrokerOffsets", "false")
                 .option("metadataFields", "")
                 .option("addressResolverClass",
                         "io.github.lukaszsamson.spark.rabbitmq.TestAddressResolver")
@@ -1865,7 +1867,7 @@ class StreamingIT extends AbstractRabbitMQIT {
                 .option("stream", sourceStream)
                 .option("startingOffsets", "earliest")
                 .option("consumerName", consumerName)
-                .option("serverSideOffsetTracking", "true")
+                .option("storeBrokerOffsets", "true")
                 .option("metadataFields", "")
                 .option("addressResolverClass",
                         "io.github.lukaszsamson.spark.rabbitmq.TestAddressResolver")
@@ -1904,7 +1906,7 @@ class StreamingIT extends AbstractRabbitMQIT {
                 .option("stream", sourceStream)
                 .option("startingOffsets", "earliest")
                 .option("consumerName", consumerName)
-                .option("serverSideOffsetTracking", "true")
+                .option("storeBrokerOffsets", "true")
                 .option("metadataFields", "")
                 .option("addressResolverClass",
                         "io.github.lukaszsamson.spark.rabbitmq.TestAddressResolver")
@@ -1929,7 +1931,7 @@ class StreamingIT extends AbstractRabbitMQIT {
                 .option("stream", sourceStream)
                 .option("startingOffsets", "earliest")
                 .option("consumerName", consumerName)
-                .option("serverSideOffsetTracking", "true")
+                .option("storeBrokerOffsets", "true")
                 .option("metadataFields", "")
                 .option("addressResolverClass",
                         "io.github.lukaszsamson.spark.rabbitmq.TestAddressResolver")
@@ -2056,7 +2058,7 @@ class StreamingIT extends AbstractRabbitMQIT {
                     .option("endpoints", streamEndpoint())
                     .option("stream", sourceStream)
                     .option("startingOffsets", "earliest")
-                    .option("serverSideOffsetTracking", "false")
+                    .option("storeBrokerOffsets", "false")
                     .option("metadataFields", "")
                     .option("addressResolverClass",
                             "io.github.lukaszsamson.spark.rabbitmq.TestAddressResolver")

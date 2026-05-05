@@ -58,6 +58,12 @@ class BaseRabbitMQMicroBatchStream
 
     static final Logger LOG = LoggerFactory.getLogger(BaseRabbitMQMicroBatchStream.class);
 
+    /**
+     * Maximum concurrency for broker-side helper executors (offset commits, tail
+     * probes). Bounded to keep the broker-side helper load low.
+     */
+    static final int MAX_BROKER_HELPER_PARALLELISM = 20;
+
     /** Timeout for broker offset commit (best-effort, Spark checkpoint is source of truth). */
     static final int COMMIT_TIMEOUT_SECONDS = 30;
     static final long STOP_EXECUTOR_AWAIT_SECONDS = 3L;
@@ -190,7 +196,7 @@ class BaseRabbitMQMicroBatchStream
         }
         return Math.max(1, Math.min(
                 Runtime.getRuntime().availableProcessors(),
-                StoredOffsetLookup.MAX_CONCURRENT_LOOKUPS));
+                MAX_BROKER_HELPER_PARALLELISM));
     }
 
     static int resolveTailQueryExecutorParallelism(ConnectorOptions options) {
@@ -199,30 +205,22 @@ class BaseRabbitMQMicroBatchStream
         }
         return Math.max(1, Math.min(
                 Runtime.getRuntime().availableProcessors(),
-                StoredOffsetLookup.MAX_CONCURRENT_LOOKUPS));
+                MAX_BROKER_HELPER_PARALLELISM));
     }
 
     // ---- SparkDataStream lifecycle ----
 
     @Override
     public Offset initialOffset() {
-        Map<String, Long> availableNowSnapshotView;
         synchronized (mutableStateLock) {
             if (initialOffsets != null) {
                 return new RabbitMQStreamOffset(new LinkedHashMap<>(initialOffsets));
             }
-            availableNowSnapshotView = availableNowSnapshot == null
+            Map<String, Long> availableNowSnapshotView = availableNowSnapshot == null
                     ? null
                     : new LinkedHashMap<>(availableNowSnapshot);
-        }
 
-        List<String> streams = discoverStreams();
-        String consumerName = effectiveConsumerName;
-        boolean consumerNameExplicit = options.getConsumerName() != null
-                && !options.getConsumerName().isEmpty();
-
-        if (!options.isServerSideOffsetTracking(true)) {
-            LOG.debug("Server-side offset tracking disabled, skipping broker offset lookup");
+            List<String> streams = discoverStreams();
             Map<String, Long> offsets = new LinkedHashMap<>();
             for (String stream : streams) {
                 offsets.put(
@@ -230,89 +228,10 @@ class BaseRabbitMQMicroBatchStream
                         resolveInitialOffsetForStream(stream, availableNowSnapshotView));
             }
             this.initialOffsets = new LinkedHashMap<>(offsets);
-            LOG.info("Initial offsets from startingOffsets={}: {}", options.getStartingOffsets(), offsets);
+            LOG.info("Initial offsets from startingOffsets={}: {}",
+                    options.getStartingOffsets(), offsets);
             return new RabbitMQStreamOffset(offsets);
         }
-
-        // 1. Try broker stored offsets if consumerName is set
-        if (consumerName != null && !consumerName.isEmpty()) {
-            try {
-                StoredOffsetLookup.LookupResult result =
-                        StoredOffsetLookup.lookupWithDetails(
-                                getEnvironment(), consumerName, streams);
-
-                Map<String, Long> stored = sanitizeRecoveredStoredOffsets(result.getOffsets());
-
-                if (result.hasFailures()) {
-                    if (consumerNameExplicit) {
-                        // Explicit consumerName means broker-tracked progress is authoritative.
-                        // Any lookup failure, including timeout/interrupt, must not silently
-                        // restart from configured startingOffsets.
-                        throw new IllegalStateException(
-                                "Stored offset lookup failed for consumer '" + consumerName +
-                                        "' on streams: " + result.getFailedStreams() +
-                                        ". Since consumerName is explicitly configured, " +
-                                        "lookup failures are treated as fatal.");
-                    }
-                    LOG.warn("Stored offset lookup had non-fatal failures for {} consumer '{}'"
-                                    + " on streams {}. Falling back to startingOffsets for those streams.",
-                            consumerNameExplicit ? "explicit" : "derived",
-                            consumerName,
-                            result.getFailedStreams());
-                }
-
-                if (!stored.isEmpty()) {
-                    LOG.info("Recovered stored offsets from broker for consumer '{}': {}",
-                            consumerName, stored);
-                    return mergeStoredOffsetsWithStartingOffsets(stored, streams);
-                }
-                LOG.info("No stored offsets found for consumer '{}', falling back to startingOffsets",
-                        consumerName);
-            } catch (IllegalStateException e) {
-                // Fatal error (auth/connection) — fail fast
-                throw e;
-            } catch (Exception e) {
-                if (consumerNameExplicit) {
-                    // Explicit consumerName: fail fast on lookup errors
-                    throw new IllegalStateException(
-                            "Failed to look up stored offsets for consumer '" +
-                                    consumerName + "'", e);
-                }
-                LOG.warn("Failed to look up stored offsets for derived consumer '{}', "
-                                + "falling back to startingOffsets",
-                        consumerName, e);
-            }
-        }
-
-        // 2. Fall back to startingOffsets
-        Map<String, Long> offsets = new LinkedHashMap<>();
-        for (String stream : streams) {
-            offsets.put(
-                    stream,
-                    resolveInitialOffsetForStream(stream, availableNowSnapshotView));
-        }
-        this.initialOffsets = new LinkedHashMap<>(offsets);
-        LOG.info("Initial offsets from startingOffsets={}: {}", options.getStartingOffsets(), offsets);
-        return new RabbitMQStreamOffset(offsets);
-    }
-
-    private RabbitMQStreamOffset mergeStoredOffsetsWithStartingOffsets(
-            Map<String, Long> storedOffsets, List<String> streams) {
-        // Fill in any missing streams with starting offset resolution.
-        Map<String, Long> merged = new LinkedHashMap<>(storedOffsets);
-        Map<String, Long> availableNowSnapshotView;
-        synchronized (mutableStateLock) {
-            availableNowSnapshotView = availableNowSnapshot == null
-                    ? null
-                    : new LinkedHashMap<>(availableNowSnapshot);
-        }
-        for (String stream : streams) {
-            merged.putIfAbsent(
-                    stream,
-                    resolveInitialOffsetForStream(stream, availableNowSnapshotView));
-        }
-        this.initialOffsets = new LinkedHashMap<>(merged);
-        return new RabbitMQStreamOffset(merged);
     }
 
     private long resolveInitialOffsetForStream(
@@ -345,49 +264,6 @@ class BaseRabbitMQMicroBatchStream
         LOG.info("Clamping initial offset for stream '{}' from {} to Trigger.AvailableNow snapshot {}",
                 stream, resolvedOffset, ceiling);
         return ceiling;
-    }
-
-    private Map<String, Long> sanitizeRecoveredStoredOffsets(Map<String, Long> storedOffsets) {
-        if (storedOffsets == null || storedOffsets.isEmpty()) {
-            return Map.of();
-        }
-        Map<String, Long> sanitized = new LinkedHashMap<>();
-        for (Map.Entry<String, Long> entry : storedOffsets.entrySet()) {
-            String stream = entry.getKey();
-            long recoveredNextOffset = entry.getValue();
-            Long firstAvailable;
-            try {
-                firstAvailable = resolveFirstAvailable(stream);
-            } catch (IllegalStateException e) {
-                // Fatal/operational errors from resolveFirstAvailable (auth, missing stream
-                // with failOnDataLoss=true, query failure) must propagate. Only truly
-                // non-fatal exceptions are swallowed below to keep validation best-effort.
-                throw e;
-            } catch (Exception e) {
-                LOG.debug("Failed to validate recovered stored offset for stream '{}': {}",
-                        stream, e.getMessage());
-                firstAvailable = null;
-            }
-            if (firstAvailable != null && recoveredNextOffset < firstAvailable) {
-                if (options.isFailOnDataLoss()) {
-                    throw new IllegalStateException(
-                            "Recovered stored offset " + recoveredNextOffset
-                                    + " for stream '" + stream
-                                    + "' is before first available " + firstAvailable
-                                    + ". Broker-tracked progress was truncated by retention. "
-                                    + "Set failOnDataLoss=false to advance.");
-                }
-                LOG.warn("Broker-tracked progress was truncated by retention for stream '{}': "
-                                + "stored next offset {} is before first available {}. "
-                                + "Falling back to configured startingOffsets={} "
-                                + "(failOnDataLoss=false).",
-                        stream, recoveredNextOffset, firstAvailable,
-                        options.getStartingOffsets());
-                continue;
-            }
-            sanitized.put(stream, recoveredNextOffset);
-        }
-        return sanitized;
     }
 
     @Override
@@ -2285,7 +2161,7 @@ class BaseRabbitMQMicroBatchStream
         if (endOffsets == null || endOffsets.isEmpty()) {
             return;
         }
-        if (!options.isServerSideOffsetTracking(true)) {
+        if (!options.isStoreBrokerOffsets(true)) {
             return;
         }
         String consumerName = effectiveConsumerName;
