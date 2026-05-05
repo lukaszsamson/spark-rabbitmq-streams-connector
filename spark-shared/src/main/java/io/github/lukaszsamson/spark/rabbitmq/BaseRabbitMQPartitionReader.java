@@ -72,9 +72,11 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
     volatile long lastEmittedOffset = -1;
     // Broker chunk delivery can make this temporarily lower than startOffset;
     // reconnect resume clamps observed-only progress back to startOffset.
-    // AtomicLong because the consumer callback thread (post-filter drop path) and
-    // the Spark task thread both advance this value; non-atomic read-test-write
-    // can lose updates and let a stale value satisfy hasReachedPlannedEnd().
+    // AtomicLong so the Spark task thread can safely read the value from
+    // hasReachedPlannedEnd() while advanceObserved() is being called on the
+    // same task thread or (via SkipMarker drain) without a data race.
+    // The consumer callback no longer advances this directly — it enqueues
+    // a SkipMarker, and the task thread advances via advanceObserved().
     AtomicLong lastObservedOffset = new AtomicLong(-1);
     boolean filteredTailReached = false;
     volatile boolean finished = false;
@@ -102,11 +104,14 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
      * Includes the {@link MessageHandler.Context} so that {@code processed()}
      * can be called on the pull side, tying credit grants to consumption rate.
      *
-     * <p>{@code skipMarker} entries carry a dropped offset (post-filter reject or
-     * out-of-range) so the pull loop can advance {@code lastObservedOffset} in
-     * arrival order. They MUST NOT be treated as a Spark row and MUST NOT count
-     * toward byte/record budgets. For skip markers, {@code message} and
-     * {@code context} are {@code null}.
+     * <p>{@code skipMarker} entries are produced when the broker post-filter
+     * drops a message. They carry the dropped offset so the pull loop can
+     * advance {@code lastObservedOffset} in arrival order without treating the
+     * entry as a Spark row or counting it toward byte/record budgets. For skip
+     * markers {@code message} and {@code context} are {@code null}, and credit
+     * is returned on the callback thread via {@code context.processed()} only
+     * after the marker is successfully enqueued (so a failed enqueue leaves
+     * credit unreturned, consistent with the real-message path).
      */
     record QueuedMessage(Message message, long offset, long chunkTimestampMillis,
                          MessageHandler.Context context, boolean skipMarker) {
@@ -714,12 +719,17 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
         }
         if (shouldDropByPostFilter(message)) {
             // Enqueue an order-preserving skip marker so the pull side can
-            // observe the dropped offset in arrival order. Returning credit
-            // here (callback thread) keeps backflow correct: the marker itself
-            // does not consume credit on the pull side.
+            // observe the dropped offset in arrival order. Credit is returned
+            // (context.processed()) only after the marker is successfully
+            // placed so that failed enqueues are consistent with the real-message
+            // path: the consumer is already doomed via consumerError, and
+            // returning credit would let the broker push more messages into a
+            // queue that the task will never drain.
             try {
-                if (!queue.offer(QueuedMessage.skip(context.offset()),
+                if (queue.offer(QueuedMessage.skip(context.offset()),
                         options.getCallbackEnqueueTimeoutMs(), TimeUnit.MILLISECONDS)) {
+                    context.processed();
+                } else {
                     consumerError.compareAndSet(null,
                             new IOException("Queue full: timed out enqueuing skip marker " +
                                     "at offset " + context.offset() +
@@ -731,7 +741,6 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
                         new IOException("Interrupted while enqueuing skip marker at offset "
                                 + context.offset() + " on stream '" + stream + "'", e));
             }
-            context.processed();
             return;
         }
         try {
