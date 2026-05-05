@@ -194,8 +194,8 @@ Type coercion notes:
 ### Micro-batch planning
 - Use `SupportsAdmissionControl` to apply `ReadLimit`:
   - `maxRecordsPerTrigger` maps to `ReadLimit.maxRows(n)`; distribute evenly across non-empty partition streams, capped by each stream's offset range span.
-  - `maxBytesPerTrigger` maps to `ReadLimit.maxBytes(n)`; convert bytes to record budget using estimated bytes/message, then apply the same even distribution with per-stream caps.
-  - Byte estimation: maintain a running average message size from previous batches; the first batch uses `estimatedMessageSizeBytes` (default 1024).
+  - `maxBytesPerTrigger` maps to `ReadLimit.maxBytes(n)`; convert bytes to record budget using estimated bytes/message, then apply the same even distribution with per-stream caps. The byte cap is best-effort: the running-average estimator tracks payload bytes only (not AMQP headers/annotations), and a positive byte budget smaller than the estimated payload size still admits at least one record.
+  - Byte estimation: maintain a running average of payload bytes per message across previous batches; the first batch uses `estimatedMessageSizeBytes` (default 1024). Note: AMQP headers, annotations, and properties are included in the separate `ESTIMATED_WIRE_BYTES_READ` observability metric but do not feed the admission-control estimator.
   - Rounding strategy: allocate even base shares, then distribute remainder deterministically by stream order.
   - `getDefaultReadLimit()` returns `maxRows`, `maxBytes`, composite, or `allAvailable` depending on configured limits.
   - `latestOffset(start, ReadLimit)` dispatch:
@@ -382,7 +382,7 @@ Type coercion notes:
 - `endingTimestamp` (epoch millis >= 0; used when endingOffsets=timestamp)
 - `endingOffsetsByTimestamp` (JSON map stream->epoch millis >= 0; per-stream override when endingOffsets=timestamp)
 - `maxRecordsPerTrigger` (long)
-- `maxBytesPerTrigger` (long, best-effort; uses estimated message size)
+- `maxBytesPerTrigger` (long, best-effort; uses a payload-bytes-per-message running average for budgeting — AMQP headers/annotations are excluded from admission control but included in the `ESTIMATED_WIRE_BYTES_READ` metric; a positive budget smaller than the estimated payload size still admits one record)
 - `minOffsetsPerTrigger` (long)
 - `maxTriggerDelay` (duration > 0; default 15m; max delay when `minOffsetsPerTrigger` is configured)
 - `minPartitions` (int)

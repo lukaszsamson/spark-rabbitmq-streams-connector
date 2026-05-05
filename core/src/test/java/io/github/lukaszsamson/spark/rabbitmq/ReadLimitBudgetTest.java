@@ -125,6 +125,26 @@ class ReadLimitBudgetTest {
                     start, tail, 1, 1024);
             assertThat(result.get("s1")).isGreaterThanOrEqualTo(1L);
         }
+
+        @Test
+        void zeroByteBudgetReturnsStartOffsetsUnchanged() {
+            Map<String, Long> start = Map.of("s1", 10L, "s2", 20L);
+            Map<String, Long> tail = Map.of("s1", 1000L, "s2", 2000L);
+
+            Map<String, Long> result = ReadLimitBudget.distributeByteBudget(
+                    start, tail, 0, 1024);
+            assertThat(result).containsEntry("s1", 10L).containsEntry("s2", 20L);
+        }
+
+        @Test
+        void negativeByteBudgetReturnsStartOffsetsUnchanged() {
+            Map<String, Long> start = Map.of("s1", 10L);
+            Map<String, Long> tail = Map.of("s1", 1000L);
+
+            Map<String, Long> result = ReadLimitBudget.distributeByteBudget(
+                    start, tail, -42, 1024);
+            assertThat(result).containsEntry("s1", 10L);
+        }
     }
 
     @Nested

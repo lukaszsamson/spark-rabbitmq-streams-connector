@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -64,6 +65,42 @@ class MessageSizeEstimatorTest {
 
         long expected = utf8Bytes("group_sequence") + utf8Bytes("0");
         assertThat(MessageSizeEstimator.estimatedWireBytes(message)).isEqualTo(expected);
+    }
+
+    @Test
+    void nestedAmqpValuesUseConstantFallbackInsteadOfToString() {
+        Message message = mock(Message.class);
+        Properties properties = mock(Properties.class);
+
+        // Build a nested value whose toString() would otherwise dominate the
+        // estimate. The estimator must use a small constant fallback instead.
+        StringBuilder big = new StringBuilder();
+        for (int i = 0; i < 4096; i++) {
+            big.append('x');
+        }
+        Map<String, Object> nestedMap = Map.of("inner", big.toString());
+        List<Object> nestedList = List.of(big.toString(), big.toString());
+
+        Map<String, Object> appProps = new LinkedHashMap<>();
+        appProps.put("m", nestedMap);
+        appProps.put("l", nestedList);
+        // Numeric and boolean values still contribute their textual size so
+        // existing telemetry is unaffected.
+        appProps.put("n", 12345L);
+        appProps.put("b", Boolean.TRUE);
+
+        when(message.getBodyAsBinary()).thenReturn(null);
+        when(message.getApplicationProperties()).thenReturn(appProps);
+        when(message.getMessageAnnotations()).thenReturn(Map.of());
+        when(message.getProperties()).thenReturn(properties);
+        when(properties.getGroupSequence()).thenReturn(-1L);
+
+        long estimate = MessageSizeEstimator.estimatedWireBytes(message);
+
+        // Two nested-value fallbacks (16 bytes each) + scalar values, far less
+        // than the ~12k bytes a toString() walk would have produced.
+        assertThat(estimate).isLessThan(512L);
+        assertThat(estimate).isGreaterThan(0L);
     }
 
     @Test

@@ -68,6 +68,14 @@ final class MessageSizeEstimator {
         return utf8Size(key) + objectSize(value);
     }
 
+    // Conservative fixed estimate for non-string, non-byte[], non-numeric values
+    // (Maps, Lists, nested AMQP types). Avoids materializing toString() on
+    // potentially large structures. Used only in estimatedWireBytes(), which
+    // feeds the ESTIMATED_WIRE_BYTES_READ observability metric — not the
+    // payload-bytes running average that drives maxBytesPerTrigger admission
+    // control.
+    private static final long NESTED_VALUE_FALLBACK_BYTES = 16L;
+
     private static long objectSize(Object value) {
         if (value == null) {
             return 0L;
@@ -75,7 +83,13 @@ final class MessageSizeEstimator {
         if (value instanceof byte[] bytes) {
             return bytes.length;
         }
-        return utf8Size(value.toString());
+        if (value instanceof CharSequence cs) {
+            return utf8Size(cs.toString());
+        }
+        if (value instanceof Number || value instanceof Boolean || value instanceof Character) {
+            return utf8Size(value.toString());
+        }
+        return NESTED_VALUE_FALLBACK_BYTES;
     }
 
     private static int utf8Size(String value) {
