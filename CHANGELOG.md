@@ -54,6 +54,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Sink schema support for optional `publishing_id` per-row dedup publishing ID override.
 
 ### Changed
+- Timestamp probe semantics on planning now distinguish broker-confirmed no-match from
+  probe-budget exhaustion. A timed-out probe fails planning with
+  `TimestampResolutionTimeoutException` for both `startingOffsets=timestamp` and
+  `endingOffsets=timestamp`, regardless of `startingOffsetsByTimestampStrategy`.
+  **Breaking**: previously, a probe timeout was treated as confirmed no-match —
+  with `startingOffsetsByTimestampStrategy=latest` the start would silently jump
+  to tail, and `endingOffsets=timestamp` would silently fall back to the stream
+  tail. Both behaviors could skip or over-include records under operational
+  delay. Increase `pollTimeoutMs` to extend the probe budget when a timeout is
+  observed.
 - Reject `minOffsetsPerTrigger > maxRecordsPerTrigger` at source validation
   (Kafka-parity message). Previously the conflict was silently accepted.
 - `RabbitMQStreamOffset.fromJson` now rejects duplicate stream keys instead of

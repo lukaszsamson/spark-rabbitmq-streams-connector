@@ -92,13 +92,22 @@ class RabbitMQPartitionReaderRealTimeCloseTest {
     private static Object getPrivateField(Object target, String fieldName) throws Exception {
         Field field = findField(target.getClass(), fieldName);
         field.setAccessible(true);
-        return field.get(target);
+        Object value = field.get(target);
+        if (value instanceof java.util.concurrent.atomic.AtomicLong) {
+            return ((java.util.concurrent.atomic.AtomicLong) value).get();
+        }
+        return value;
     }
 
     private static void setPrivateField(Object target, String fieldName, Object value)
             throws Exception {
         Field field = findField(target.getClass(), fieldName);
         field.setAccessible(true);
+        Object existing = field.get(target);
+        if (existing instanceof java.util.concurrent.atomic.AtomicLong && value instanceof Number) {
+            ((java.util.concurrent.atomic.AtomicLong) existing).set(((Number) value).longValue());
+            return;
+        }
         field.set(target, value);
     }
 

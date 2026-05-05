@@ -26,8 +26,10 @@ final class RabbitMQPartitionReader extends BaseRabbitMQPartitionReader
 
     @Override
     public PartitionOffset getOffset() {
-        long nextFromEmitted = lastEmittedOffset >= 0 ? lastEmittedOffset + 1 : startOffset;
-        long nextFromObserved = lastObservedOffset >= 0 ? lastObservedOffset + 1 : startOffset;
+        long emitted = lastEmittedOffset;
+        long observed = lastObservedOffset.get();
+        long nextFromEmitted = emitted >= 0 ? emitted + 1 : startOffset;
+        long nextFromObserved = observed >= 0 ? observed + 1 : startOffset;
         long nextOffset = Math.max(nextFromEmitted, nextFromObserved);
         return new RabbitMQPartitionOffset(stream, nextOffset);
     }
@@ -158,12 +160,16 @@ final class RabbitMQPartitionReader extends BaseRabbitMQPartitionReader
                 return RecordStatus.newStatusWithoutArrivalTime(false);
             }
 
+            if (qm.skipMarker()) {
+                // Order-preserving post-filter drop: advance observed and continue.
+                advanceObserved(qm.offset());
+                continue;
+            }
+
             // Credit flow: notify that this message has been consumed.
             qm.context().processed();
 
-            if (qm.offset() > lastObservedOffset) {
-                lastObservedOffset = qm.offset();
-            }
+            advanceObserved(qm.offset());
 
             // Skip messages before start offset
             if (qm.offset() < startOffset) {
