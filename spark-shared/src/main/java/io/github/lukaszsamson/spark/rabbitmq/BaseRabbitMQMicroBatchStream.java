@@ -60,7 +60,7 @@ class BaseRabbitMQMicroBatchStream
 
     /**
      * Maximum concurrency for broker-side helper executors (offset commits, tail
-     * probes). Bounded to keep the broker tracking-consumer load low.
+     * probes). Bounded to keep the broker-side helper load low.
      */
     static final int MAX_BROKER_HELPER_PARALLELISM = 20;
 
