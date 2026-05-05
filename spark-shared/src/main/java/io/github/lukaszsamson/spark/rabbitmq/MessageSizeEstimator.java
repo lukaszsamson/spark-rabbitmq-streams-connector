@@ -70,9 +70,10 @@ final class MessageSizeEstimator {
 
     // Conservative fixed estimate for non-string, non-byte[], non-numeric values
     // (Maps, Lists, nested AMQP types). Avoids materializing toString() on
-    // potentially large structures and instead biases the running average
-    // upward by a small constant. Recursive AMQP-accurate sizing is out of
-    // scope for the running-average estimator.
+    // potentially large structures. Used only in estimatedWireBytes(), which
+    // feeds the ESTIMATED_WIRE_BYTES_READ observability metric — not the
+    // payload-bytes running average that drives maxBytesPerTrigger admission
+    // control.
     private static final long NESTED_VALUE_FALLBACK_BYTES = 16L;
 
     private static long objectSize(Object value) {
