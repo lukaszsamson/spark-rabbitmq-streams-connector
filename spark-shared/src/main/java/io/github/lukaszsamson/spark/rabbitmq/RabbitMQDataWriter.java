@@ -480,7 +480,11 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
                         throw new IllegalStateException(
                                 "Producer '" + derivedName + "' has exhausted publishing ID space");
                     }
-                    lastPublishingId = lastId;
+                    // Stream protocol returns 0 for both "no prior publishes" and
+                    // "last published id was 0" — indistinguishable. Treat 0 as "fresh"
+                    // so an explicit publishing_id=0 is admitted on a new sequence; any
+                    // genuine duplicate of id 0 is still rejected by broker-side dedup.
+                    lastPublishingId = (lastId == 0L) ? -1L : lastId;
                 }
                 dedupEnabled = true;
                 LOG.info("Dedup enabled for partition {} with producer '{}', starting publishingId={}",
