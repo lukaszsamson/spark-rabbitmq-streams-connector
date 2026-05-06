@@ -1824,22 +1824,18 @@ class BaseRabbitMQMicroBatchStream
                     "Failed to query stream stats for '" + stream + "'", e);
         }
 
-        // SPEC: per-trigger tail resolution must be stats-only — no probe consumers
-        // in the latestOffset planning path. We may still consume a probe value
-        // previously cached by AvailableNow snapshotting or data-loss refresh,
-        // since reading the cache does not open a broker connection.
+        // Prefer the exact last-message probe when it succeeds. Stats can lag fresh
+        // publishes or overshoot after recreation, so use them only as fallback.
         long statsTail = resolveTailOffset(stats);
-        long cachedProbe = 0L;
-        CachedTailProbe cached = latestTailProbeCache.get(stream);
-        if (cached != null && System.nanoTime() < cached.expiresAtNanos()) {
-            cachedProbe = cached.tailExclusive();
-        }
-        long resolved = Math.max(statsTail, cachedProbe);
+        long probedTail = probeTailOffsetForLatestWithCache(env, stream);
+        long resolved = probedTail > 0L ? probedTail : statsTail;
 
-        if (resolved == 0L && latestStartedOnEmptyStreams.contains(stream)) {
+        if (probedTail == 0L && latestStartedOnEmptyStreams.contains(stream)) {
             try {
                 long firstAvailable = stats.firstOffset();
-                resolved = Math.max(resolved, firstAvailable + 1L);
+                resolved = Math.max(
+                        resolved,
+                        Math.max(statsTail, firstAvailable + 1L));
             } catch (NoOffsetException e) {
                 return 0L;
             } catch (RuntimeException e) {
