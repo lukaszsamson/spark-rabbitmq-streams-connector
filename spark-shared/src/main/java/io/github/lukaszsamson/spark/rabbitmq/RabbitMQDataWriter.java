@@ -482,8 +482,11 @@ final class RabbitMQDataWriter implements DataWriter<InternalRow> {
                     }
                     // Stream protocol returns 0 for both "no prior publishes" and
                     // "last published id was 0" — indistinguishable. Treat 0 as "fresh"
-                    // so an explicit publishing_id=0 is admitted on a new sequence; any
-                    // genuine duplicate of id 0 is still rejected by broker-side dedup.
+                    // so an explicit publishing_id=0 is admitted on a new sequence.
+                    // If the prior session actually had used id 0, broker-side
+                    // deduplication will suppress the resend (likely silently — the
+                    // producer may still observe a positive confirmation but the
+                    // message will not be stored), preserving exactly-once intent.
                     lastPublishingId = (lastId == 0L) ? -1L : lastId;
                 }
                 dedupEnabled = true;
