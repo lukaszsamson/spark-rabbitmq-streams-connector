@@ -1052,6 +1052,71 @@ class RabbitMQWriteTest {
         }
 
         @Test
+        void initProducerSeedsBatchNamedProducerToFreshWhenBrokerReturnsZero() throws Exception {
+            // Regression: GPT3-5. For batch (epochId < 0) named producers, the broker's
+            // queryPublisherSequence() returns 0 for a brand-new producer sequence
+            // (no prior publishing_id stored). The previous code seeded
+            // lastPublishingId = 0, which then rejected an explicit publishing_id=0
+            // row via the strict-monotonic check (0 <= 0). After the fix, a returned
+            // lastId == 0 is treated as "fresh sequence" (lastPublishingId = -1L),
+            // so publishing_id=0 is admitted as the first id of a new sequence.
+            //
+            // This test exercises the real initProducer() path so the seeding logic
+            // itself is covered, not just post-init state.
+            Map<String, String> opts = minimalSinkMap();
+            opts.put("producerName", "dedup");
+            ConnectorOptions options = new ConnectorOptions(opts);
+
+            CapturingPublishingIdProducer producer = new CapturingPublishingIdProducer();
+            CapturingProducerBuilder builder = new CapturingProducerBuilder();
+            builder.customProducer = producer;
+            seedEnvironmentPool(options, new BuilderEnvironment(builder));
+
+            // epochId = -1 → batch writer; initProducer reads getLastPublishingId()
+            // from the (fake) broker (returns 0) and must seed lastPublishingId = -1L.
+            RabbitMQDataWriter writer = new RabbitMQDataWriter(
+                    options, sinkSchemaWithPublishingId(), 0, 1, -1);
+
+            writer.write(new GenericInternalRow(new Object[]{"a".getBytes(), 0L}));
+            writer.write(new GenericInternalRow(new Object[]{"b".getBytes(), 1L}));
+
+            assertThat(producer.publishingIds).containsExactly(0L, 1L);
+            long lastId = (long) getPrivateField(writer, "lastPublishingId");
+            assertThat(lastId).isEqualTo(1L);
+        }
+
+        @Test
+        void initProducerSeedsBatchNamedProducerToResumeWhenBrokerReturnsPositive()
+                throws Exception {
+            // Companion to the above: when the broker reports a positive prior id
+            // (e.g. resuming after a previous successful run), batch writers must
+            // resume from that id, NOT reset to -1. publishing_id=42 is rejected
+            // because lastPublishingId is seeded to 100; publishing_id=101 succeeds.
+            Map<String, String> opts = minimalSinkMap();
+            opts.put("producerName", "dedup");
+            ConnectorOptions options = new ConnectorOptions(opts);
+
+            // PublishingIdProducer reports the seeded lastId via getLastPublishingId().
+            PublishingIdProducer producer = new PublishingIdProducer(100L);
+            CapturingProducerBuilder builder = new CapturingProducerBuilder();
+            builder.customProducer = producer;
+            seedEnvironmentPool(options, new BuilderEnvironment(builder));
+
+            RabbitMQDataWriter writer = new RabbitMQDataWriter(
+                    options, sinkSchemaWithPublishingId(), 0, 1, -1);
+
+            // Triggers initProducer(), which seeds lastPublishingId = 100.
+            assertThatThrownBy(() -> writer.write(
+                    new GenericInternalRow(new Object[]{"a".getBytes(), 42L})))
+                    .isInstanceOf(IOException.class)
+                    .hasMessageContaining("publishing_id")
+                    .hasMessageContaining("monotonically increasing");
+
+            long lastId = (long) getPrivateField(writer, "lastPublishingId");
+            assertThat(lastId).isEqualTo(100L);
+        }
+
+        @Test
         void rejectsNonMonotonicExplicitPublishingId() throws Exception {
             ConnectorOptions options = minimalSinkOptions();
             RabbitMQDataWriter writer = new RabbitMQDataWriter(
