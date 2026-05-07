@@ -204,19 +204,18 @@ Type coercion notes:
     - `ReadMaxBytes`: apply even byte-derived record budget with per-stream caps.
     - `CompositeReadLimit`: apply the most restrictive of its components.
     - Unknown types: treat as `ReadAllAvailable`.
-- `latestOffset()` uses broker stats:
-  - Prefer `StreamStats.committedOffset()` when available (RabbitMQ 4.3+).
-  - Fallback to `StreamStats.committedChunkId()` (approximate, conservative lower bound) for RabbitMQ 4.0/4.1.
-  - Do not create temporary probe consumers in per-trigger planning (`latestOffset`).
-    Per-trigger tail resolution must be stats-only (`queryStreamStats`) to avoid broker churn.
+- `latestOffset()` resolves the tail using both broker stats and a last-message probe consumer:
+  - Query `StreamStats` and prefer `StreamStats.committedOffset()` when available (RabbitMQ 4.3+).
+  - Fallback to `StreamStats.committedChunkId()` (chunk-start, conservative lower bound) for RabbitMQ 4.0/4.1.
+  - Also probe the stream tail by attaching a short-lived consumer at `OffsetSpecification.last()` and recording the highest message offset observed. The probe is required because broker `committed_offset` lags fresh publishes in practice (osiris commits in chunks and updates the stats counter on chunk seal/commit, not on append), so a stats-only path causes readers to miss data that is already published. Per-stream probe results are cached for `tailProbeCacheMs` (default 1000 ms) to bound broker churn under rapid trigger cadence; AvailableNow snapshotting and data-loss refresh seed the same cache.
+  - Resolution: when the probe observes a message, use `probedTail = lastObservedOffset + 1` (probe wins, even when it is *below* `statsTail` — this protects against stats overshooting after a stream is deleted and recreated, where stats may briefly report stale values from before the recreation). When the probe finds no message, fall back to `statsTail`. Never regress below `startOffset`.
   - If `StreamStats` throws `NoOffsetException` (empty stream), return `startOffset` (no new data).
   - For tail-stat query failures that are not explicit data-loss/topology cases (e.g. auth/TLS/connectivity/protocol), fail fast even when `failOnDataLoss=false`.
   - If no partition has new data beyond `startOffset`, return `startOffset` to skip the trigger.
-- For `endingOffsets=latest`, use the chosen tail approximation; note potential staleness.
+- For `endingOffsets=latest`, use the resolved tail; note potential staleness within the cache window.
 - For batch reads, `endingOffsets=latest` is resolved once during `Scan.toBatch()` and remains fixed for the batch execution.
 ### Trigger.AvailableNow
-- `prepareForTriggerAvailableNow()` snapshots tail offsets for each partition stream using `StreamStats` only and fixes them as the query target.
-- Do not create temporary probe consumers during AvailableNow snapshotting.
+- `prepareForTriggerAvailableNow()` snapshots tail offsets for each partition stream using the same probe-wins-with-stats-fallback resolution as `latestOffset()` and fixes them as the query target. The probe is required for the same reason as in `latestOffset()`: stats lag fresh publishes, and an AvailableNow snapshot taken from stats alone would terminate before consuming data that was already published when the trigger fired. The probe result is seeded into the per-stream `latestTailProbeCache` so subsequent `latestOffset()` calls within the same trigger window can reuse it without a second consumer attach.
 - Subsequent `latestOffset()` calls must not exceed the snapshot even if new data arrives.
 - The query processes all data up to the snapshot and then terminates.
 - Handle empty streams (`NoOffsetException`) by recording no data for that partition.
