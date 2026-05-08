@@ -124,6 +124,9 @@ class Bugs4ReproTest {
             // resolver makes is the prove-absence probe (OffsetSpec.last()). Its
             // callback receives offset=42 with chunk_ts < endingTs → resolver returns
             // 42 + 1 = 43 without ever invoking the regular timestamp probe.
+            // Note: proveAllBeforeCutoff uses context.timestamp() (chunk-level,
+            // server-assigned) — not per-message creation_time — so a publisher
+            // cannot spoof absence by backdating creation_time (P2 fix).
             RetryProbeEnvironment env = new RetryProbeEnvironment(
                     new Stats(0L, false, false, 99L),
                     /* deliverOnAttempt= */ 1,
@@ -481,9 +484,13 @@ class Bugs4ReproTest {
     }
 
     /**
-     * Minimal MessageHandler.Context carrying offset + chunk timestamp. The probe relies
-     * on context.timestamp() (chunk-level) when the per-message creation_time is unset
-     * (message == null), so that's what we feed it.
+     * Minimal MessageHandler.Context carrying offset + chunk timestamp.
+     * {@code proveAllBeforeCutoff} now explicitly uses {@code context.timestamp()}
+     * (server-assigned chunk write time) and never reads per-message AMQP
+     * {@code creation_time}. A publisher can backdate {@code creation_time} below the
+     * cutoff while the chunk itself has a server write time ≥ cutoff; using
+     * {@code creation_time} would then incorrectly prove absence (P2 review comment).
+     * We feed only the chunk-level timestamp here to match the production behavior.
      */
     private static final class ProbeContext implements com.rabbitmq.stream.MessageHandler.Context {
         private final long offset;

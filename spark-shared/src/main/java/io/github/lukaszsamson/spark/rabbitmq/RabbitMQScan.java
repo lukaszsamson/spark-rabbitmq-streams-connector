@@ -573,12 +573,17 @@ final class RabbitMQScan implements Scan {
         // does not delay the regular probe path on streams where this check fails.
         long totalBudgetMs = timestampProbeTimeoutMs();
         long absenceProbeBudgetMs = Math.min(
-                MAX_PROVE_ABSENCE_BUDGET_MS,
-                Math.max(MIN_PROVE_ABSENCE_BUDGET_MS, totalBudgetMs / 8L));
+                totalBudgetMs,
+                Math.min(MAX_PROVE_ABSENCE_BUDGET_MS,
+                         Math.max(MIN_PROVE_ABSENCE_BUDGET_MS, totalBudgetMs / 8L)));
         long provenTail = proveAllBeforeCutoff(env, stream, timestamp, absenceProbeBudgetMs);
         if (provenTail >= 0L) {
-            LOG.debug("Stream '{}' last message timestamp < cutoff {}; returning proven tail {}",
-                    stream, timestamp, provenTail);
+            if (provenTail == 0L) {
+                LOG.debug("Stream '{}' is empty; returning 0 as proven ending offset", stream);
+            } else {
+                LOG.debug("Stream '{}' last chunk timestamp < cutoff {}; returning proven tail {}",
+                        stream, timestamp, provenTail);
+            }
             return provenTail;
         }
 
@@ -666,15 +671,24 @@ final class RabbitMQScan implements Scan {
      *
      * <p>The probe attaches at {@link com.rabbitmq.stream.OffsetSpecification#last()}
      * which delivers exactly the last chunk, then drains the chunk under a brief idle
-     * grace so we capture the highest-offset message. The resulting timestamp is the
-     * same {@link #messageOrChunkTimestamp} used by the cutoff comparison in the regular
-     * probe — so the criterion is consistent: if {@code last_msg.ts < cutoff}, the
-     * regular probe could not have found a boundary either.
+     * grace so we capture the highest-offset message in the chunk.
+     *
+     * <p><b>Timestamp field used:</b> only the chunk-level
+     * {@link com.rabbitmq.stream.MessageHandler.Context#timestamp() context.timestamp()}
+     * (server-assigned write time), never per-message AMQP {@code creation_time}.
+     * {@code OffsetSpecification.timestamp(cutoff)} attaches at the first chunk whose
+     * server-write time ≥ cutoff; if no such chunk exists the regular probe would wait
+     * indefinitely. Using {@code creation_time} here would be incorrect: a publisher
+     * can backdate {@code creation_time}, so the last message could have a
+     * {@code creation_time} before the cutoff even though the chunk that contains it
+     * has a server-write time ≥ cutoff — incorrectly treating that chunk as proved
+     * absent.
      */
     private static long proveAllBeforeCutoff(
             Environment env, String stream, long cutoff, long budgetMs) {
         AtomicLong lastObservedOffset = new AtomicLong(-1L);
         AtomicLong lastObservedTimestamp = new AtomicLong(Long.MIN_VALUE);
+        AtomicLong lastUpdateNanos = new AtomicLong(Long.MIN_VALUE);
         java.util.concurrent.ArrayBlockingQueue<Boolean> firstObserved =
                 new java.util.concurrent.ArrayBlockingQueue<>(1);
         com.rabbitmq.stream.Consumer probe = null;
@@ -685,12 +699,14 @@ final class RabbitMQScan implements Scan {
                     .noTrackingStrategy()
                     .messageHandler((context, message) -> {
                         long off = context.offset();
-                        long ts = messageOrChunkTimestamp(context, message);
+                        // Use chunk-level timestamp only — see Javadoc above.
+                        long ts = context.timestamp();
                         // Always advance to the LATEST observed; chunk delivery is in
                         // ascending offset order so the final values reflect the last
                         // message in the chunk.
                         lastObservedOffset.set(off);
                         lastObservedTimestamp.set(ts);
+                        lastUpdateNanos.set(System.nanoTime());
                         firstObserved.offer(Boolean.TRUE);
                     })
                     .flow()
@@ -709,13 +725,22 @@ final class RabbitMQScan implements Scan {
                 return -1L;
             }
 
-            // Drain the rest of the chunk so lastObservedOffset/Timestamp reflect the
-            // final message of the last chunk, not just the first message we saw.
-            // This mirrors probeLastMessageOffsetInclusive's idle-grace strategy at
-            // a smaller scale: we already know the chunk is here, just give the
-            // callback thread a brief window to finish iterating it.
-            long drainMs = Math.min(150L, Math.max(40L, budgetMs / 8L));
-            Thread.sleep(drainMs);
+            // Idle-stabilization drain: wait until no new message arrives for
+            // IDLE_GRACE_NS, bounded by drainDeadlineMs. A fixed Thread.sleep is not
+            // reliable because message callbacks are async; on a large last chunk the
+            // first observed message may not be the last one in the chunk. Polling on
+            // lastUpdateNanos ensures we only declare "stable" once the callback thread
+            // has actually gone quiet.
+            final long IDLE_GRACE_NS = 20_000_000L; // 20 ms
+            long drainBudgetMs = Math.min(150L, Math.max(40L, budgetMs / 8L));
+            long drainDeadlineMs = System.currentTimeMillis() + drainBudgetMs;
+            while (System.currentTimeMillis() < drainDeadlineMs) {
+                long nsSinceLastUpdate = System.nanoTime() - lastUpdateNanos.get();
+                if (nsSinceLastUpdate >= IDLE_GRACE_NS) {
+                    break;
+                }
+                Thread.sleep(5L);
+            }
 
             long lastTs = lastObservedTimestamp.get();
             long lastOff = lastObservedOffset.get();

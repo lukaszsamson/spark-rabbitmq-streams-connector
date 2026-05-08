@@ -537,12 +537,17 @@ final class RabbitMQScan implements Scan {
         // Mirror of spark-shared RabbitMQScan.proveAllBeforeCutoff.
         long totalBudgetMs = timestampProbeTimeoutMs();
         long absenceProbeBudgetMs = Math.min(
-                MAX_PROVE_ABSENCE_BUDGET_MS,
-                Math.max(MIN_PROVE_ABSENCE_BUDGET_MS, totalBudgetMs / 8L));
+                totalBudgetMs,
+                Math.min(MAX_PROVE_ABSENCE_BUDGET_MS,
+                         Math.max(MIN_PROVE_ABSENCE_BUDGET_MS, totalBudgetMs / 8L)));
         long provenTail = proveAllBeforeCutoff(env, stream, timestamp, absenceProbeBudgetMs);
         if (provenTail >= 0L) {
-            LOG.debug("Stream '{}' last message timestamp < cutoff {}; returning proven tail {}",
-                    stream, timestamp, provenTail);
+            if (provenTail == 0L) {
+                LOG.debug("Stream '{}' is empty; returning 0 as proven ending offset", stream);
+            } else {
+                LOG.debug("Stream '{}' last chunk timestamp < cutoff {}; returning proven tail {}",
+                        stream, timestamp, provenTail);
+            }
             return provenTail;
         }
 
@@ -605,12 +610,15 @@ final class RabbitMQScan implements Scan {
 
     /**
      * Mirror of spark-shared {@code RabbitMQScan.proveAllBeforeCutoff} — see that
-     * javadoc for the rationale and return-value contract.
+     * javadoc for the full rationale, return-value contract, and the note on why only
+     * the chunk-level {@link com.rabbitmq.stream.MessageHandler.Context#timestamp()
+     * context.timestamp()} is used (not per-message {@code creation_time}).
      */
     private static long proveAllBeforeCutoff(
             Environment env, String stream, long cutoff, long budgetMs) {
         AtomicLong lastObservedOffset = new AtomicLong(-1L);
         AtomicLong lastObservedTimestamp = new AtomicLong(Long.MIN_VALUE);
+        AtomicLong lastUpdateNanos = new AtomicLong(Long.MIN_VALUE);
         java.util.concurrent.ArrayBlockingQueue<Boolean> firstObserved =
                 new java.util.concurrent.ArrayBlockingQueue<>(1);
         com.rabbitmq.stream.Consumer probe = null;
@@ -621,9 +629,11 @@ final class RabbitMQScan implements Scan {
                     .noTrackingStrategy()
                     .messageHandler((context, message) -> {
                         long off = context.offset();
-                        long ts = messageOrChunkTimestamp(context, message);
+                        // Use chunk-level timestamp only — see spark-shared Javadoc.
+                        long ts = context.timestamp();
                         lastObservedOffset.set(off);
                         lastObservedTimestamp.set(ts);
+                        lastUpdateNanos.set(System.nanoTime());
                         firstObserved.offer(Boolean.TRUE);
                     })
                     .flow()
@@ -636,8 +646,18 @@ final class RabbitMQScan implements Scan {
             if (first == null) {
                 return -1L;
             }
-            long drainMs = Math.min(150L, Math.max(40L, budgetMs / 8L));
-            Thread.sleep(drainMs);
+
+            // Idle-stabilization drain — see spark-shared proveAllBeforeCutoff for rationale.
+            final long IDLE_GRACE_NS = 20_000_000L; // 20 ms
+            long drainBudgetMs = Math.min(150L, Math.max(40L, budgetMs / 8L));
+            long drainDeadlineMs = System.currentTimeMillis() + drainBudgetMs;
+            while (System.currentTimeMillis() < drainDeadlineMs) {
+                long nsSinceLastUpdate = System.nanoTime() - lastUpdateNanos.get();
+                if (nsSinceLastUpdate >= IDLE_GRACE_NS) {
+                    break;
+                }
+                Thread.sleep(5L);
+            }
 
             long lastTs = lastObservedTimestamp.get();
             long lastOff = lastObservedOffset.get();
