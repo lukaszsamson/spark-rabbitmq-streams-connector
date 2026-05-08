@@ -610,14 +610,14 @@ final class RabbitMQScan implements Scan {
 
     /**
      * Mirror of spark-shared {@code RabbitMQScan.proveAllBeforeCutoff} — see that
-     * javadoc for the full rationale, return-value contract, and the note on why only
-     * the chunk-level {@link com.rabbitmq.stream.MessageHandler.Context#timestamp()
-     * context.timestamp()} is used (not per-message {@code creation_time}).
+     * javadoc for the full rationale, return-value contract, and the note on tracking
+     * the maximum observed timestamp to guard against out-of-order per-message
+     * {@code creation_time} within the last chunk (P2 review fix).
      */
     private static long proveAllBeforeCutoff(
             Environment env, String stream, long cutoff, long budgetMs) {
         AtomicLong lastObservedOffset = new AtomicLong(-1L);
-        AtomicLong lastObservedTimestamp = new AtomicLong(Long.MIN_VALUE);
+        AtomicLong maxObservedTimestamp = new AtomicLong(Long.MIN_VALUE);
         AtomicLong lastUpdateNanos = new AtomicLong(Long.MIN_VALUE);
         java.util.concurrent.ArrayBlockingQueue<Boolean> firstObserved =
                 new java.util.concurrent.ArrayBlockingQueue<>(1);
@@ -629,10 +629,9 @@ final class RabbitMQScan implements Scan {
                     .noTrackingStrategy()
                     .messageHandler((context, message) -> {
                         long off = context.offset();
-                        // Use chunk-level timestamp only — see spark-shared Javadoc.
-                        long ts = context.timestamp();
+                        long ts = messageOrChunkTimestamp(context, message);
                         lastObservedOffset.set(off);
-                        lastObservedTimestamp.set(ts);
+                        maxObservedTimestamp.updateAndGet(prev -> Math.max(prev, ts));
                         lastUpdateNanos.set(System.nanoTime());
                         firstObserved.offer(Boolean.TRUE);
                     })
@@ -659,12 +658,12 @@ final class RabbitMQScan implements Scan {
                 Thread.sleep(5L);
             }
 
-            long lastTs = lastObservedTimestamp.get();
+            long maxTs = maxObservedTimestamp.get();
             long lastOff = lastObservedOffset.get();
-            if (lastTs == Long.MIN_VALUE || lastOff < 0L) {
+            if (maxTs == Long.MIN_VALUE || lastOff < 0L) {
                 return -1L;
             }
-            if (lastTs < cutoff) {
+            if (maxTs < cutoff) {
                 return lastOff + 1L;
             }
             return -1L;

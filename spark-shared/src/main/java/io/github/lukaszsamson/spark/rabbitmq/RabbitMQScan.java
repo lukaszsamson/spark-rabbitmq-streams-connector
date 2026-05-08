@@ -673,21 +673,20 @@ final class RabbitMQScan implements Scan {
      * which delivers exactly the last chunk, then drains the chunk under a brief idle
      * grace so we capture the highest-offset message in the chunk.
      *
-     * <p><b>Timestamp field used:</b> only the chunk-level
-     * {@link com.rabbitmq.stream.MessageHandler.Context#timestamp() context.timestamp()}
-     * (server-assigned write time), never per-message AMQP {@code creation_time}.
-     * {@code OffsetSpecification.timestamp(cutoff)} attaches at the first chunk whose
-     * server-write time ≥ cutoff; if no such chunk exists the regular probe would wait
-     * indefinitely. Using {@code creation_time} here would be incorrect: a publisher
-     * can backdate {@code creation_time}, so the last message could have a
-     * {@code creation_time} before the cutoff even though the chunk that contains it
-     * has a server-write time ≥ cutoff — incorrectly treating that chunk as proved
-     * absent.
+     * <p><b>Timestamp field used:</b> {@link #messageOrChunkTimestamp} (per-message
+     * AMQP {@code creation_time} when set, otherwise chunk-level
+     * {@link com.rabbitmq.stream.MessageHandler.Context#timestamp()}), consistent with
+     * the criterion used by the regular timestamp probe. Safety against out-of-order
+     * {@code creation_time} (P2 review): the handler tracks the <em>maximum</em>
+     * observed timestamp across all messages in the chunk rather than just the last
+     * one. If any message in the last chunk has a timestamp ≥ cutoff the maximum will
+     * reflect it, and prove-absence returns {@code -1L} (inconclusive) so the regular
+     * probe determines the precise boundary.
      */
     private static long proveAllBeforeCutoff(
             Environment env, String stream, long cutoff, long budgetMs) {
         AtomicLong lastObservedOffset = new AtomicLong(-1L);
-        AtomicLong lastObservedTimestamp = new AtomicLong(Long.MIN_VALUE);
+        AtomicLong maxObservedTimestamp = new AtomicLong(Long.MIN_VALUE);
         AtomicLong lastUpdateNanos = new AtomicLong(Long.MIN_VALUE);
         java.util.concurrent.ArrayBlockingQueue<Boolean> firstObserved =
                 new java.util.concurrent.ArrayBlockingQueue<>(1);
@@ -699,13 +698,13 @@ final class RabbitMQScan implements Scan {
                     .noTrackingStrategy()
                     .messageHandler((context, message) -> {
                         long off = context.offset();
-                        // Use chunk-level timestamp only — see Javadoc above.
-                        long ts = context.timestamp();
-                        // Always advance to the LATEST observed; chunk delivery is in
-                        // ascending offset order so the final values reflect the last
-                        // message in the chunk.
+                        long ts = messageOrChunkTimestamp(context, message);
+                        // Track the highest offset (ascending delivery order) and the
+                        // MAXIMUM timestamp to detect out-of-order creation_time within
+                        // the chunk (P2): if any earlier message already exceeded the
+                        // cutoff the maximum will capture it.
                         lastObservedOffset.set(off);
-                        lastObservedTimestamp.set(ts);
+                        maxObservedTimestamp.updateAndGet(prev -> Math.max(prev, ts));
                         lastUpdateNanos.set(System.nanoTime());
                         firstObserved.offer(Boolean.TRUE);
                     })
@@ -742,12 +741,12 @@ final class RabbitMQScan implements Scan {
                 Thread.sleep(5L);
             }
 
-            long lastTs = lastObservedTimestamp.get();
+            long maxTs = maxObservedTimestamp.get();
             long lastOff = lastObservedOffset.get();
-            if (lastTs == Long.MIN_VALUE || lastOff < 0L) {
+            if (maxTs == Long.MIN_VALUE || lastOff < 0L) {
                 return -1L;
             }
-            if (lastTs < cutoff) {
+            if (maxTs < cutoff) {
                 return lastOff + 1L;
             }
             return -1L;
