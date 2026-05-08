@@ -42,6 +42,10 @@ final class RabbitMQScan implements Scan {
     private static final Logger LOG = LoggerFactory.getLogger(RabbitMQScan.class);
     private static final long TAIL_PROBE_TIMEOUT_MS = 1_500L;
     private static final long MIN_TIMESTAMP_PROBE_TIMEOUT_MS = 250L;
+    /** Floor / ceiling for the prove-absence pre-check budget; see spark-shared
+     *  RabbitMQScan.proveAllBeforeCutoff for the full rationale. */
+    private static final long MIN_PROVE_ABSENCE_BUDGET_MS = 500L;
+    private static final long MAX_PROVE_ABSENCE_BUDGET_MS = 2_000L;
     private static final long RESOLVER_DRAIN_TIMEOUT_MS = 5_000L;
     /** Max concurrency for broker-side helper executors. */
     private static final int MAX_BROKER_HELPER_PARALLELISM = 20;
@@ -396,55 +400,78 @@ final class RabbitMQScan implements Scan {
     private long resolveTimestampStartingOffset(
             Environment env, String stream, long firstAvailable, StreamStats stats,
             long timestamp) {
-        BlockingQueue<Long> observedOffsets = new LinkedBlockingQueue<>();
-        com.rabbitmq.stream.Consumer probe = null;
-        try {
-            probe = env.consumerBuilder()
-                    .stream(stream)
-                    .offset(com.rabbitmq.stream.OffsetSpecification.timestamp(
-                            timestamp))
-                    .noTrackingStrategy()
-                    .messageHandler((context, message) -> observedOffsets.offer(context.offset()))
-                    .flow()
-                    .initialCredits(1)
-                    .strategy(ConsumerFlowStrategy.creditOnChunkArrival(1))
-                    .builder()
-                    .build();
+        // BUG-4-3 / BUG-4-5: split pollTimeoutMs across attempts so a slow consumer
+        // attach (remote broker behind a load balancer) does not exhaust the budget on
+        // a single shot. See RabbitMQScan.splitProbeBudget and the comment in spark-shared.
+        long totalBudgetMs = timestampProbeTimeoutMs();
+        long[] attemptBudgetsMs = splitProbeBudget(totalBudgetMs);
+        Throwable lastError = null;
+        for (int attempt = 0; attempt < attemptBudgetsMs.length; attempt++) {
+            long attemptBudgetMs = attemptBudgetsMs[attempt];
+            BlockingQueue<Long> observedOffsets = new LinkedBlockingQueue<>();
+            com.rabbitmq.stream.Consumer probe = null;
+            try {
+                probe = env.consumerBuilder()
+                        .stream(stream)
+                        .offset(com.rabbitmq.stream.OffsetSpecification.timestamp(timestamp))
+                        .noTrackingStrategy()
+                        .messageHandler((context, message) -> observedOffsets.offer(context.offset()))
+                        .flow()
+                        .initialCredits(1)
+                        .strategy(ConsumerFlowStrategy.creditOnChunkArrival(1))
+                        .builder()
+                        .build();
 
-            Long observed = observedOffsets.poll(timestampProbeTimeoutMs(), TimeUnit.MILLISECONDS);
-            if (observed != null) {
-                return Math.max(firstAvailable, observed);
-            }
-            // Probe budget exhausted without a result. Falling back here would silently
-            // skip or over-include records, so fail planning so the operator can extend
-            // the budget.
-            throw new TimestampResolutionTimeoutException(
-                    "Timed out resolving starting timestamp " + timestamp
-                            + " for stream '" + stream + "' after " + timestampProbeTimeoutMs()
-                            + " ms. Increase '" + ConnectorOptions.POLL_TIMEOUT_MS
-                            + "' to extend the probe budget.");
-        } catch (NoOffsetException e) {
-            return handleTimestampStartNoMatch(env, stream, firstAvailable, stats, timestamp);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new IllegalStateException(
-                    "Interrupted resolving timestamp start offset for stream '" + stream + "'", e);
-        } catch (IllegalStateException e) {
-            throw e;
-        } catch (Exception e) {
-            LOG.warn("Failed to resolve timestamp start offset for stream '{}': {}",
-                    stream, e.getMessage());
-            throw new IllegalStateException(
-                    "Failed to resolve timestamp start offset for stream '" + stream + "'", e);
-        } finally {
-            if (probe != null) {
-                try {
-                    probe.close();
-                } catch (Exception e) {
-                    LOG.debug("Error closing timestamp-start probe consumer for stream '{}'", stream, e);
+                Long observed = observedOffsets.poll(attemptBudgetMs, TimeUnit.MILLISECONDS);
+                if (observed != null) {
+                    return Math.max(firstAvailable, observed);
+                }
+                LOG.debug("Timestamp start probe attempt {} of {} timed out after {} ms for stream '{}'",
+                        attempt + 1, attemptBudgetsMs.length, attemptBudgetMs, stream);
+            } catch (NoOffsetException e) {
+                return handleTimestampStartNoMatch(env, stream, firstAvailable, stats, timestamp);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(
+                        "Interrupted resolving timestamp start offset for stream '" + stream + "'", e);
+            } catch (IllegalStateException e) {
+                throw e;
+            } catch (Exception e) {
+                LOG.debug("Timestamp start probe attempt {} of {} failed for stream '{}': {}",
+                        attempt + 1, attemptBudgetsMs.length, stream, e.getMessage());
+                lastError = e;
+            } finally {
+                if (probe != null) {
+                    try {
+                        probe.close();
+                    } catch (Exception e) {
+                        LOG.debug("Error closing timestamp-start probe consumer for stream '{}'", stream, e);
+                    }
                 }
             }
         }
+        TimestampResolutionTimeoutException timeout = new TimestampResolutionTimeoutException(
+                "Timed out resolving starting timestamp " + timestamp
+                        + " for stream '" + stream + "' after " + totalBudgetMs
+                        + " ms across " + attemptBudgetsMs.length + " probe attempts. Increase '"
+                        + ConnectorOptions.POLL_TIMEOUT_MS + "' to extend the probe budget.");
+        if (lastError != null) {
+            timeout.addSuppressed(lastError);
+        }
+        throw timeout;
+    }
+
+    /** Mirror of {@code RabbitMQScan.splitProbeBudget} in spark-shared (kept in sync). */
+    static long[] splitProbeBudget(long totalBudgetMs) {
+        if (totalBudgetMs < 1_000L) {
+            return new long[]{Math.max(1L, totalBudgetMs)};
+        }
+        long share = Math.max(500L, totalBudgetMs / 2L);
+        long second = totalBudgetMs - share;
+        if (second <= 0L) {
+            return new long[]{totalBudgetMs};
+        }
+        return new long[]{share, second};
     }
 
     private long handleTimestampStartNoMatch(
@@ -504,19 +531,109 @@ final class RabbitMQScan implements Scan {
      * all data is before the cutoff, so silently returning tail would over-include records.
      */
     private long resolveTimestampEndingOffset(Environment env, String stream, long timestamp) {
-        AtomicLong firstOffsetAtOrAfter = new AtomicLong(-1L);
-        CountDownLatch boundaryFound = new CountDownLatch(1);
+        // BUG-4-3 prove-absence pre-check: if the broker's last message has a
+        // timestamp strictly before the cutoff, the tail (= last_offset + 1) is
+        // a deterministic exclusive end and the regular probe is unnecessary.
+        // Mirror of spark-shared RabbitMQScan.proveAllBeforeCutoff.
+        long totalBudgetMs = timestampProbeTimeoutMs();
+        long absenceProbeBudgetMs = Math.min(
+                totalBudgetMs,
+                Math.min(MAX_PROVE_ABSENCE_BUDGET_MS,
+                         Math.max(MIN_PROVE_ABSENCE_BUDGET_MS, totalBudgetMs / 8L)));
+        long provenTail = proveAllBeforeCutoff(env, stream, timestamp, absenceProbeBudgetMs);
+        if (provenTail >= 0L) {
+            if (provenTail == 0L) {
+                LOG.debug("Stream '{}' is empty; returning 0 as proven ending offset", stream);
+            } else {
+                LOG.debug("Stream '{}' last chunk timestamp < cutoff {}; returning proven tail {}",
+                        stream, timestamp, provenTail);
+            }
+            return provenTail;
+        }
+
+        // BUG-4-3 / BUG-4-5: split pollTimeoutMs across attempts so a slow consumer
+        // attach does not exhaust the budget on a single shot. See spark-shared
+        // RabbitMQScan.resolveTimestampEndingOffset for the full rationale.
+        long[] attemptBudgetsMs = splitProbeBudget(totalBudgetMs);
+        Throwable lastError = null;
+        for (int attempt = 0; attempt < attemptBudgetsMs.length; attempt++) {
+            long attemptBudgetMs = attemptBudgetsMs[attempt];
+            AtomicLong firstOffsetAtOrAfter = new AtomicLong(-1L);
+            CountDownLatch boundaryFound = new CountDownLatch(1);
+            com.rabbitmq.stream.Consumer probe = null;
+            try {
+                probe = env.consumerBuilder()
+                        .stream(stream)
+                        .offset(com.rabbitmq.stream.OffsetSpecification.timestamp(timestamp))
+                        .noTrackingStrategy()
+                        .messageHandler((context, message) -> {
+                            if (messageOrChunkTimestamp(context, message) >= timestamp
+                                    && firstOffsetAtOrAfter.compareAndSet(-1L, context.offset())) {
+                                boundaryFound.countDown();
+                            }
+                        })
+                        .flow()
+                        .initialCredits(1)
+                        .strategy(ConsumerFlowStrategy.creditOnChunkArrival(1))
+                        .builder()
+                        .build();
+
+                if (boundaryFound.await(attemptBudgetMs, TimeUnit.MILLISECONDS)) {
+                    return firstOffsetAtOrAfter.get();
+                }
+                LOG.debug("Timestamp end probe attempt {} of {} timed out after {} ms for stream '{}'",
+                        attempt + 1, attemptBudgetsMs.length, attemptBudgetMs, stream);
+            } catch (NoOffsetException e) {
+                return 0;
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(
+                        "Interrupted resolving ending timestamp for stream '" + stream + "'", e);
+            } catch (Exception e) {
+                LOG.debug("Timestamp end probe attempt {} of {} failed for stream '{}': {}",
+                        attempt + 1, attemptBudgetsMs.length, stream, e.getMessage());
+                lastError = e;
+            } finally {
+                closeProbeQuietly(probe, stream);
+            }
+        }
+        TimestampResolutionTimeoutException timeout = new TimestampResolutionTimeoutException(
+                "Timed out resolving ending timestamp " + timestamp
+                        + " for stream '" + stream + "' after " + totalBudgetMs
+                        + " ms across " + attemptBudgetsMs.length + " probe attempts. Increase '"
+                        + ConnectorOptions.POLL_TIMEOUT_MS + "' to extend the probe budget.");
+        if (lastError != null) {
+            timeout.addSuppressed(lastError);
+        }
+        throw timeout;
+    }
+
+    /**
+     * Mirror of spark-shared {@code RabbitMQScan.proveAllBeforeCutoff} — see that
+     * javadoc for the full rationale, return-value contract, and the note on tracking
+     * the maximum observed timestamp to guard against out-of-order per-message
+     * {@code creation_time} within the last chunk (P2 review fix).
+     */
+    private static long proveAllBeforeCutoff(
+            Environment env, String stream, long cutoff, long budgetMs) {
+        AtomicLong lastObservedOffset = new AtomicLong(-1L);
+        AtomicLong maxObservedTimestamp = new AtomicLong(Long.MIN_VALUE);
+        AtomicLong lastUpdateNanos = new AtomicLong(Long.MIN_VALUE);
+        java.util.concurrent.ArrayBlockingQueue<Boolean> firstObserved =
+                new java.util.concurrent.ArrayBlockingQueue<>(1);
         com.rabbitmq.stream.Consumer probe = null;
         try {
             probe = env.consumerBuilder()
                     .stream(stream)
-                    .offset(com.rabbitmq.stream.OffsetSpecification.timestamp(timestamp))
+                    .offset(com.rabbitmq.stream.OffsetSpecification.last())
                     .noTrackingStrategy()
                     .messageHandler((context, message) -> {
-                        if (messageOrChunkTimestamp(context, message) >= timestamp
-                                && firstOffsetAtOrAfter.compareAndSet(-1L, context.offset())) {
-                            boundaryFound.countDown();
-                        }
+                        long off = context.offset();
+                        long ts = messageOrChunkTimestamp(context, message);
+                        lastObservedOffset.set(off);
+                        maxObservedTimestamp.updateAndGet(prev -> Math.max(prev, ts));
+                        lastUpdateNanos.set(System.nanoTime());
+                        firstObserved.offer(Boolean.TRUE);
                     })
                     .flow()
                     .initialCredits(1)
@@ -524,31 +641,41 @@ final class RabbitMQScan implements Scan {
                     .builder()
                     .build();
 
-            if (boundaryFound.await(timestampProbeTimeoutMs(), TimeUnit.MILLISECONDS)) {
-                return firstOffsetAtOrAfter.get();
+            Boolean first = firstObserved.poll(budgetMs, TimeUnit.MILLISECONDS);
+            if (first == null) {
+                return -1L;
             }
-            // Probe budget exhausted without observing a message at or after the
-            // requested timestamp. We cannot prove all data is before the cutoff,
-            // so falling back to tail risks over-including records published after
-            // the bound. Fail planning instead.
-            throw new TimestampResolutionTimeoutException(
-                    "Timed out resolving ending timestamp " + timestamp
-                            + " for stream '" + stream + "' after " + timestampProbeTimeoutMs()
-                            + " ms. Increase '" + ConnectorOptions.POLL_TIMEOUT_MS
-                            + "' to extend the probe budget.");
+
+            // Idle-stabilization drain — see spark-shared proveAllBeforeCutoff for rationale.
+            final long IDLE_GRACE_NS = 20_000_000L; // 20 ms
+            long drainBudgetMs = Math.min(150L, Math.max(40L, budgetMs / 8L));
+            long drainDeadlineMs = System.currentTimeMillis() + drainBudgetMs;
+            while (System.currentTimeMillis() < drainDeadlineMs) {
+                long nsSinceLastUpdate = System.nanoTime() - lastUpdateNanos.get();
+                if (nsSinceLastUpdate >= IDLE_GRACE_NS) {
+                    break;
+                }
+                Thread.sleep(5L);
+            }
+
+            long maxTs = maxObservedTimestamp.get();
+            long lastOff = lastObservedOffset.get();
+            if (maxTs == Long.MIN_VALUE || lastOff < 0L) {
+                return -1L;
+            }
+            if (maxTs < cutoff) {
+                return lastOff + 1L;
+            }
+            return -1L;
         } catch (NoOffsetException e) {
-            return 0;
+            return 0L;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            throw new IllegalStateException(
-                    "Interrupted resolving ending timestamp for stream '" + stream + "'", e);
-        } catch (TimestampResolutionTimeoutException e) {
-            throw e;
+            return -1L;
         } catch (Exception e) {
-            LOG.warn("Failed to resolve timestamp end offset for stream '{}': {}",
+            LOG.debug("Prove-absence probe failed for stream '{}': {}",
                     stream, e.getMessage());
-            throw new IllegalStateException(
-                    "Failed to resolve timestamp end offset for stream '" + stream + "'", e);
+            return -1L;
         } finally {
             closeProbeQuietly(probe, stream);
         }
