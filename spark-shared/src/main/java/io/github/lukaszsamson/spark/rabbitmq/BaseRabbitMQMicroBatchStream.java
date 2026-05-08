@@ -761,9 +761,19 @@ class BaseRabbitMQMicroBatchStream
         if (stopping.get()) {
             return latestOffsetDuringStop(startOffset);
         }
-        RabbitMQStreamOffset invocationCached = getCachedLatestOffsetInvocation(startOffset, limit);
-        if (invocationCached != null) {
-            return invocationCached;
+        // ReadMinRows decisions are time-dependent (handleReadMinRowsCore checks
+        // maxTriggerDelay against wall-clock). Caching a "skip" result for the
+        // 250 ms invocation cache window can mask a delay-expiry deadline that
+        // arrives inside the same window — see BUGS-4.md BUG-4-2 (and the unit
+        // reproduction in Bugs4ReproTest). Bypass the cache when the limit
+        // contains a ReadMinRows component; the broker-tail probe cache
+        // (latestTailProbeCache) still avoids per-trigger consumer churn.
+        boolean cacheable = !readLimitDependsOnWallClock(limit);
+        if (cacheable) {
+            RabbitMQStreamOffset invocationCached = getCachedLatestOffsetInvocation(startOffset, limit);
+            if (invocationCached != null) {
+                return invocationCached;
+            }
         }
 
         Map<String, Long> tailOffsets = availableNowSnapshot != null
@@ -999,12 +1009,32 @@ class BaseRabbitMQMicroBatchStream
             ReadLimit limit,
             RabbitMQStreamOffset latestOffset,
             RabbitMQStreamOffset tailOffset) {
+        // See latestOffset(): time-dependent limits (ReadMinRows / composite-with-ReadMinRows)
+        // must not have their result memoized, otherwise a cached "skip" decision can outlive
+        // the maxTriggerDelay deadline.
+        if (readLimitDependsOnWallClock(limit)) {
+            return;
+        }
         latestOffsetInvocationCache = new LatestOffsetInvocationCache(
                 latestOffsetStartCacheKey(startOffset),
                 readLimitCacheKey(limit),
                 latestOffset,
                 tailOffset,
                 System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(LATEST_OFFSET_RESULT_CACHE_WINDOW_MS));
+    }
+
+    private static boolean readLimitDependsOnWallClock(ReadLimit limit) {
+        if (limit instanceof ReadMinRows) {
+            return true;
+        }
+        if (limit instanceof CompositeReadLimit composite) {
+            for (ReadLimit component : composite.getReadLimits()) {
+                if (readLimitDependsOnWallClock(component)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private void clearLatestOffsetInvocationCache() {
