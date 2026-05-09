@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Changed
 - **Breaking:** Broker-stored offsets are no longer used for query recovery. On a fresh start (no Spark checkpoint), the connector resolves initial offsets from configured `startingOffsets` / `startingOffsetsByTimestamp` only, matching Kafka source semantics. Users that previously relied on broker-stored offsets to resume across query restarts must rely on Spark checkpoints (or set `startingOffsets` explicitly).
 - **Breaking (option rename):** `serverSideOffsetTracking` is renamed to `storeBrokerOffsets` and its semantics are clarified as best-effort write-only telemetry. The old name remains accepted as a deprecated alias for one release and emits a warning at parse time.
+- Bumped RabbitMQ Stream Java client to `1.6.0`. Picks up resilient handling of `Throwable` from compression codecs (native LZ4/Zstd `Error`s no longer kill the consumer pipeline; producer messages are nacked locally), tolerant broker-version parsing for Tanzu/custom builds, a fix for the `resolve_offset_spec` availability check, and dependency bumps (Netty 4.2.12, lz4-java 1.11, amqp-client 5.29).
 
 ### Removed
 - Internal `StoredOffsetLookup` helper and its temporary tracking-consumer offset-recovery path.
