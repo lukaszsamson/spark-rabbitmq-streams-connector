@@ -1298,10 +1298,12 @@ class SuperStreamIT extends AbstractRabbitMQIT {
         createSuperStream(dedupSuper, PARTITION_COUNT);
 
         // Auto-dedup on a superstream batch (without publishing_id) is rejected by
-        // RabbitMQWrite#validateBatchSuperStreamDedupCompatibility because the
-        // single-partition seed cannot guarantee monotonicity across all routed
-        // partitions. With an explicit publishing_id column the user is on the hook
-        // for monotonicity and the broker dedupes by (producer, partition, id).
+        // RabbitMQWrite#validateBatchSuperStreamDedupCompatibility because
+        // RabbitMQ's superstream cursor is a minimum partition cursor for replaying
+        // the same logical sequence, not a generic append cursor for arbitrary new
+        // Spark rows. With an explicit publishing_id column the application owns
+        // the sequence/routing contract and the broker dedupes by
+        // (producer, partition, id).
         StructType schema = new StructType()
                 .add("value", DataTypes.BinaryType, false)
                 .add("routing_key", DataTypes.StringType, true)

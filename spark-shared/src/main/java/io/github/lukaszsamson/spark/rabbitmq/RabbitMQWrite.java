@@ -103,11 +103,18 @@ final class RabbitMQWrite implements Write {
         if (producerName == null || producerName.isBlank()) {
             return;
         }
-        // Auto-dedup seeds nextPublishingId from a single partition's
-        // getLastPublishingId(); on a superstream, that is the MIN across partitions
-        // and lets the broker silently drop already-stored ids on other partitions.
-        // If the schema carries an explicit 'publishing_id' column, the user owns
-        // monotonicity and assumes the per-partition risk; otherwise fail fast.
+        // RabbitMQ defines a named superstream producer's publishing IDs as one
+        // logical sequence shared across partitions. getLastPublishingId()
+        // intentionally returns the minimum partition cursor so applications can
+        // replay the same logical sequence after restart and let advanced
+        // partitions deduplicate already-stored IDs.
+        //
+        // Spark batch append is different: a new batch is not necessarily a replay
+        // of the same logical sequence with the same routing. If we auto-generate
+        // IDs from the superstream minimum for new rows, rows routed to advanced
+        // partitions can be deduplicated as if they were replayed messages. Require
+        // an explicit publishing_id column so the application owns the sequence and
+        // routing/replay contract; otherwise fail fast.
         if (hasPublishingIdColumn(inputSchema)) {
             return;
         }
@@ -129,10 +136,11 @@ final class RabbitMQWrite implements Write {
     private static IllegalStateException illegalSuperStreamDedupState() {
         return new IllegalStateException(
                 "Auto-deduplication via 'producerName' is not supported for superstream batch " +
-                        "writes: the publishing-id seed is taken from a single partition and " +
-                        "cannot guarantee monotonicity across all routed partitions, which can " +
-                        "cause silent broker-side message drops. Either unset 'producerName', " +
-                        "switch to a single-stream sink, or supply an explicit 'publishing_id' " +
-                        "column so monotonicity is per-row controlled.");
+                        "writes without an explicit 'publishing_id' column: RabbitMQ uses the " +
+                        "minimum partition publishing-id cursor as a replay point for the same " +
+                        "logical sequence, but a Spark batch append can contain new rows routed " +
+                        "to already-advanced partitions and have them deduplicated. Either unset " +
+                        "'producerName', switch to a single-stream sink, or supply an explicit " +
+                        "'publishing_id' column so the application controls the sequence.");
     }
 }
