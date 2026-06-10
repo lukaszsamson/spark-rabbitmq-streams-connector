@@ -850,11 +850,16 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
 
     /**
      * Record (on the client callback thread) the offset a recovery resubscription
-     * resumes at, keeping the highest pending value. No broker RPC here — the task
-     * thread performs the stats query in {@link #checkPendingResubscriptionForTruncation()}.
+     * resumes at, keeping the EARLIEST unvalidated value. {@code firstOffset <=
+     * min(resumes)} implies no truncation at any later resume point, while the
+     * converse does not hold — keeping the max could let a later, higher resume
+     * mask a gap at an earlier one that the task thread has not validated yet.
+     * No broker RPC here — the task thread performs the stats query in
+     * {@link #checkPendingResubscriptionForTruncation()}.
      */
     void recordResubscriptionOffset(long resumeOffset) {
-        pendingResubscriptionOffset.accumulateAndGet(resumeOffset, Math::max);
+        pendingResubscriptionOffset.accumulateAndGet(
+                resumeOffset, (current, next) -> current < 0 ? next : Math.min(current, next));
     }
 
     OffsetSpecification resolveSingleActiveConsumerActivationOffset(
@@ -1040,12 +1045,23 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
             firstOffset = queryStreamFirstOffsetFromStatsWithCache();
         } catch (Exception e) {
             if (isMissingStreamException(e)) {
-                firstOffset = Long.MAX_VALUE; // stream gone — treat as fully truncated
-            } else {
-                LOG.debug("Unable to query first offset for resubscription truncation check "
-                        + "on stream '{}': {}", stream, e.getMessage());
-                return false; // leave pending armed; retry on a later poll iteration
+                // Stream gone entirely: nothing in the planned range survived. Keep the
+                // original exception as cause and report it as such, not as a numeric
+                // truncation bound.
+                pendingResubscriptionOffset.compareAndSet(resumeOffset, -1L);
+                String missingMessage = "Stream '" + stream + "' no longer exists after "
+                        + "consumer recovery (resubscribed at offset " + resumeOffset
+                        + ", planned range [" + startOffset + ", " + endOffset + "))";
+                if (options.isFailOnDataLoss()) {
+                    throw new IOException(missingMessage, e);
+                }
+                LOG.warn("{}; completing split because failOnDataLoss=false", missingMessage);
+                dataLoss++;
+                return true;
             }
+            LOG.debug("Unable to query first offset for resubscription truncation check "
+                    + "on stream '{}': {}", stream, e.getMessage());
+            return false; // leave pending armed; retry on a later poll iteration
         }
         if (firstOffset < 0 || firstOffset <= resumeOffset) {
             // No truncation past the resume point. Clear only the value we observed

@@ -1916,6 +1916,86 @@ class RabbitMQPartitionReaderTest {
         }
 
         @Test
+        void keepsEarliestPendingResumeOffsetAcrossRecoveries() throws Exception {
+            // firstOffset <= min(resumes) implies no truncation at any later resume,
+            // but the converse does not hold: keeping the max would let a second
+            // recovery at 80 mask an unvalidated gap at 50 (e.g. retention advanced
+            // the stream start to 60 in between).
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 5, 100, minimalOptions());
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
+
+            reader.recordResubscriptionOffset(50L);
+            reader.recordResubscriptionOffset(80L);
+            assertThat((long) getPrivateField(reader, "pendingResubscriptionOffset")).isEqualTo(50L);
+
+            // Lower recordings also win over an already-armed higher value.
+            reader.recordResubscriptionOffset(42L);
+            assertThat((long) getPrivateField(reader, "pendingResubscriptionOffset")).isEqualTo(42L);
+        }
+
+        @Test
+        void earlierGapStillDetectedWhenLaterRecoveryArmsHigherResume() throws Exception {
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 0, 100, minimalOptions());
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
+
+            com.rabbitmq.stream.Environment env = mock(com.rabbitmq.stream.Environment.class);
+            com.rabbitmq.stream.StreamStats stats = mock(com.rabbitmq.stream.StreamStats.class);
+            when(env.queryStreamStats("test-stream")).thenReturn(stats);
+            when(stats.firstOffset()).thenReturn(60L); // 50-59 truncated
+            setPrivateField(reader, "environment", env);
+
+            reader.recordResubscriptionOffset(50L);
+            reader.recordResubscriptionOffset(80L); // later recovery must not mask the gap at 50
+
+            assertThatThrownBy(reader::checkPendingResubscriptionForTruncation)
+                    .isInstanceOf(IOException.class)
+                    .hasMessageContaining("range [50, 60) truncated");
+        }
+
+        @Test
+        void missingStreamDuringTruncationCheckFailsWithCauseWhenFailOnDataLossTrue() throws Exception {
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 0, 100, minimalOptions());
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
+
+            com.rabbitmq.stream.Environment env = mock(com.rabbitmq.stream.Environment.class);
+            com.rabbitmq.stream.StreamDoesNotExistException missing =
+                    new com.rabbitmq.stream.StreamDoesNotExistException("test-stream");
+            when(env.queryStreamStats("test-stream")).thenThrow(missing);
+            setPrivateField(reader, "environment", env);
+            setPrivateField(reader, "pendingResubscriptionOffset", 42L);
+
+            assertThatThrownBy(reader::checkPendingResubscriptionForTruncation)
+                    .isInstanceOf(IOException.class)
+                    .hasMessageContaining("no longer exists after consumer recovery")
+                    .hasCause(missing);
+        }
+
+        @Test
+        void missingStreamDuringTruncationCheckCompletesWhenFailOnDataLossFalse() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("failOnDataLoss", "false");
+
+            RabbitMQInputPartition partition = new RabbitMQInputPartition(
+                    "test-stream", 0, 100, new ConnectorOptions(opts));
+            RabbitMQPartitionReader reader = new RabbitMQPartitionReader(partition, partition.getOptions());
+
+            com.rabbitmq.stream.Environment env = mock(com.rabbitmq.stream.Environment.class);
+            when(env.queryStreamStats("test-stream")).thenThrow(
+                    new com.rabbitmq.stream.StreamDoesNotExistException("test-stream"));
+            setPrivateField(reader, "environment", env);
+            setPrivateField(reader, "pendingResubscriptionOffset", 42L);
+
+            assertThat(reader.checkPendingResubscriptionForTruncation()).isTrue();
+            assertThat(reader.currentMetricsValues()[5].value()).isEqualTo(1L);
+            assertThat((long) getPrivateField(reader, "pendingResubscriptionOffset")).isEqualTo(-1L);
+        }
+
+        @Test
         void detectsTruncationAfterRecoveryFailsWhenFailOnDataLossTrue() throws Exception {
             RabbitMQInputPartition partition = new RabbitMQInputPartition(
                     "test-stream", 0, 100, minimalOptions());
