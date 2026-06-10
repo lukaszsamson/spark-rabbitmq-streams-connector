@@ -238,7 +238,12 @@ class RealTimeModeTest {
             RabbitMQMicroBatchStream stream = createStream(options);
             setPrivateField(stream, "streams", List.of("test-stream"));
             setPrivateField(stream, "environment", new NoOpEnvironment());
-            setPrivateField(stream, "initialOffsets", Map.of("test-stream", 42L));
+            // Anchor cached as if resolved during initialOffset() (timestamp resolved to 42).
+            // useConfiguredStartingOffset now derives the flag from the timestamp anchor
+            // rather than initialOffsets so it survives a query restart (FABLE-7).
+            @SuppressWarnings("unchecked")
+            Map<String, Long> anchors = (Map<String, Long>) getPrivateField(stream, "timestampAnchors");
+            anchors.put("test-stream", 42L);
 
             RabbitMQStreamOffset start = new RabbitMQStreamOffset(Map.of("test-stream", 42L));
             InputPartition[] partitions = stream.planInputPartitions(start);
@@ -260,7 +265,11 @@ class RealTimeModeTest {
             RabbitMQMicroBatchStream stream = createStream(options);
             setPrivateField(stream, "streams", List.of("test-stream"));
             setPrivateField(stream, "environment", new NoOpEnvironment());
-            setPrivateField(stream, "initialOffsets", Map.of("test-stream", 42L));
+            // Anchor resolved to 42 during the initial micro-batch; subsequent micro-batches
+            // start at 50 (past the anchor) and must NOT re-apply the timestamp filter.
+            @SuppressWarnings("unchecked")
+            Map<String, Long> anchors = (Map<String, Long>) getPrivateField(stream, "timestampAnchors");
+            anchors.put("test-stream", 42L);
 
             RabbitMQStreamOffset start = new RabbitMQStreamOffset(Map.of("test-stream", 50L));
             InputPartition[] partitions = stream.planInputPartitions(start);
@@ -273,11 +282,11 @@ class RealTimeModeTest {
         @Test
         void planInputPartitionsTimestampDoesNotMarkMissingStartFallbackForConfiguredSeek()
                 throws Exception {
-            // Timestamp-start mode with a stream missing from the start map (e.g. a newly
-            // discovered superstream partition in real-time mode). resolveMissingStartOffset
-            // records its fallback in initialOffsets, which would otherwise trick
-            // useConfiguredStartingOffset into re-applying timestamp filtering to records
-            // that were never resolved via timestamp seek.
+            // Timestamp-start mode: a stream missing from the start map (e.g. a newly
+            // discovered superstream partition in real-time mode) goes through the
+            // resolveMissingStartOffset fallback. Even when that fallback happens to return
+            // the same offset as the timestamp anchor, the partition must NOT re-apply the
+            // timestamp filter because the reader never did a timestamp-seek for it.
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
             opts.put("stream", "test-stream");
@@ -288,12 +297,13 @@ class RealTimeModeTest {
             RabbitMQMicroBatchStream stream = createStream(options);
             setPrivateField(stream, "streams", List.of("test-stream"));
             setPrivateField(stream, "environment", new NoOpEnvironment());
-            // Pre-seed initialOffsets to mimic state after initialOffset() resolved the
-            // timestamp seek for this stream. resolveMissingStartOffset will return this
-            // value, and the bug being verified is precisely that startOff (== 42L) ==
-            // initialOffsets.get(stream) must NOT be treated as a configured-seek anchor
-            // when the partition came in via the fallback branch.
+            // Pre-seed initialOffsets so resolveMissingStartOffset returns 42L.
             setPrivateField(stream, "initialOffsets", Map.of("test-stream", 42L));
+            // Inject the timestamp anchor (42L) so useConfiguredStartingOffset would return
+            // true if called with startOff=42 — but the fallback path must bypass that check.
+            @SuppressWarnings("unchecked")
+            Map<String, Long> anchors = (Map<String, Long>) getPrivateField(stream, "timestampAnchors");
+            anchors.put("test-stream", 42L);
 
             // start map omits the stream — forces the fallback path.
             RabbitMQStreamOffset start = new RabbitMQStreamOffset(Map.of());

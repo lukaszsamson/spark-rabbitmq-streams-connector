@@ -564,6 +564,11 @@ class RabbitMQMicroBatchStreamTest {
             opts.put("startingTimestamp", "1700000000000");
             RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
 
+            // Anchor cached as if resolved during initialOffset() (timestamp resolved to 10).
+            @SuppressWarnings("unchecked")
+            Map<String, Long> anchors = (Map<String, Long>)
+                    getPrivateField(stream, "timestampAnchors");
+            anchors.put("test-stream", 10L);
             setPrivateField(stream, "initialOffsets", Map.of("test-stream", 10L));
 
             InputPartition[] first = stream.planInputPartitions(
@@ -577,6 +582,68 @@ class RabbitMQMicroBatchStreamTest {
                     new RabbitMQStreamOffset(Map.of("test-stream", 20L)));
             assertThat(next).hasSize(1);
             assertThat(((RabbitMQInputPartition) next[0]).isUseConfiguredStartingOffset()).isFalse();
+        }
+
+        @Test
+        void timestampFilterSurvivesRestartByReResolvingAnchor() throws Exception {
+            // FABLE-7: after a query restart at batch N>=1, initialOffsets is NOT
+            // repopulated, but a slow/idle stream's start offset still equals the
+            // original timestamp anchor. The reader-side chunk-timestamp filter must
+            // still be enabled. useConfiguredStartingOffset lazily re-resolves the
+            // anchor via the timestamp probe instead of relying on initialOffsets.
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("startingOffsets", "timestamp");
+            opts.put("startingTimestamp", "1700000000000");
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            // Restart state: no initialOffsets, no cached anchor.
+            assertThat((Map<?, ?>) getPrivateField(stream, "initialOffsets")).isNull();
+            TimestampStartEnvironment env =
+                    new TimestampStartEnvironment(0L, List.of(10L));
+            setPrivateField(stream, "environment", env);
+
+            InputPartition[] partitions = stream.planInputPartitions(
+                    new RabbitMQStreamOffset(Map.of("test-stream", 10L)),
+                    new RabbitMQStreamOffset(Map.of("test-stream", 20L)));
+            assertThat(partitions).hasSize(1);
+            assertThat(((RabbitMQInputPartition) partitions[0]).isUseConfiguredStartingOffset())
+                    .isTrue();
+
+            // Re-resolved anchor is cached; a non-anchor start does not enable the filter.
+            InputPartition[] advanced = stream.planInputPartitions(
+                    new RabbitMQStreamOffset(Map.of("test-stream", 11L)),
+                    new RabbitMQStreamOffset(Map.of("test-stream", 20L)));
+            assertThat(advanced).hasSize(1);
+            assertThat(((RabbitMQInputPartition) advanced[0]).isUseConfiguredStartingOffset())
+                    .isFalse();
+        }
+
+        @Test
+        void timestampAnchorReResolutionFailsOpenWhenProbeFails() throws Exception {
+            // FABLE-7 fail-open: a probe failure during lazy re-resolution must NOT
+            // fail planning; it caches a no-anchor sentinel and leaves the reader-side
+            // filter disabled (current/safe behavior).
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("startingOffsets", "timestamp");
+            opts.put("startingTimestamp", "1700000000000");
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            setPrivateField(stream, "environment",
+                    new ThrowingConsumerBuilderEnvironment(new RuntimeException("probe failed")));
+
+            InputPartition[] partitions = stream.planInputPartitions(
+                    new RabbitMQStreamOffset(Map.of("test-stream", 10L)),
+                    new RabbitMQStreamOffset(Map.of("test-stream", 20L)));
+            assertThat(partitions).hasSize(1);
+            assertThat(((RabbitMQInputPartition) partitions[0]).isUseConfiguredStartingOffset())
+                    .isFalse();
+            // Failure sentinel is cached: no anchor for this stream.
+            @SuppressWarnings("unchecked")
+            Map<String, Long> anchors = (Map<String, Long>)
+                    getPrivateField(stream, "timestampAnchors");
+            assertThat(anchors).containsEntry("test-stream", Long.MIN_VALUE);
         }
 
         @Test

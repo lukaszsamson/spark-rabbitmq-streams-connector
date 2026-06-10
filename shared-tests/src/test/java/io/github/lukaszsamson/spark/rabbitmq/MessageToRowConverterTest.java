@@ -166,15 +166,29 @@ class MessageToRowConverterTest {
         }
 
         @Test
-        void zeroTimestampsMapToEpochStart() {
-            var converter = new MessageToRowConverter(EnumSet.of(MetadataField.PROPERTIES));
+        void zeroTimestampsMappedToNullNotEpochStart() {
+            // QpidProtonCodec returns NULL_TIMESTAMP = 0L for absent AMQP timestamps.
+            // The connector must treat 0 as unset and produce null, not 1970-01-01.
             Properties props = mock(Properties.class);
             when(props.getCreationTime()).thenReturn(0L);
             when(props.getAbsoluteExpiryTime()).thenReturn(0L);
+            when(props.getGroupSequence()).thenReturn(-1L);
 
             InternalRow propsRow = MessageToRowConverter.convertProperties(props);
-            assertThat(propsRow.getLong(8)).isEqualTo(0L); // absolute_expiry_time
-            assertThat(propsRow.getLong(9)).isEqualTo(0L); // creation_time
+            assertThat(propsRow.isNullAt(8)).isTrue(); // absolute_expiry_time
+            assertThat(propsRow.isNullAt(9)).isTrue(); // creation_time
+        }
+
+        @Test
+        void positiveTimestampsAreConvertedToMicros() {
+            Properties props = mock(Properties.class);
+            when(props.getCreationTime()).thenReturn(1700000000000L);
+            when(props.getAbsoluteExpiryTime()).thenReturn(1700000100000L);
+            when(props.getGroupSequence()).thenReturn(-1L);
+
+            InternalRow propsRow = MessageToRowConverter.convertProperties(props);
+            assertThat(propsRow.getLong(9)).isEqualTo(1700000000000L * 1000L); // creation_time
+            assertThat(propsRow.getLong(8)).isEqualTo(1700000100000L * 1000L); // absolute_expiry_time
         }
 
         @Test
@@ -335,7 +349,9 @@ class MessageToRowConverterTest {
         }
 
         @Test
-        void creationTimeZeroIsPreserved() {
+        void creationTimeZeroMapsToNullBecauseOfCodecSentinel() {
+            // QpidProtonCodec returns NULL_TIMESTAMP = 0L when creation_time is absent.
+            // A properties section with getCreationTime() == 0 must yield null, not epoch-0.
             var converter = new MessageToRowConverter(EnumSet.of(MetadataField.CREATION_TIME));
             Message msg = mockMessage(new byte[0]);
             Properties props = mock(Properties.class);
@@ -343,7 +359,7 @@ class MessageToRowConverterTest {
             when(msg.getProperties()).thenReturn(props);
 
             InternalRow row = converter.convert(msg, "s", 0, CHUNK_TS_MILLIS);
-            assertThat(row.getLong(4)).isEqualTo(0L);
+            assertThat(row.isNullAt(4)).isTrue();
         }
 
         @Test

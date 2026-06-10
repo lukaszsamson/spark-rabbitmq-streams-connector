@@ -711,29 +711,39 @@ class RowToMessageConverterTest {
         }
 
         @Test
-        void mixedCaseRoutingKeyMapEntryDedupedAgainstColumn() {
+        void differentlyCasedRoutingKeyMapEntryKeptAlongWithColumn() {
+            // AMQP application-property keys are case-sensitive; "ROUTING_KEY" is a
+            // distinct key from "routing_key" and must not be silently dropped.
             var converter = new RowToMessageConverter(schemaWithAppPropertiesAndRoutingKey());
-            var mapData = createStringMap("Routing_Key", "map-rk", "k1", "v1");
+            var mapData = createStringMap("ROUTING_KEY", "map-all-caps", "k1", "v1");
             InternalRow row = new GenericInternalRow(new Object[]{
                     "body".getBytes(), mapData, UTF8String.fromString("column-rk")
             });
 
-            MessageBuilder builder = org.mockito.Mockito.mock(
-                    MessageBuilder.class, org.mockito.Mockito.RETURNS_SELF);
-            MessageBuilder.ApplicationPropertiesBuilder apb = org.mockito.Mockito.mock(
-                    MessageBuilder.ApplicationPropertiesBuilder.class,
-                    org.mockito.Mockito.RETURNS_SELF);
-            org.mockito.Mockito.when(builder.applicationProperties()).thenReturn(apb);
-            org.mockito.Mockito.when(apb.messageBuilder()).thenReturn(builder);
+            Message msg = converter.convert(row, CODEC.messageBuilder());
+            assertThat(msg.getApplicationProperties())
+                    .containsEntry("routing_key", "column-rk")   // explicit column
+                    .containsEntry("ROUTING_KEY", "map-all-caps") // case-distinct user key kept
+                    .containsEntry("k1", "v1");
+        }
 
-            converter.convert(row, builder);
+        @Test
+        void exactRoutingKeyMapEntryStillReplacedByColumn() {
+            // Exact-match "routing_key" in the map is still suppressed in favour of the
+            // explicit routing_key column (dedup behaviour is retained for exact case).
+            var converter = new RowToMessageConverter(schemaWithAppPropertiesAndRoutingKey());
+            var mapData = createStringMap("routing_key", "map-rk", "k1", "v1");
+            InternalRow row = new GenericInternalRow(new Object[]{
+                    "body".getBytes(), mapData, UTF8String.fromString("column-rk")
+            });
 
-            // Mixed-case map entry must be dropped — only the explicit column wins.
-            org.mockito.Mockito.verify(apb).entry("routing_key", "column-rk");
-            org.mockito.Mockito.verify(apb).entry("k1", "v1");
-            org.mockito.Mockito.verify(apb, org.mockito.Mockito.never())
-                    .entry(org.mockito.Mockito.eq("Routing_Key"),
-                            org.mockito.Mockito.anyString());
+            Message msg = converter.convert(row, CODEC.messageBuilder());
+            assertThat(msg.getApplicationProperties())
+                    .containsEntry("routing_key", "column-rk")
+                    .containsEntry("k1", "v1")
+                    .doesNotContainEntry("routing_key", "map-rk");
+            // routing_key appears exactly once
+            assertThat(msg.getApplicationProperties()).hasSize(2);
         }
 
         @Test

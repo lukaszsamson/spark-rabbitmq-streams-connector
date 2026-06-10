@@ -767,8 +767,10 @@ final class RabbitMQScan implements Scan {
 
     /**
      * Per-message AMQP {@code creation_time} when the publisher set it, otherwise the
-     * chunk-level context timestamp. {@code Properties#getCreationTime()} returns a
-     * negative value when the property is unset (see {@code MessageToRowConverter}).
+     * chunk-level context timestamp. QpidProtonCodec (the default codec) returns
+     * NULL_TIMESTAMP = 0L when {@code creation_time} is absent; treat {@code <= 0} as
+     * unset so that messages with a properties section but no {@code creation_time}
+     * fall back to the chunk timestamp instead of returning epoch-0.
      */
     private static long messageOrChunkTimestamp(
             com.rabbitmq.stream.MessageHandler.Context context,
@@ -777,7 +779,7 @@ final class RabbitMQScan implements Scan {
             Properties props = message.getProperties();
             if (props != null) {
                 long creationTime = props.getCreationTime();
-                if (creationTime >= 0L) {
+                if (creationTime > 0L) {
                     return creationTime;
                 }
             }
@@ -819,6 +821,12 @@ final class RabbitMQScan implements Scan {
             LOG.debug("Tail probe failed for stream '{}': {}", stream, e.getMessage());
             return 0;
         }
+    }
+
+    static long messageOrChunkTimestampForTests(
+            com.rabbitmq.stream.MessageHandler.Context context,
+            com.rabbitmq.stream.Message message) {
+        return messageOrChunkTimestamp(context, message);
     }
 
     long[] resolveStreamOffsetRangeForTests(Environment env, String stream) {

@@ -459,6 +459,79 @@ class RabbitMQScanTest {
 
     }
 
+    // ========================================================================
+    // messageOrChunkTimestamp helper
+    // ========================================================================
+
+    @Nested
+    class MessageOrChunkTimestamp {
+
+        /**
+         * Build a minimal context whose {@code timestamp()} returns the supplied value.
+         */
+        private com.rabbitmq.stream.MessageHandler.Context ctx(long chunkTs) {
+            com.rabbitmq.stream.MessageHandler.Context ctx =
+                    mock(com.rabbitmq.stream.MessageHandler.Context.class);
+            when(ctx.timestamp()).thenReturn(chunkTs);
+            return ctx;
+        }
+
+        @Test
+        void returnsPerMessageCreationTimeWhenSet() {
+            Message msg = mock(Message.class);
+            Properties props = mock(Properties.class);
+            when(props.getCreationTime()).thenReturn(1700000000000L);
+            when(msg.getProperties()).thenReturn(props);
+
+            long ts = RabbitMQScan.messageOrChunkTimestampForTests(ctx(999L), msg);
+            assertThat(ts).isEqualTo(1700000000000L);
+        }
+
+        @Test
+        void fallsBackToChunkTimestampWhenCreationTimeIsZeroSentinel() {
+            // QpidProtonCodec returns 0L (NULL_TIMESTAMP) when creation_time is absent.
+            // The helper must fall back to the chunk timestamp, not return 0.
+            Message msg = mock(Message.class);
+            Properties props = mock(Properties.class);
+            when(props.getCreationTime()).thenReturn(0L);
+            when(msg.getProperties()).thenReturn(props);
+
+            long chunkTs = 1700000050000L;
+            long ts = RabbitMQScan.messageOrChunkTimestampForTests(ctx(chunkTs), msg);
+            assertThat(ts).isEqualTo(chunkTs);
+        }
+
+        @Test
+        void fallsBackToChunkTimestampWhenNoPropertiesSection() {
+            Message msg = mock(Message.class);
+            when(msg.getProperties()).thenReturn(null);
+
+            long chunkTs = 1700000060000L;
+            long ts = RabbitMQScan.messageOrChunkTimestampForTests(ctx(chunkTs), msg);
+            assertThat(ts).isEqualTo(chunkTs);
+        }
+
+        @Test
+        void fallsBackToChunkTimestampWhenMessageIsNull() {
+            long chunkTs = 1700000070000L;
+            long ts = RabbitMQScan.messageOrChunkTimestampForTests(ctx(chunkTs), null);
+            assertThat(ts).isEqualTo(chunkTs);
+        }
+
+        @Test
+        void fallsBackToChunkTimestampWhenNegativeSentinel() {
+            // Negative creation_time values are also treated as unset.
+            Message msg = mock(Message.class);
+            Properties props = mock(Properties.class);
+            when(props.getCreationTime()).thenReturn(-1L);
+            when(msg.getProperties()).thenReturn(props);
+
+            long chunkTs = 1700000080000L;
+            long ts = RabbitMQScan.messageOrChunkTimestampForTests(ctx(chunkTs), msg);
+            assertThat(ts).isEqualTo(chunkTs);
+        }
+    }
+
     @Test
     void scanDoesNotImplementContinuousStream() {
         RabbitMQScan scan = new RabbitMQScan(new ConnectorOptions(baseOptions()), schema());
@@ -730,9 +803,11 @@ class RabbitMQScanTest {
         private final StreamStats stats;
 
         private DelayedProbeEnvironment(long delayMs, StreamStats stats, long... offsets) {
-            // Default: per-message creation_time unset (-1) — the production probe will
-            // fall back to the chunk-level context timestamp, which is 0 in this fixture.
-            this(delayMs, stats, offsets, fillArray(offsets.length, -1L));
+            // Default: per-message creation_time unset (0L, the QpidProtonCodec sentinel) —
+            // the production probe falls back to the chunk-level context timestamp, which is
+            // 0 in the ProbeContext fixture. Use the explicit long[]/long[] constructor to
+            // supply positive creation_time values for tests that exercise per-message timestamps.
+            this(delayMs, stats, offsets, fillArray(offsets.length, 0L));
         }
 
         private DelayedProbeEnvironment(long delayMs, StreamStats stats,
@@ -1292,9 +1367,9 @@ class RabbitMQScanTest {
                     try {
                         Thread.sleep(delayMs);
                         for (int i = 0; i < offsets.length; i++) {
-                            // creationTimes[i] == -1 simulates an unset per-message
-                            // creation_time, which makes the production probe fall back
-                            // to the chunk-level context timestamp.
+                            // creationTimes[i] == 0L is the QpidProtonCodec NULL_TIMESTAMP
+                            // sentinel for an absent creation_time; the production probe
+                            // falls back to the chunk-level context timestamp in that case.
                             Message message = mock(Message.class);
                             Properties properties = mock(Properties.class);
                             when(properties.getCreationTime()).thenReturn(creationTimes[i]);

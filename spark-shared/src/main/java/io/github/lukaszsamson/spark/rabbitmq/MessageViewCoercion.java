@@ -53,12 +53,13 @@ final class MessageViewCoercion {
         putIfNotNull(out, "correlation_id", coerceIdToString(properties.getCorrelationId()));
         putIfNotNull(out, "content_type", properties.getContentType());
         putIfNotNull(out, "content_encoding", properties.getContentEncoding());
-        // Use >= 0 to mirror MessageToRowConverter so the row view and the
-        // extension/property view agree on epoch-zero timestamps.
-        if (properties.getAbsoluteExpiryTime() >= 0) {
+        // QpidProtonCodec returns NULL_TIMESTAMP = 0L for absent timestamps; treat
+        // <= 0 as unset, consistent with MessageToRowConverter#timestampOrNull.
+        // A genuine epoch-0 timestamp is indistinguishable from unset and is omitted.
+        if (properties.getAbsoluteExpiryTime() > 0) {
             out.put("absolute_expiry_time", Long.toString(properties.getAbsoluteExpiryTime()));
         }
-        if (properties.getCreationTime() >= 0) {
+        if (properties.getCreationTime() > 0) {
             out.put("creation_time", Long.toString(properties.getCreationTime()));
         }
         putIfNotNull(out, "group_id", properties.getGroupId());
