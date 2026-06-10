@@ -260,9 +260,10 @@ public final class RowToMessageConverter implements Serializable {
             var valueArray = mapData.valueArray();
             for (int i = 0; i < mapData.numElements(); i++) {
                 String key = keyArray.getUTF8String(i).toString();
-                if (routingKey != null && "routing_key".equalsIgnoreCase(key)) {
-                    // Explicit routing_key column wins; skip the map entry to
-                    // avoid emitting two routing_key entries on the wire.
+                if (routingKey != null && "routing_key".equals(key)) {
+                    // Explicit routing_key column wins; skip only the exact "routing_key"
+                    // map entry — AMQP application-property keys are case-sensitive, so
+                    // differently-cased keys (e.g. "ROUTING_KEY") are distinct and kept.
                     continue;
                 }
                 String value = valueArray.isNullAt(i) ? null

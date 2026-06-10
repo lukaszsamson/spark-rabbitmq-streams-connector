@@ -77,7 +77,12 @@ public final class MessageToRowConverter implements Serializable {
         }
         if (includeCreationTime) {
             Properties props = message.getProperties();
-            if (props != null && props.getCreationTime() >= 0) {
+            // QpidProtonCodec (the default codec) returns NULL_TIMESTAMP = 0L when
+            // creation_time is absent. Treat <= 0 as unset so messages with a
+            // properties section but no creation_time produce null rather than
+            // 1970-01-01. A genuine epoch-0 timestamp is indistinguishable from
+            // unset under this codec and is therefore also mapped to null.
+            if (props != null && props.getCreationTime() > 0) {
                 values[idx++] = safeMillisToMicros(props.getCreationTime());
             } else {
                 values[idx++] = null;
@@ -233,7 +238,10 @@ public final class MessageToRowConverter implements Serializable {
     }
 
     private static Object timestampOrNull(long millis) {
-        return millis >= 0 ? safeMillisToMicros(millis) : null;
+        // QpidProtonCodec returns NULL_TIMESTAMP = 0L for absent timestamps; treat
+        // <= 0 as unset. A genuine epoch-0 timestamp is indistinguishable from
+        // unset and is also mapped to null.
+        return millis > 0 ? safeMillisToMicros(millis) : null;
     }
 
     private static Object longOrNull(long value) {

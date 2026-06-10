@@ -1001,6 +1001,36 @@ class ConnectorOptionsTest {
         }
 
         @Test
+        void rejectsTrustAllCombinedWithKeystore() {
+            // trustAll skips certificate verification; a keystore (mTLS client cert)
+            // would be silently ignored — reject this misconfiguration early.
+            var map = minimalStreamOptions();
+            map.put("tls", "true");
+            map.put("tls.trustAll", "true");
+            map.put("tls.keystore", "/path/to/ks.jks");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateCommon)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("tls.trustAll")
+                    .hasMessageContaining("tls.keystore");
+        }
+
+        @Test
+        void rejectsTrustAllCombinedWithTruststore() {
+            // trustAll skips certificate verification; a truststore would be silently
+            // ignored — reject this misconfiguration early.
+            var map = minimalStreamOptions();
+            map.put("tls", "true");
+            map.put("tls.trustAll", "true");
+            map.put("tls.truststore", "/path/to/ts.jks");
+            var opts = new ConnectorOptions(map);
+            assertThatThrownBy(opts::validateCommon)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("tls.trustAll")
+                    .hasMessageContaining("tls.truststore");
+        }
+
+        @Test
         void treatsEmptyStreamAsAbsent() {
             var map = new HashMap<String, String>();
             map.put("stream", "");

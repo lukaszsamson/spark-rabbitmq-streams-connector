@@ -469,6 +469,18 @@ public final class ConnectorOptions implements Serializable {
             throw new IllegalArgumentException(
                     "'" + TLS_TRUST_ALL + "' requires '" + TLS + "' to be true");
         }
+        // trustAll skips certificate verification entirely; a configured keystore or
+        // truststore would be silently ignored, which is almost certainly a misconfiguration.
+        if (tlsTrustAll && (tlsTruststore != null && !tlsTruststore.isEmpty())) {
+            throw new IllegalArgumentException(
+                    "'" + TLS_TRUST_ALL + "' cannot be combined with '" + TLS_TRUSTSTORE +
+                            "': the truststore would be ignored");
+        }
+        if (tlsTrustAll && (tlsKeystore != null && !tlsKeystore.isEmpty())) {
+            throw new IllegalArgumentException(
+                    "'" + TLS_TRUST_ALL + "' cannot be combined with '" + TLS_KEYSTORE +
+                            "': the keystore (mTLS client certificate) would be ignored");
+        }
 
         // Validate extension class: addressResolverClass
         if (addressResolverClass != null && !addressResolverClass.isEmpty()) {

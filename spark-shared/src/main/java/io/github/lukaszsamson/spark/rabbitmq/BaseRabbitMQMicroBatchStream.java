@@ -122,6 +122,18 @@ class BaseRabbitMQMicroBatchStream
     volatile int estimatedMessageSize;
     /** Initial offsets resolved for this stream instance (used for timestamp first batch seek). */
     volatile Map<String, Long> initialOffsets;
+    /**
+     * Per-stream timestamp-anchor offset (the offset the configured starting timestamp
+     * resolved to). Kept separate from {@link #initialOffsets} so the reader-side
+     * chunk-timestamp filter survives a query restart at batch N&gt;=1, where
+     * {@code initialOffsets} is not repopulated. Must NOT be conflated with
+     * {@code resolveMissingStartOffset} checkpoint/first-available fallbacks (those must
+     * not enable the timestamp filter). A {@link #NO_TIMESTAMP_ANCHOR} sentinel caches a
+     * failed lazy re-resolution so planning never re-probes and always fails open.
+     */
+    final ConcurrentHashMap<String, Long> timestampAnchors = new ConcurrentHashMap<>();
+    /** Sentinel value cached when timestamp-anchor re-resolution fails (fail-open). */
+    static final long NO_TIMESTAMP_ANCHOR = Long.MIN_VALUE;
     /** Last end offsets successfully persisted to broker (next offsets). */
     volatile Map<String, Long> lastStoredEndOffsets;
     /** Last end offsets committed by Spark (next offsets). */
@@ -1696,15 +1708,21 @@ class BaseRabbitMQMicroBatchStream
         if (options.getStartingOffsets() == StartingOffsetsMode.TIMESTAMP) {
             Map<String, Long> perStreamTs = options.getStartingOffsetsByTimestamp();
             if (perStreamTs != null && perStreamTs.containsKey(stream)) {
-                return resolveTimestampStartingOffset(getEnvironment(), stream, perStreamTs.get(stream));
+                long anchor = resolveTimestampStartingOffset(getEnvironment(), stream, perStreamTs.get(stream));
+                timestampAnchors.put(stream, anchor);
+                return anchor;
             }
         }
         return switch (options.getStartingOffsets()) {
             case EARLIEST -> resolveFirstAvailable(stream);
             case LATEST -> resolveLatestStartingOffset(stream);
             case OFFSET -> options.getStartingOffset();
-            case TIMESTAMP -> resolveTimestampStartingOffset(
-                    getEnvironment(), stream, options.getStartingTimestamp());
+            case TIMESTAMP -> {
+                long anchor = resolveTimestampStartingOffset(
+                        getEnvironment(), stream, options.getStartingTimestamp());
+                timestampAnchors.put(stream, anchor);
+                yield anchor;
+            }
         };
     }
 
@@ -2004,14 +2022,49 @@ class BaseRabbitMQMicroBatchStream
         if (options.getStartingOffsets() != StartingOffsetsMode.TIMESTAMP) {
             return false;
         }
-        synchronized (mutableStateLock) {
-            Map<String, Long> initial = this.initialOffsets;
-            if (initial == null) {
-                return false;
-            }
-            Long initialOffset = initial.get(stream);
-            return initialOffset != null && initialOffset == startOffset;
+        long anchor = resolveTimestampAnchor(stream);
+        return anchor != NO_TIMESTAMP_ANCHOR && anchor == startOffset;
+    }
+
+    /**
+     * Return the per-stream timestamp-anchor offset, lazily re-resolving it once per
+     * stream per driver lifetime when it is not already cached (the query-restart case,
+     * where {@link #initialOffsets} is not repopulated). On probe failure the
+     * {@link #NO_TIMESTAMP_ANCHOR} sentinel is cached and returned so planning fails open
+     * (no reader-side timestamp filter) and never re-probes.
+     */
+    private long resolveTimestampAnchor(String stream) {
+        Long cached = timestampAnchors.get(stream);
+        if (cached != null) {
+            return cached;
         }
+        // Resolve the broker probe OUTSIDE the map so no bin lock is held during blocking
+        // I/O. putIfAbsent makes the first writer win; a rare concurrent re-probe is
+        // harmless (resolution is idempotent), and the result is cached at most once.
+        long anchor;
+        Long timestamp;
+        Map<String, Long> perStreamTs = options.getStartingOffsetsByTimestamp();
+        if (perStreamTs != null && perStreamTs.containsKey(stream)) {
+            timestamp = perStreamTs.get(stream);
+        } else {
+            // May be null when only a per-stream map is configured and this stream is
+            // not covered (e.g. a superstream partition discovered after restart) —
+            // there is no anchor to compare against, so fail open below.
+            timestamp = options.getStartingTimestamp();
+        }
+        if (timestamp == null) {
+            anchor = NO_TIMESTAMP_ANCHOR;
+        } else {
+            try {
+                anchor = resolveTimestampStartingOffset(getEnvironment(), stream, timestamp);
+            } catch (Exception e) {
+                LOG.warn("Failed to re-resolve timestamp anchor for stream '{}' after restart; "
+                        + "reader-side timestamp filter disabled for this stream", stream, e);
+                anchor = NO_TIMESTAMP_ANCHOR;
+            }
+        }
+        Long existing = timestampAnchors.putIfAbsent(stream, anchor);
+        return existing != null ? existing : anchor;
     }
 
     long resolveMissingStartOffset(
@@ -2525,7 +2578,6 @@ class BaseRabbitMQMicroBatchStream
             }
             String message = current.getMessage();
             if (message != null && (message.contains("STREAM_DOES_NOT_EXIST")
-                    || message.contains("does not exist")
                     || message.contains("has no partition streams"))) {
                 return true;
             }

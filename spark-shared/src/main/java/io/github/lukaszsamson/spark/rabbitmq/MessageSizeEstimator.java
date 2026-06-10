@@ -47,6 +47,8 @@ final class MessageSizeEstimator {
         total += propertyBytes("correlation_id", properties.getCorrelationId());
         total += propertyBytes("content_type", properties.getContentType());
         total += propertyBytes("content_encoding", properties.getContentEncoding());
+        // QpidProtonCodec returns NULL_TIMESTAMP = 0L for absent timestamps; > 0
+        // correctly skips both unset and the indistinguishable epoch-0 case.
         if (properties.getAbsoluteExpiryTime() > 0) {
             total += propertyBytes("absolute_expiry_time", properties.getAbsoluteExpiryTime());
         }

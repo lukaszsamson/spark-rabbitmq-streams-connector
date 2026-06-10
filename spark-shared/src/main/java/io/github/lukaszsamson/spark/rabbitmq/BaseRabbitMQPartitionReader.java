@@ -78,12 +78,22 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
     // The consumer callback no longer advances this directly — it enqueues
     // a SkipMarker, and the task thread advances via advanceObserved().
     AtomicLong lastObservedOffset = new AtomicLong(-1);
+    // Set by the subscription/SAC-activation listener (client callback thread) to
+    // the offset a resubscription resumes at, but only after the reader has made
+    // progress (i.e. it is a recovery resubscription, not the first subscribe).
+    // The task thread consumes it at the top of the poll loop to detect mid-range
+    // retention truncation that the client's silent RECOVERING->OPEN recovery hides
+    // (it never sets CLOSED, so the post-closure gap check below never fires).
+    // -1 means "no pending check". Cleared (-1) once the task thread has validated it.
+    final AtomicLong pendingResubscriptionOffset = new AtomicLong(-1L);
     boolean filteredTailReached = false;
     volatile boolean finished = false;
     long lastTailProbeNanos = -1L;
     long lastTailProbeOffset = -1L;
     long lastStatsTailNanos = -1L;
     long lastStatsTailOffset = -1L;
+    long lastStatsFirstNanos = -1L;
+    long lastStatsFirstOffset = -1L;
 
     enum TerminationDecision {
         CONTINUE,
@@ -194,6 +204,11 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
             if (error != null) {
                 throw new IOException("Consumer error on stream '" + stream + "'", error);
             }
+            // Detect mid-range truncation hidden by silent consumer recovery.
+            if (checkPendingResubscriptionForTruncation()) {
+                finished = true;
+                return false;
+            }
             if (isSingleActiveConsumerKnownInactive() && queue.isEmpty()) {
                 throw terminationFailure(false, false, true, 0L);
             }
@@ -204,10 +219,13 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
                 qm = queue.poll(pollSliceMs, TimeUnit.MILLISECONDS);
                 pollWaitMs += TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - pollStart);
             } catch (InterruptedException e) {
+                // Do NOT report "no more data": returning false here would let Spark
+                // commit a partial range as complete and advance the checkpoint past
+                // unread offsets. Restore the interrupt flag and fail the task so the
+                // range is re-run. On Spark's kill path TaskRunner converts this into
+                // TaskKilled. Matches the Kafka connector (interrupt -> task failure).
                 Thread.currentThread().interrupt();
-                LOG.debug("Interrupted while reading from stream '{}'; finishing split", stream);
-                finished = true;
-                return false;
+                throw new IOException("Interrupted while reading from stream '" + stream + "'", e);
             }
 
             if (qm == null) {
@@ -815,13 +833,28 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
             OffsetSpecification subscriptionOffsetSpec,
             OffsetSpecification configuredOffsetSpec) {
         if (lastEmittedOffset >= 0) {
-            return OffsetSpecification.offset(lastEmittedOffset + 1);
+            long resume = lastEmittedOffset + 1;
+            recordResubscriptionOffset(resume);
+            return OffsetSpecification.offset(resume);
         }
         long observed = lastObservedOffset.get();
         if (observed >= 0) {
-            return OffsetSpecification.offset(Math.max(startOffset, observed + 1));
+            long resume = Math.max(startOffset, observed + 1);
+            recordResubscriptionOffset(resume);
+            return OffsetSpecification.offset(resume);
         }
+        // First subscribe (no progress yet): not a recovery resubscription, so do
+        // not arm the truncation check.
         return subscriptionOffsetSpec != null ? subscriptionOffsetSpec : configuredOffsetSpec;
+    }
+
+    /**
+     * Record (on the client callback thread) the offset a recovery resubscription
+     * resumes at, keeping the highest pending value. No broker RPC here — the task
+     * thread performs the stats query in {@link #checkPendingResubscriptionForTruncation()}.
+     */
+    void recordResubscriptionOffset(long resumeOffset) {
+        pendingResubscriptionOffset.accumulateAndGet(resumeOffset, Math::max);
     }
 
     OffsetSpecification resolveSingleActiveConsumerActivationOffset(
@@ -968,6 +1001,76 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
         return !isBrokerFilterConfigured() && !isTimestampConfiguredStartingOffset();
     }
 
+    /**
+     * Task-thread check for mid-range retention truncation hidden by the client's
+     * silent RECOVERING-&gt;OPEN recovery. When a recovery resubscription armed a
+     * pending resume offset (via {@link #recordResubscriptionOffset(long)}), query
+     * the stream's first available offset and, if it advanced past the resume
+     * offset, the range [resumeOffset, firstOffset) was truncated while the consumer
+     * was disconnected — data the post-closure gap check below never catches because
+     * recovery never sets {@code consumerClosed}.
+     *
+     * <p>Throws {@link IOException} when truncation is detected and
+     * failOnDataLoss=true. With failOnDataLoss=false a partial truncation is logged
+     * and counted but reading continues — the recovered consumer is already
+     * delivering the surviving remainder {@code [firstOffset, endOffset)}, and
+     * finishing would discard readable in-range data (same policy as
+     * {@link #handleStartOffsetOutOfRange(long)}). Returns {@code true} (caller
+     * should finish the split) only when nothing in the planned range survived
+     * (fully truncated or stream gone). Returns {@code false} otherwise.
+     *
+     * <p>The stats RPC runs here on the task thread (never on the client callback
+     * thread) and is rate-limited via {@link #queryStreamFirstOffsetFromStatsWithCache()}.
+     * Skipped for filtered/timestamp reads where offsets are legitimately non-contiguous
+     * (same gate as the post-closure gap check).
+     */
+    boolean checkPendingResubscriptionForTruncation() throws IOException {
+        long resumeOffset = pendingResubscriptionOffset.get();
+        if (resumeOffset < 0) {
+            return false;
+        }
+        if (!shouldDetectOffsetGapsAfterConsumerClosure()) {
+            // Not meaningful for filtered/timestamp reads; clear so it does not
+            // accumulate and re-fire.
+            pendingResubscriptionOffset.compareAndSet(resumeOffset, -1L);
+            return false;
+        }
+        long firstOffset;
+        try {
+            firstOffset = queryStreamFirstOffsetFromStatsWithCache();
+        } catch (Exception e) {
+            if (isMissingStreamException(e)) {
+                firstOffset = Long.MAX_VALUE; // stream gone — treat as fully truncated
+            } else {
+                LOG.debug("Unable to query first offset for resubscription truncation check "
+                        + "on stream '{}': {}", stream, e.getMessage());
+                return false; // leave pending armed; retry on a later poll iteration
+            }
+        }
+        if (firstOffset < 0 || firstOffset <= resumeOffset) {
+            // No truncation past the resume point. Clear only the value we observed
+            // so a newer resubscription armed concurrently is not lost.
+            pendingResubscriptionOffset.compareAndSet(resumeOffset, -1L);
+            return false;
+        }
+        // Truncation: [resumeOffset, firstOffset) was lost during recovery.
+        pendingResubscriptionOffset.compareAndSet(resumeOffset, -1L);
+        String message = "Detected offset gap after consumer recovery on stream '"
+                + stream + "': resubscribed at offset " + resumeOffset
+                + " but stream now starts at " + firstOffset + " (range [" + resumeOffset
+                + ", " + firstOffset + ") truncated by retention) for planned range ["
+                + startOffset + ", " + endOffset + ")";
+        if (options.isFailOnDataLoss()) {
+            throw new IOException(message);
+        }
+        LOG.warn("{}; continuing because failOnDataLoss=false", message);
+        dataLoss++;
+        // Finish only when the whole remaining planned range was truncated; for a
+        // partial truncation the surviving [firstOffset, endOffset) is still being
+        // delivered by the recovered consumer and must be emitted.
+        return hasFinitePlannedEnd() && firstOffset >= endOffset;
+    }
+
     long expectedNextObservedOffset() {
         long observed = lastObservedOffset.get();
         if (observed < startOffset) {
@@ -1032,15 +1135,22 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
             if (env == null) {
                 return false;
             }
-            StreamStats stats = env.queryStreamStats(stream);
-            long first = stats.firstOffset();
+            // firstOffset-vs-startOffset truncation check applies to bounded and
+            // unbounded ranges alike. Rate-limit the stats RPC: on an idle real-time
+            // partition this runs on every nextWithTimeout deadline expiry.
+            long first = queryStreamFirstOffsetFromStatsWithCache();
             boolean startWasTruncatedBeforeAnyInRangeProgress =
-                    first > startOffset && lastObservedOffset.get() < startOffset;
+                    first >= 0 && first > startOffset && lastObservedOffset.get() < startOffset;
             if (startWasTruncatedBeforeAnyInRangeProgress) {
                 return true;
             }
+            // The tail probe only affects the result for finite ranges; skip it
+            // (and the throwaway probe consumer it builds) for unbounded ranges.
+            if (!hasFinitePlannedEnd()) {
+                return false;
+            }
             long tail = probeLastMessageOffset();
-            return hasFinitePlannedEnd() && tail >= 0 && tail < startOffset;
+            return tail >= 0 && tail < startOffset;
         } catch (Exception e) {
             if (isMissingStreamException(e)) {
                 return true;
@@ -1049,6 +1159,41 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
                     stream, e.getMessage());
             return false;
         }
+    }
+
+    /**
+     * Cached {@code firstOffset()} from stream stats. Returns -1 when the stream
+     * is empty ({@link NoOffsetException}) or the environment is unavailable.
+     * Rate-limited with the same cache window as the tail-stats helper so idle
+     * real-time partitions do not issue a stats RPC per deadline expiry.
+     * Missing-stream exceptions propagate to the caller for data-loss classification.
+     */
+    long queryStreamFirstOffsetFromStatsWithCache() {
+        long nowNanos = System.nanoTime();
+        if (lastStatsFirstNanos > 0) {
+            long elapsedMs = TimeUnit.NANOSECONDS.toMillis(nowNanos - lastStatsFirstNanos);
+            if (elapsedMs < tailStatsCacheWindowMs()) {
+                return lastStatsFirstOffset;
+            }
+        }
+
+        Environment env = environment;
+        if (env == null) {
+            lastStatsFirstOffset = -1L;
+            lastStatsFirstNanos = nowNanos;
+            return -1L;
+        }
+
+        StreamStats stats = env.queryStreamStats(stream);
+        long first;
+        try {
+            first = stats.firstOffset();
+        } catch (NoOffsetException e) {
+            first = -1L;
+        }
+        lastStatsFirstOffset = first;
+        lastStatsFirstNanos = System.nanoTime();
+        return first;
     }
 
     boolean plannedRangeEndedBeforeTarget() {
@@ -1070,8 +1215,11 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
                 return true;
             }
             String message = current.getMessage();
+            // Match only explicit stream-topology markers. The generic substring
+            // "does not exist" is intentionally excluded: operational errors
+            // (vhost/SASL/identity, wrapped extension exceptions) can carry that
+            // phrase and must fail fast, not be misclassified as data loss.
             if (message != null && (message.contains("STREAM_DOES_NOT_EXIST")
-                    || message.contains("does not exist")
                     || message.contains("has no partition streams"))) {
                 return true;
             }

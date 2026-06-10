@@ -76,6 +76,11 @@ final class RabbitMQPartitionReader extends BaseRabbitMQPartitionReader
             if (error != null) {
                 throw new IOException("Consumer error on stream '" + stream + "'", error);
             }
+            // Detect mid-range truncation hidden by silent consumer recovery.
+            if (checkPendingResubscriptionForTruncation()) {
+                finished = true;
+                return RecordStatus.newStatusWithoutArrivalTime(false);
+            }
             if (isSingleActiveConsumerKnownInactive() && queue.isEmpty()) {
                 throw terminationFailure(false, false, true, 0L);
             }
@@ -113,10 +118,12 @@ final class RabbitMQPartitionReader extends BaseRabbitMQPartitionReader
                 qm = queue.poll(pollMs, TimeUnit.MILLISECONDS);
                 pollWaitMs += TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - pollStart);
             } catch (InterruptedException e) {
+                // Restore the interrupt flag and fail the task rather than reporting
+                // a false (range-complete) status. On Spark's kill path TaskRunner
+                // converts this into TaskKilled. Matches BaseRabbitMQPartitionReader.next()
+                // and the Kafka connector (interrupt -> task failure).
                 Thread.currentThread().interrupt();
-                LOG.debug("Interrupted while reading from stream '{}'; finishing split", stream);
-                finished = true;
-                return RecordStatus.newStatusWithoutArrivalTime(false);
+                throw new IOException("Interrupted while reading from stream '" + stream + "'", e);
             }
 
             if (qm == null) {
