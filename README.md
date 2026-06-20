@@ -125,7 +125,7 @@ StreamingQuery query = stream.writeStream()
 **Constraints** (enforced at runtime — the reader throws if violated):
 
 - Spark 4.1 only; not available in the Spark 3.5 or 4.0 artifacts.
-- The following source options are **not supported** in real-time mode: `minPartitions`, `maxRecordsPerTrigger`, `maxBytesPerTrigger`, `minOffsetsPerTrigger`, `maxWaitMs`.
+- The following source options are **not supported** in real-time mode: `minPartitions`, `maxRecordsPerPartition`, `maxRecordsPerTrigger`, `maxBytesPerTrigger`, `minOffsetsPerTrigger`, `maxWaitMs`.
 - Use `pollTimeoutMs` to control how long each pull waits for messages.
 - Delivery semantics are at-least-once, matching the micro-batch source.
 

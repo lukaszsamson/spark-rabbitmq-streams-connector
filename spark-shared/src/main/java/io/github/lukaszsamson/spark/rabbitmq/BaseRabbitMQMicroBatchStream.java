@@ -918,11 +918,12 @@ class BaseRabbitMQMicroBatchStream
                 long endOff = entry.getValue();
                 long validatedStart = validateStartOffset(stream, startOff, endOff);
                 if (validatedStart < 0L) {
-                    // Preserve the stream key at the current start offset when a frozen-topology
-                    // partition is temporarily unreadable (deleted/empty with failOnDataLoss=false).
-                    // Dropping the key from the latest offset regresses Spark's next start map; if the
-                    // stream is recreated with offsets starting at 0, a later trigger can re-read the
-                    // new generation from the stale initial offset and duplicate offset values.
+                    // Preserve the stream key at the current start offset when a stream is
+                    // temporarily unreadable (deleted/empty with failOnDataLoss=false). This path
+                    // is taken for any validation skip, in stream or superstream mode. Dropping the
+                    // key from the latest offset regresses Spark's next start map; if the stream is
+                    // recreated with offsets starting at 0, a later trigger can re-read the new
+                    // generation from the stale initial offset and duplicate offset values.
                     normalizedStart.put(stream, startOff);
                     normalizedTail.put(stream, startOff);
                     continue;
@@ -1384,9 +1385,12 @@ class BaseRabbitMQMicroBatchStream
             return streams;
         }
 
-        // Superstream topology is discovered once and cached for the query run's lifetime.
-        // Per spec, topology is fixed per query and refreshed only on restart — a restart
-        // creates a new stream instance, so this cache starts empty again. Consequences:
+        // Superstream topology is cached after the first successful non-empty discovery and
+        // then fixed for the query run's lifetime. Empty results and discovery failures with
+        // failOnDataLoss=false are NOT cached (we return List.of() and leave `streams` null),
+        // so discovery is retried on later calls until it succeeds. Per spec, once established
+        // the topology is refreshed only on restart — a restart creates a new stream instance,
+        // so this cache starts empty again. Consequences:
         //   - Partitions that go missing mid-query stay in the topology and are skipped or
         //     failed at read time via failOnDataLoss; they are not silently dropped here.
         //   - Partitions added to the superstream mid-query are NOT picked up until the next
