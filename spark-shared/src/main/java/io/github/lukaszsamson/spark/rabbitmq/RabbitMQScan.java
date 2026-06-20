@@ -529,12 +529,15 @@ final class RabbitMQScan implements Scan {
 
     private long resolveLatestOffset(Environment env, String stream, StreamStats stats) {
         // endingOffsets=latest: use the most recent tail we can observe.
-        // Stream stats can lag behind newly published messages, so keep the probe and
-        // take max(statsTail, probedTail). Bound probe latency to avoid planning stalls.
+        // Prefer the exact last-message probe when it succeeds: stats can lag behind newly
+        // published messages and can also overshoot after a stream is deleted and recreated,
+        // so the probe wins even when it is below statsTail (probe-wins). Fall back to
+        // statsTail only when the probe observes no message. Bound probe latency to avoid
+        // planning stalls.
         long statsTail = resolveTailOffset(stats);
         long probedTail = probeTailOffsetFromLastMessageWithTimeout(
                 env, stream, TAIL_PROBE_TIMEOUT_MS);
-        return Math.max(statsTail, probedTail);
+        return probedTail > 0L ? probedTail : statsTail;
     }
 
     /**

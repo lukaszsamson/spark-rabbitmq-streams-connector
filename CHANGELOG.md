@@ -14,6 +14,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Internal `StoredOffsetLookup` helper and its temporary tracking-consumer offset-recovery path.
 
 ### Added
+- Spark 4.1 real-time mode support (`SupportsRealTimeMode`) for low-latency Structured Streaming reads; unsupported with `minPartitions`/`maxRecordsPerTrigger`/`maxBytesPerTrigger`/`minOffsetsPerTrigger`/`maxWaitMs`.
 - Spark DataSource V2 connector for RabbitMQ Streams (`rabbitmq_streams` provider name).
 - Batch read and write support for streams and superstreams.
 - Structured Streaming micro-batch source and sink.
@@ -43,7 +44,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Sink schema validation with `ignoreUnknownColumns` option.
 - Single active consumer support.
 - Compression support (`gzip`, `snappy`, `lz4`, `zstd`) with sub-entry batching.
-- RabbitMQ Stream Java client baseline upgraded to `1.5.x`.
 - Producer option support for `dynamicBatch`, `retryOnRecovery`, and `compressionCodecFactoryClass`.
 - Superstream hash routing option support for `hashFunctionClass`.
 - Custom superstream routing strategy now receives full message view and metadata route lookup.

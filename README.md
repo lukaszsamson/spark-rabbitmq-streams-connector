@@ -26,7 +26,7 @@ Provides a Spark DataSource V2 connector that reads from and writes to [RabbitMQ
 | Apache Spark | 3.5.x, 4.0.x, 4.1.x |
 | Java | 17, 21 |
 | RabbitMQ | 3.11+ (minimum), 3.13+ (filtering), 4.0+ (superstreams improvements), 4.3+ (precise tail offsets via `committedOffset()`) |
-| rabbitmq-stream-java-client | 1.5.x |
+| rabbitmq-stream-java-client | 1.6.0 |
 | Scala | 2.12 (Spark 3.5 only), 2.13 |
 
 ### Artifacts
@@ -46,7 +46,7 @@ Provides a Spark DataSource V2 connector that reads from and writes to [RabbitMQ
 <dependency>
     <groupId>io.github.lukaszsamson</groupId>
     <artifactId>spark-rabbitmq-streams-connector-spark41</artifactId>
-    <version>0.1.0-SNAPSHOT</version>
+    <version>0.2.0</version>
 </dependency>
 ```
 
@@ -102,6 +102,32 @@ stream.writeStream()
     .trigger(Trigger.ProcessingTime("10 seconds"))
     .start();
 ```
+
+### Real-time mode (Spark 4.1 only)
+
+The `spark-rabbitmq-streams-connector-spark41` artifact implements Spark's `SupportsRealTimeMode` interface, enabling low-latency Structured Streaming reads via Spark's real-time mode API. No code change is required: Spark activates real-time mode automatically when the query and source support it.
+
+```java
+// Real-time mode is activated by Spark automatically when using spark41 artifact
+Dataset<Row> stream = spark.readStream()
+    .format("rabbitmq_streams")
+    .option("endpoints", "localhost:5552")
+    .option("stream", "my-stream")
+    .option("pollTimeoutMs", "5000")   // tune poll latency
+    .load();
+
+StreamingQuery query = stream.writeStream()
+    .format("console")
+    .option("checkpointLocation", "/tmp/checkpoint")
+    .start();
+```
+
+**Constraints** (enforced at runtime — the reader throws if violated):
+
+- Spark 4.1 only; not available in the Spark 3.5 or 4.0 artifacts.
+- The following source options are **not supported** in real-time mode: `minPartitions`, `maxRecordsPerTrigger`, `maxBytesPerTrigger`, `minOffsetsPerTrigger`, `maxWaitMs`.
+- Use `pollTimeoutMs` to control how long each pull waits for messages.
+- Delivery semantics are at-least-once, matching the micro-batch source.
 
 ## Data model
 

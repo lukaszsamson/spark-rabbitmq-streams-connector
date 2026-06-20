@@ -50,6 +50,11 @@ jobs:
             && echo "spark41: Netty classes relocated" \
             || (echo "ERROR: spark41 shaded Netty classes not found" && exit 1)
 
+      - name: Compile examples against the built connector
+        run: |
+          mvn -B -q -DskipTests install -pl core,spark-shared,spark41 -am
+          mvn -B -q -f examples/pom.xml compile
+
   integration-tests:
     name: Integration Tests (Java ${{ matrix.java }}, ${{ matrix.spark_profile }})
     runs-on: ubuntu-latest
