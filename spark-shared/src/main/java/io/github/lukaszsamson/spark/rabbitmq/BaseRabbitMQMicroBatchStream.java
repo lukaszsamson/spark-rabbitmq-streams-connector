@@ -918,6 +918,14 @@ class BaseRabbitMQMicroBatchStream
                 long endOff = entry.getValue();
                 long validatedStart = validateStartOffset(stream, startOff, endOff);
                 if (validatedStart < 0L) {
+                    // Preserve the stream key at the current start offset when a stream is
+                    // temporarily unreadable (deleted/empty with failOnDataLoss=false). This path
+                    // is taken for any validation skip, in stream or superstream mode. Dropping the
+                    // key from the latest offset regresses Spark's next start map; if the stream is
+                    // recreated with offsets starting at 0, a later trigger can re-read the new
+                    // generation from the stale initial offset and duplicate offset values.
+                    normalizedStart.put(stream, startOff);
+                    normalizedTail.put(stream, startOff);
                     continue;
                 }
                 normalizedStart.put(stream, validatedStart);
@@ -1377,57 +1385,57 @@ class BaseRabbitMQMicroBatchStream
             return streams;
         }
 
-        List<String> previous = streams;
-        try {
-            List<String> discovered = discoverSuperStreamPartitions();
-            if (discovered.isEmpty()) {
-                if (options.isFailOnDataLoss()) {
-                    throw new IllegalStateException(
-                            "Superstream '" + options.getSuperStream() +
-                                    "' has no partition streams");
-                }
-                if (previous != null && !previous.isEmpty()) {
-                    LOG.warn("Superstream '{}' discovery returned no partition streams; "
-                                    + "preserving cached topology ({} streams) because failOnDataLoss=false",
-                            options.getSuperStream(), previous.size());
-                    streams = previous;
-                    return streams;
-                }
-                LOG.warn("Superstream '{}' currently has no partition streams; returning empty topology "
-                                + "because failOnDataLoss=false",
-                        options.getSuperStream());
-                streams = List.of();
-                return streams;
+        // Superstream topology is cached after the first successful non-empty discovery and
+        // then fixed for the query run's lifetime. Empty results and discovery failures with
+        // failOnDataLoss=false are NOT cached (we return List.of() and leave `streams` null),
+        // so discovery is retried on later calls until it succeeds. Per spec, once established
+        // the topology is refreshed only on restart — a restart creates a new stream instance,
+        // so this cache starts empty again. Consequences:
+        //   - Partitions that go missing mid-query stay in the topology and are skipped or
+        //     failed at read time via failOnDataLoss; they are not silently dropped here.
+        //   - Partitions added to the superstream mid-query are NOT picked up until the next
+        //     restart. Adopting them live would initialize them from first-available (skipping
+        //     retained history) and make planning non-deterministic within a run. On restart,
+        //     resolveMissingStartOffset() initializes such partitions deterministically.
+        if (streams != null) {
+            if (streams.isEmpty() && options.isFailOnDataLoss()) {
+                throw new IllegalStateException(
+                        "Superstream '" + options.getSuperStream() +
+                                "' has no partition streams");
             }
+            return streams;
+        }
 
-            if (previous == null) {
-                LOG.info("Discovered {} partition streams for superstream '{}'",
-                        discovered.size(), options.getSuperStream());
-            } else if (!new LinkedHashSet<>(previous).equals(new LinkedHashSet<>(discovered))) {
-                LOG.info("Refreshed partition streams for superstream '{}': {} -> {}",
-                        options.getSuperStream(), previous.size(), discovered.size());
-            }
-            streams = discovered;
+        List<String> discovered;
+        try {
+            discovered = discoverSuperStreamPartitions();
         } catch (Exception e) {
-            if (previous == null) {
-                if (options.isFailOnDataLoss()) {
-                    throw e;
-                }
-                LOG.warn("Failed to discover initial topology for superstream '{}'; returning empty topology "
-                                + "because failOnDataLoss=false: {}",
-                        options.getSuperStream(), e.getMessage());
-                streams = List.of();
-                return streams;
+            if (options.isFailOnDataLoss()) {
+                throw e;
             }
-            LOG.warn("Failed to refresh superstream '{}' partition streams, using cached topology: {}",
+            // Do not cache the failure: a later call (or restart) may succeed.
+            LOG.warn("Failed to discover topology for superstream '{}'; returning empty topology "
+                            + "because failOnDataLoss=false: {}",
                     options.getSuperStream(), e.getMessage());
-            streams = previous;
+            return List.of();
         }
-        if (streams.isEmpty() && options.isFailOnDataLoss()) {
-            throw new IllegalStateException(
-                    "Superstream '" + options.getSuperStream() +
-                            "' has no partition streams");
+
+        if (discovered.isEmpty()) {
+            if (options.isFailOnDataLoss()) {
+                throw new IllegalStateException(
+                        "Superstream '" + options.getSuperStream() +
+                                "' has no partition streams");
+            }
+            // Do not cache an empty topology: partitions may appear on a later call.
+            LOG.warn("Superstream '{}' currently has no partition streams; returning empty topology "
+                            + "because failOnDataLoss=false",
+                    options.getSuperStream());
+            return List.of();
         }
+
+        LOG.info("Discovered {} partition streams for superstream '{}' (cached for the query lifetime)",
+                discovered.size(), options.getSuperStream());
+        streams = discovered;
         return streams;
     }
 
@@ -1732,9 +1740,13 @@ class BaseRabbitMQMicroBatchStream
             StreamStats stats = env.queryStreamStats(stream);
             stats.firstOffset();
             latestStartedOnEmptyStreams.remove(stream);
+            // Prefer the exact last-message probe when it succeeds. Stats can lag fresh
+            // publishes or overshoot after a stream is deleted and recreated, so use them
+            // only as a fallback when the probe observes no message (probe-wins, matching
+            // queryStreamTailOffsetForLatest).
             long statsTail = resolveTailOffset(stats);
             long probedTail = probeTailOffsetForLatestWithCache(env, stream);
-            return Math.max(statsTail, probedTail);
+            return probedTail > 0L ? probedTail : statsTail;
         } catch (NoOffsetException e) {
             latestStartedOnEmptyStreams.add(stream);
             return 0L;

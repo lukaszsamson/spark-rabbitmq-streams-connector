@@ -716,12 +716,15 @@ final class RabbitMQScan implements Scan {
     }
 
     private long resolveLatestOffset(Environment env, String stream, StreamStats stats) {
-        // endingOffsets=latest: combine stats-derived tail with a direct last-message probe
-        // to avoid underestimating on older broker/client combinations.
+        // endingOffsets=latest: prefer the exact last-message probe when it succeeds.
+        // Stats can underestimate on older broker/client combinations and can also overshoot
+        // after a stream is deleted and recreated, so the probe wins even when it is below
+        // statsTail (probe-wins, matching spark-shared). Fall back to statsTail only when the
+        // probe observes no message.
         long statsTail = resolveTailOffset(stats);
         long probedTail = probeTailOffsetFromLastMessageWithTimeout(
                 env, stream, TAIL_PROBE_TIMEOUT_MS);
-        return Math.max(statsTail, probedTail);
+        return probedTail > 0L ? probedTail : statsTail;
     }
 
     private long probeTailOffsetFromLastMessageWithTimeout(

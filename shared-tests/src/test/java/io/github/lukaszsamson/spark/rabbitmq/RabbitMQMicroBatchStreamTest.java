@@ -404,7 +404,12 @@ class RabbitMQMicroBatchStreamTest {
         }
 
         @Test
-        void discoverStreamsDropsRemovedPartitionsWhenFailOnDataLossFalse() {
+        void discoverStreamsCachesTopologyForQueryLifetime() {
+            // Topology is discovered once per query run and frozen for its lifetime
+            // (refreshed only on restart, which creates a new stream instance). A partition
+            // removed mid-query is NOT dropped from the topology here; it stays and is
+            // skipped/failed at read time via failOnDataLoss. The second discovery in the
+            // sequence (["s1"]) is therefore ignored; both calls return the cached ["s1","s2"].
             Map<String, String> opts = new LinkedHashMap<>();
             opts.put("endpoints", "localhost:5552");
             opts.put("superstream", "super");
@@ -421,7 +426,7 @@ class RabbitMQMicroBatchStreamTest {
                             java.util.List.of("s1")));
 
             assertThat(stream.discoverStreams()).containsExactly("s1", "s2");
-            assertThat(stream.discoverStreams()).containsExactly("s1");
+            assertThat(stream.discoverStreams()).containsExactly("s1", "s2");
         }
     }
 
@@ -835,6 +840,24 @@ class RabbitMQMicroBatchStreamTest {
 
             RabbitMQStreamOffset latestOffset = (RabbitMQStreamOffset) latest;
             assertThat(latestOffset.getStreamOffsets()).containsEntry("test-stream", 10L);
+        }
+
+        @Test
+        void latestOffsetRetainsMissingStreamStartWhenFailOnDataLossFalse() throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("failOnDataLoss", "false");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            setPrivateField(stream, "environment", new MissingStreamEnvironment());
+            setPrivateField(stream, "availableNowSnapshot", Map.of("test-stream", 10L));
+
+            RabbitMQStreamOffset start = new RabbitMQStreamOffset(Map.of("test-stream", 7L));
+            RabbitMQStreamOffset latest = (RabbitMQStreamOffset) stream.latestOffset(
+                    start, ReadLimit.allAvailable());
+
+            assertThat(latest.getStreamOffsets()).containsEntry("test-stream", 7L);
         }
 
         @Test

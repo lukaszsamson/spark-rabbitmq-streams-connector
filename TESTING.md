@@ -8,7 +8,7 @@
 
 ## Unit Tests
 
-Unit tests live in `core`, `spark35`, `spark40`, and `spark41` modules. They use mocks and do not require Docker. The `spark35_2.12` module compiles the same sources against Spark 3.5 with Scala 2.12.
+Unit tests live in `core`, `spark35`, `spark40`, and `spark41` modules. They use mocks and do not require Docker. The `spark35_2.12` module compiles the same sources against Spark 3.5 with Scala 2.12. The shared unit suite (~2593 tests across core and the four Spark modules) covers option parsing and validation, source schema and row mapping, AMQP property coercions, offset JSON round-trip, tail and timestamp offset resolution, admission control and read limits, split-offset merge, push-to-pull queue bridge, sink confirm tracking and routing, and Spark 4.1 real-time mode.
 
 ```bash
 mvn verify -pl core,spark35,spark35_2.12,spark40,spark41 -am

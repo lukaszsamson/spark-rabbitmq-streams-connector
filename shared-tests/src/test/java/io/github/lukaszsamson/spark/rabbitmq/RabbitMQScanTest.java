@@ -402,6 +402,24 @@ class RabbitMQScanTest {
         }
 
         @Test
+        void latestEndProbeWinsWhenBelowStats() throws Exception {
+            // Probe-wins: when the last-message probe observes an offset BELOW the
+            // stats-derived tail (e.g. stale-high stats after a stream is deleted and
+            // recreated), the probe value wins so planning does not target offsets that
+            // do not exist. stats committed=401 -> statsTail=402; probe sees [399] ->
+            // probedTail=400, so the resolved ending offset is 400 (not max=402).
+            Map<String, String> opts = baseOptions();
+            opts.put("endingOffsets", "latest");
+            RabbitMQScan scan = new RabbitMQScan(new ConnectorOptions(opts), schema());
+            StreamStats stats = new Stats(0L, false, false, 401L);
+
+            long end = resolveEndOffset(scan,
+                    new DelayedProbeEnvironment(0L, stats, 399L),
+                    "s1", stats);
+            assertThat(end).isEqualTo(400L);
+        }
+
+        @Test
         void startBeforeFirstAvailableFailOnDataLossBehavior() throws Exception {
             Map<String, String> opts = baseOptions();
             opts.put("startingOffsets", "offset");
