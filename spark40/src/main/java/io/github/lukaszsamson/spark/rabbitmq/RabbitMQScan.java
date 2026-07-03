@@ -404,6 +404,19 @@ final class RabbitMQScan implements Scan {
         // attach (remote broker behind a load balancer) does not exhaust the budget on
         // a single shot. See RabbitMQScan.splitProbeBudget and the comment in spark-shared.
         long totalBudgetMs = timestampProbeTimeoutMs();
+
+        // Prove-absence pre-check — mirror of the spark-shared RabbitMQScan fix: a
+        // timestamp beyond all currently-available data is a provable no-match, so
+        // startingOffsetsByTimestampStrategy applies instead of an inconclusive
+        // TimestampResolutionTimeoutException after the full probe budget.
+        long absenceProbeBudgetMs = Math.min(
+                totalBudgetMs,
+                Math.min(MAX_PROVE_ABSENCE_BUDGET_MS,
+                         Math.max(MIN_PROVE_ABSENCE_BUDGET_MS, totalBudgetMs / 8L)));
+        if (proveAllBeforeCutoff(env, stream, timestamp, absenceProbeBudgetMs) >= 0L) {
+            return handleTimestampStartNoMatch(env, stream, firstAvailable, stats, timestamp);
+        }
+
         long[] attemptBudgetsMs = splitProbeBudget(totalBudgetMs);
         Throwable lastError = null;
         for (int attempt = 0; attempt < attemptBudgetsMs.length; attempt++) {

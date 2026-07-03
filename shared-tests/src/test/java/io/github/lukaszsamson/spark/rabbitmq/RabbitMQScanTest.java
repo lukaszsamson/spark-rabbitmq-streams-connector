@@ -189,7 +189,15 @@ class RabbitMQScanTest {
             RabbitMQScan scan = new RabbitMQScan(new ConnectorOptions(opts), schema());
             StreamStats stats = new Stats(10L, false, false, 20L);
 
-            long start = resolveStartOffset(scan, new ProbeTailEnvironment(), "s1", 10L, stats);
+            // Delivered messages carry creation_time >= the requested timestamp so the
+            // prove-absence pre-check (FABLE-EXPLORE-1) is inconclusive and the regular
+            // timestamp probe resolves the start offset — a broker would only deliver
+            // from a timestamp attach if data at/after the cutoff exists.
+            long start = resolveStartOffset(scan,
+                    new DelayedProbeEnvironment(0L, null,
+                            new long[]{11L, 12L},
+                            new long[]{1_700_000_000_000L, 1_700_000_000_001L}),
+                    "s1", 10L, stats);
             assertThat(start).isEqualTo(11L);
         }
 
@@ -201,7 +209,11 @@ class RabbitMQScanTest {
             RabbitMQScan scan = new RabbitMQScan(new ConnectorOptions(opts), schema());
             StreamStats stats = new Stats(10L, false, false, 20L);
 
-            long start = resolveStartOffset(scan, new ProbeTailEnvironment(), "s1", 10L, stats);
+            long start = resolveStartOffset(scan,
+                    new DelayedProbeEnvironment(0L, null,
+                            new long[]{11L, 12L},
+                            new long[]{1_700_000_000_000L, 1_700_000_000_001L}),
+                    "s1", 10L, stats);
             assertThat(start).isEqualTo(11L);
         }
 
@@ -215,7 +227,10 @@ class RabbitMQScanTest {
             StreamStats stats = new Stats(10L, false, false, 20L);
 
             long start = resolveStartOffset(scan,
-                    new DelayedProbeEnvironment(400L, null, 11L), "s1", 10L, stats);
+                    new DelayedProbeEnvironment(400L, null,
+                            new long[]{11L},
+                            new long[]{1_700_000_000_000L}),
+                    "s1", 10L, stats);
             assertThat(start).isEqualTo(11L);
         }
 

@@ -139,7 +139,7 @@ Type coercion notes:
 - The probe budget is bounded by `pollTimeoutMs` (with implementation-defined min/max bounds).
 - Three outcomes are distinguished:
   - **FOUND**: an offset is observed; planning continues with that offset.
-  - **CONFIRMED_NO_MATCH**: the broker signals via `NoOffsetException` that no offset matches. For starting offsets, `startingOffsetsByTimestampStrategy=latest` may fall back to tail. Default behavior is to fail planning.
+  - **CONFIRMED_NO_MATCH**: the broker signals via `NoOffsetException` that no offset matches (empty stream), or a prove-absence pre-check observes that the last currently-available message's timestamp is strictly before the requested timestamp (non-empty stream, timestamp beyond all data). For starting offsets, `startingOffsetsByTimestampStrategy=latest` may fall back to tail. Default behavior is to fail planning.
   - **INCONCLUSIVE_TIMEOUT**: the probe budget was exhausted without a result. Planning fails fast with `TimestampResolutionTimeoutException` regardless of strategy. The planner cannot prove no-match, so silently jumping to tail or earliest could skip or over-include records. Increase `pollTimeoutMs` to extend the probe budget.
 
 ### Partitioning and parallelism
@@ -225,7 +225,7 @@ Type coercion notes:
 - Consumer credit is chunk-based; one credit yields a chunk.
 - The reader uses configured initial credits capped by queue capacity (does not auto-inflate credits to planned range size).
 - When close to `endOffset`, stop granting credits and discard any messages beyond the range.
-- Override client defaults to set initial credits to 1 (configurable) and use `creditOnChunkArrival`.
+- Override client defaults to set initial credits to 10 (configurable via `initialCredits`) and use `creditOnChunkArrival`.
 
 ### Fault tolerance
 - Source is at-least-once relative to Spark.
@@ -393,7 +393,7 @@ Type coercion notes:
 - `filterWarningOnMismatch` (bool; default true; log when post-filter drops messages due to Bloom false positives)
 - `pollTimeoutMs` (long; default 30000)
 - `maxWaitMs` (long; default 300000)
-- `initialCredits` (int; default 1)
+- `initialCredits` (int; default 10)
 - `queueCapacity` (int; default 10000 messages; should accommodate typical chunk sizes; credit-based backpressure prevents overflow for larger chunks)
 - `estimatedMessageSizeBytes` (int; default 1024; used for initial max-bytes estimation)
 

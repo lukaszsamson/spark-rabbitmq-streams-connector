@@ -5,6 +5,9 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+### Fixed
+- `startingOffsets=timestamp` with a timestamp beyond all currently-available data on a non-empty stream now resolves as a broker-provable no-match instead of burning the full `pollTimeoutMs` probe budget and failing with `TimestampResolutionTimeoutException`. This makes `startingOffsetsByTimestampStrategy=latest` actually reachable in its primary use case (falls back to tail, producing an empty batch until new data arrives); with the default `error` strategy the planner now fails fast with the descriptive no-match error. The starting-timestamp resolver reuses the same prove-absence pre-check the ending-timestamp resolver already had.
+
 ### Changed
 - **Breaking:** Broker-stored offsets are no longer used for query recovery. On a fresh start (no Spark checkpoint), the connector resolves initial offsets from configured `startingOffsets` / `startingOffsetsByTimestamp` only, matching Kafka source semantics. Users that previously relied on broker-stored offsets to resume across query restarts must rely on Spark checkpoints (or set `startingOffsets` explicitly).
 - **Breaking (option rename):** `serverSideOffsetTracking` is renamed to `storeBrokerOffsets` and its semantics are clarified as best-effort write-only telemetry. The old name remains accepted as a deprecated alias for one release and emits a warning at parse time.

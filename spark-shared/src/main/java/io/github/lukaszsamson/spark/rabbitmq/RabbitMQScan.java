@@ -410,6 +410,23 @@ final class RabbitMQScan implements Scan {
         // a slow consumer attach on a remote broker can drain the entire pollTimeoutMs
         // budget before the probe even gets a chance to observe a message.
         long totalBudgetMs = timestampProbeTimeoutMs();
+
+        // Prove-absence pre-check, mirroring resolveTimestampEndingOffset: when the last
+        // currently-available message is strictly before the requested timestamp, the
+        // broker attaches the timestamp probe at the tail and no message can ever satisfy
+        // it — a broker-provable no-match, not an inconclusive timeout. Without this
+        // check the no-match outcome was only reachable via NoOffsetException (empty
+        // stream), so startingOffsetsByTimestampStrategy=latest never applied on
+        // non-empty streams and a timestamp beyond all data burned the full probe budget
+        // before failing with TimestampResolutionTimeoutException.
+        long absenceProbeBudgetMs = Math.min(
+                totalBudgetMs,
+                Math.min(MAX_PROVE_ABSENCE_BUDGET_MS,
+                         Math.max(MIN_PROVE_ABSENCE_BUDGET_MS, totalBudgetMs / 8L)));
+        if (proveAllBeforeCutoff(env, stream, timestamp, absenceProbeBudgetMs) >= 0L) {
+            return handleTimestampStartNoMatch(env, stream, firstAvailable, stats, timestamp);
+        }
+
         long[] attemptBudgetsMs = splitProbeBudget(totalBudgetMs);
         Throwable lastError = null;
         for (int attempt = 0; attempt < attemptBudgetsMs.length; attempt++) {
