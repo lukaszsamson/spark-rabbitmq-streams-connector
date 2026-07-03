@@ -1142,6 +1142,59 @@ class RabbitMQMicroBatchStreamTest {
         }
 
         @Test
+        void resolveStartingOffsetTimestampBeyondDataFallsBackToTailWithLatestStrategy() throws Exception {
+            // FABLE-EXPLORE-1: last available chunk timestamp strictly before the
+            // requested starting timestamp is a broker-provable no-match — with
+            // strategy=latest the streaming planner must fall back to the tail instead
+            // of failing with TimestampResolutionTimeoutException.
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("startingOffsets", "timestamp");
+            opts.put("startingTimestamp", "4102444800000"); // 2100-01-01T00:00:00Z
+            opts.put("startingOffsetsByTimestampStrategy", "latest");
+            opts.put("pollTimeoutMs", "1000");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            setPrivateField(stream, "environment",
+                    new TimestampStartEnvironment(10L, java.util.List.of(42L), 0L,
+                            /* chunkTimestampMs= */ 1_700_000_000_000L));
+
+            RabbitMQStreamOffset offset = (RabbitMQStreamOffset) stream.initialOffset();
+            // The tail resolution observes the scripted last message at offset 42 → tail 43.
+            assertThat(offset.getStreamOffsets()).containsEntry("test-stream", 43L);
+            // The fallback start is an offset decision: the timestamp anchor must be
+            // disabled so the first batch attaches readers by OFFSET. A timestamp(ts)
+            // attach with a beyond-all-data ts never delivers, and the first non-empty
+            // range would commit empty — silently skipping records.
+            assertThat(stream.useConfiguredStartingOffset("test-stream", 43L))
+                    .as("timestamp anchor must be disabled after the no-match tail fallback")
+                    .isFalse();
+        }
+
+        @Test
+        void resolveStartingOffsetTimestampBeyondDataFailsFastByDefault() throws Exception {
+            // FABLE-EXPLORE-1: with the default error strategy, a provable no-match must
+            // produce the descriptive "No offset matched" error (not a probe timeout).
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("startingOffsets", "timestamp");
+            opts.put("startingTimestamp", "4102444800000");
+            opts.put("pollTimeoutMs", "1000");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            setPrivateField(stream, "environment",
+                    new TimestampStartEnvironment(10L, java.util.List.of(42L), 0L,
+                            /* chunkTimestampMs= */ 1_700_000_000_000L));
+
+            assertThatThrownBy(stream::initialOffset)
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("No offset matched the requested starting timestamp")
+                    .hasMessageContaining("startingOffsetsByTimestampStrategy");
+        }
+
+        @Test
         void resolveStartingOffsetTimestampBrokerNoMatchFailsByDefault() throws Exception {
             // Broker immediately reports NoOffsetException during consumer open — this is
             // CONFIRMED_NO_MATCH (not timeout). Default strategy must fail with "No offset matched".
@@ -3135,15 +3188,22 @@ class RabbitMQMicroBatchStreamTest {
         private final long firstOffset;
         private final java.util.List<Long> probedOffsets;
         private final long delayMs;
+        private final long chunkTimestampMs;
 
         private TimestampStartEnvironment(long firstOffset, java.util.List<Long> probedOffsets) {
             this(firstOffset, probedOffsets, 0L);
         }
 
         private TimestampStartEnvironment(long firstOffset, java.util.List<Long> probedOffsets, long delayMs) {
+            this(firstOffset, probedOffsets, delayMs, FixedContext.INCONCLUSIVE_CHUNK_TIMESTAMP);
+        }
+
+        private TimestampStartEnvironment(long firstOffset, java.util.List<Long> probedOffsets,
+                long delayMs, long chunkTimestampMs) {
             this.firstOffset = firstOffset;
             this.probedOffsets = probedOffsets;
             this.delayMs = delayMs;
+            this.chunkTimestampMs = chunkTimestampMs;
         }
 
         @Override
@@ -3183,7 +3243,7 @@ class RabbitMQMicroBatchStreamTest {
 
         @Override
         public com.rabbitmq.stream.ConsumerBuilder consumerBuilder() {
-            return new FixedOffsetProbeConsumerBuilder(probedOffsets, delayMs);
+            return new FixedOffsetProbeConsumerBuilder(probedOffsets, delayMs, 0L, chunkTimestampMs);
         }
 
         @Override
@@ -3351,10 +3411,26 @@ class RabbitMQMicroBatchStreamTest {
     }
 
     private static final class FixedContext implements com.rabbitmq.stream.MessageHandler.Context {
+        /**
+         * Default chunk timestamp for scripted deliveries: far in the future so the
+         * prove-absence pre-check (FABLE-EXPLORE-1) stays inconclusive and tests keep
+         * exercising the regular timestamp probe. A real broker would only deliver
+         * from a timestamp attach when data at/after the cutoff exists, so a huge
+         * chunk timestamp is the realistic default for fixtures that deliver.
+         * Tests targeting the proven-no-match path pass an explicit old timestamp.
+         */
+        static final long INCONCLUSIVE_CHUNK_TIMESTAMP = Long.MAX_VALUE / 2;
+
         private final long offset;
+        private final long timestamp;
 
         private FixedContext(long offset) {
+            this(offset, INCONCLUSIVE_CHUNK_TIMESTAMP);
+        }
+
+        private FixedContext(long offset, long timestamp) {
             this.offset = offset;
+            this.timestamp = timestamp;
         }
 
         @Override
@@ -3368,7 +3444,7 @@ class RabbitMQMicroBatchStreamTest {
 
         @Override
         public long timestamp() {
-            return 0L;
+            return timestamp;
         }
 
         @Override
@@ -3646,6 +3722,7 @@ class RabbitMQMicroBatchStreamTest {
         private final java.util.List<Long> offsets;
         private final long initialDelayMs;
         private final long interMessageDelayMs;
+        private final long chunkTimestampMs;
         private com.rabbitmq.stream.MessageHandler handler;
 
         private FixedOffsetProbeConsumerBuilder(java.util.List<Long> offsets) {
@@ -3658,9 +3735,17 @@ class RabbitMQMicroBatchStreamTest {
 
         private FixedOffsetProbeConsumerBuilder(
                 java.util.List<Long> offsets, long initialDelayMs, long interMessageDelayMs) {
+            this(offsets, initialDelayMs, interMessageDelayMs,
+                    FixedContext.INCONCLUSIVE_CHUNK_TIMESTAMP);
+        }
+
+        private FixedOffsetProbeConsumerBuilder(
+                java.util.List<Long> offsets, long initialDelayMs, long interMessageDelayMs,
+                long chunkTimestampMs) {
             this.offsets = offsets;
             this.initialDelayMs = initialDelayMs;
             this.interMessageDelayMs = interMessageDelayMs;
+            this.chunkTimestampMs = chunkTimestampMs;
         }
 
         @Override
@@ -3744,7 +3829,7 @@ class RabbitMQMicroBatchStreamTest {
             if (handler != null) {
                 if (initialDelayMs <= 0L && interMessageDelayMs <= 0L) {
                     for (Long offset : offsets) {
-                        handler.handle(new FixedContext(offset),
+                        handler.handle(new FixedContext(offset, chunkTimestampMs),
                                 CODEC.messageBuilder().addData(new byte[0]).build());
                     }
                 } else {
@@ -3755,7 +3840,7 @@ class RabbitMQMicroBatchStreamTest {
                             }
                             for (int i = 0; i < offsets.size(); i++) {
                                 Long offset = offsets.get(i);
-                                handler.handle(new FixedContext(offset),
+                                handler.handle(new FixedContext(offset, chunkTimestampMs),
                                         CODEC.messageBuilder().addData(new byte[0]).build());
                                 if (interMessageDelayMs > 0L && i + 1 < offsets.size()) {
                                     Thread.sleep(interMessageDelayMs);

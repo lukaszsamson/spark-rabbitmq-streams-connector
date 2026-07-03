@@ -411,23 +411,25 @@ final class RabbitMQScan implements Scan {
         // budget before the probe even gets a chance to observe a message.
         long totalBudgetMs = timestampProbeTimeoutMs();
 
-        // Prove-absence pre-check, mirroring resolveTimestampEndingOffset: when the last
-        // currently-available message is strictly before the requested timestamp, the
-        // broker attaches the timestamp probe at the tail and no message can ever satisfy
-        // it — a broker-provable no-match, not an inconclusive timeout. Without this
-        // check the no-match outcome was only reachable via NoOffsetException (empty
-        // stream), so startingOffsetsByTimestampStrategy=latest never applied on
+        // Prove-absence pre-check, mirroring resolveTimestampEndingOffset: when every
+        // timestamp observed in the last available chunk is strictly before the requested
+        // timestamp, the broker attaches the timestamp probe at the tail and no message
+        // can ever satisfy it — a broker-provable no-match, not an inconclusive timeout.
+        // Without this check the no-match outcome was only reachable via NoOffsetException
+        // (empty stream), so startingOffsetsByTimestampStrategy=latest never applied on
         // non-empty streams and a timestamp beyond all data burned the full probe budget
         // before failing with TimestampResolutionTimeoutException.
-        long absenceProbeBudgetMs = Math.min(
-                totalBudgetMs,
-                Math.min(MAX_PROVE_ABSENCE_BUDGET_MS,
-                         Math.max(MIN_PROVE_ABSENCE_BUDGET_MS, totalBudgetMs / 8L)));
+        long absenceProbeBudgetMs = proveAbsenceBudgetMs(totalBudgetMs);
+        long preCheckStartNanos = System.nanoTime();
         if (proveAllBeforeCutoff(env, stream, timestamp, absenceProbeBudgetMs) >= 0L) {
             return handleTimestampStartNoMatch(env, stream, firstAvailable, stats, timestamp);
         }
+        // Charge the (inconclusive) pre-check against the overall budget so total
+        // planning wall-clock stays bounded by pollTimeoutMs.
+        long preCheckElapsedMs = (System.nanoTime() - preCheckStartNanos) / 1_000_000L;
+        long remainingBudgetMs = Math.max(1L, totalBudgetMs - preCheckElapsedMs);
 
-        long[] attemptBudgetsMs = splitProbeBudget(totalBudgetMs);
+        long[] attemptBudgetsMs = splitProbeBudget(remainingBudgetMs);
         Throwable lastError = null;
         for (int attempt = 0; attempt < attemptBudgetsMs.length; attempt++) {
             long attemptBudgetMs = attemptBudgetsMs[attempt];
@@ -592,10 +594,8 @@ final class RabbitMQScan implements Scan {
         // entirely. Bounded by a small fixed share of the budget so a slow attach
         // does not delay the regular probe path on streams where this check fails.
         long totalBudgetMs = timestampProbeTimeoutMs();
-        long absenceProbeBudgetMs = Math.min(
-                totalBudgetMs,
-                Math.min(MAX_PROVE_ABSENCE_BUDGET_MS,
-                         Math.max(MIN_PROVE_ABSENCE_BUDGET_MS, totalBudgetMs / 8L)));
+        long absenceProbeBudgetMs = proveAbsenceBudgetMs(totalBudgetMs);
+        long preCheckStartNanos = System.nanoTime();
         long provenTail = proveAllBeforeCutoff(env, stream, timestamp, absenceProbeBudgetMs);
         if (provenTail >= 0L) {
             if (provenTail == 0L) {
@@ -606,13 +606,17 @@ final class RabbitMQScan implements Scan {
             }
             return provenTail;
         }
+        // Charge the (inconclusive) pre-check against the overall budget so total
+        // planning wall-clock stays bounded by pollTimeoutMs.
+        long preCheckElapsedMs = (System.nanoTime() - preCheckStartNanos) / 1_000_000L;
+        long remainingBudgetMs = Math.max(1L, totalBudgetMs - preCheckElapsedMs);
 
         // Slow consumer attach on remote brokers behind a load balancer can eat the entire
         // pollTimeoutMs budget on a single shot, leaving no time for the probe to actually
         // observe a message — the BUG-4-3 / BUG-4-5 symptom. Retry with rebuild so a slow
         // first attach doesn't doom the whole resolution. The total budget is still bounded
         // by pollTimeoutMs; each attempt gets a fresh build() and a share of the budget.
-        long[] attemptBudgetsMs = splitProbeBudget(totalBudgetMs);
+        long[] attemptBudgetsMs = splitProbeBudget(remainingBudgetMs);
         Throwable lastError = null;
         for (int attempt = 0; attempt < attemptBudgetsMs.length; attempt++) {
             long attemptBudgetMs = attemptBudgetsMs[attempt];
@@ -703,7 +707,20 @@ final class RabbitMQScan implements Scan {
      * reflect it, and prove-absence returns {@code -1L} (inconclusive) so the regular
      * probe determines the precise boundary.
      */
-    private static long proveAllBeforeCutoff(
+    /**
+     * Bounded share of the timestamp-probe budget allotted to the prove-absence
+     * pre-check: an eighth of the total, clamped to
+     * [{@link #MIN_PROVE_ABSENCE_BUDGET_MS}, {@link #MAX_PROVE_ABSENCE_BUDGET_MS}]
+     * and never more than the total itself.
+     */
+    static long proveAbsenceBudgetMs(long totalBudgetMs) {
+        return Math.min(
+                totalBudgetMs,
+                Math.min(MAX_PROVE_ABSENCE_BUDGET_MS,
+                         Math.max(MIN_PROVE_ABSENCE_BUDGET_MS, totalBudgetMs / 8L)));
+    }
+
+    static long proveAllBeforeCutoff(
             Environment env, String stream, long cutoff, long budgetMs) {
         AtomicLong lastObservedOffset = new AtomicLong(-1L);
         AtomicLong maxObservedTimestamp = new AtomicLong(Long.MIN_VALUE);
