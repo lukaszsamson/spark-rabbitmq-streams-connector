@@ -212,6 +212,116 @@ class Bugs4ReproTest {
     }
 
     // ====================================================================
+    // FABLE-EXPLORE-1 — startingOffsets=timestamp prove-absence parity
+    //
+    // Exploratory-testing finding (2026-07-03): the ending-timestamp resolver
+    // gained a prove-absence pre-check (see resolveTimestampEndingOffset),
+    // but the STARTING-timestamp resolver did not. A starting timestamp
+    // beyond all currently-available data on a NON-EMPTY stream therefore
+    // burned the full pollTimeoutMs probe budget and failed with
+    // TimestampResolutionTimeoutException — making the documented
+    // startingOffsetsByTimestampStrategy=latest fallback unreachable in its
+    // primary use case (the broker-confirmed no-match path was previously
+    // only reachable via NoOffsetException on an empty stream).
+    // ====================================================================
+
+    @Nested
+    @DisplayName("FABLE-EXPLORE-1: startingOffsets=timestamp beyond all data must be a provable no-match")
+    class TimestampStartProveAbsence {
+
+        private static final long FIRST_AVAILABLE = 0L;
+
+        @Test
+        @DisplayName("strategy=latest: last_msg.ts < requested ts falls back to tail instead of timing out")
+        void startTimestampBeyondDataFallsBackToTailWithLatestStrategy() throws Exception {
+            long startingTs = 1_700_000_000_000L;
+            Map<String, String> opts = baseStreamOpts();
+            opts.put("startingOffsets", "timestamp");
+            opts.put("startingTimestamp", String.valueOf(startingTs));
+            opts.put("startingOffsetsByTimestampStrategy", "latest");
+            opts.put("pollTimeoutMs", "1500");
+            RabbitMQScan scan = new RabbitMQScan(new ConnectorOptions(opts), schema());
+
+            // Attempt 1 = prove-absence probe (OffsetSpec.last()): delivers offset 42
+            // with ts < startingTs → provable no-match. Strategy latest then resolves
+            // the tail; the tail probe (attempt 2) observes offset 42 → tail = 43.
+            RetryProbeEnvironment env = new RetryProbeEnvironment(
+                    new Stats(0L, false, false, 99L),
+                    /* deliverOnAttempt= */ 1,
+                    /* observedOffset= */ 42L,
+                    /* observedTimestamp= */ startingTs - 5_000L);
+
+            Long resolved = invokeResolveTimestampStartingOffset(
+                    scan, env, "s1", FIRST_AVAILABLE, startingTs);
+            assertThat(resolved)
+                    .as("Provable no-match + strategy=latest must fall back to the tail "
+                            + "(last_offset + 1 = 43) instead of throwing "
+                            + "TimestampResolutionTimeoutException.")
+                    .isEqualTo(43L);
+        }
+
+        @Test
+        @DisplayName("strategy=error (default): last_msg.ts < requested ts fails fast with no-match error")
+        void startTimestampBeyondDataFailsFastWithErrorStrategy() throws Exception {
+            long startingTs = 1_700_000_000_000L;
+            Map<String, String> opts = baseStreamOpts();
+            opts.put("startingOffsets", "timestamp");
+            opts.put("startingTimestamp", String.valueOf(startingTs));
+            opts.put("pollTimeoutMs", "1500");
+            RabbitMQScan scan = new RabbitMQScan(new ConnectorOptions(opts), schema());
+
+            RetryProbeEnvironment env = new RetryProbeEnvironment(
+                    new Stats(0L, false, false, 99L),
+                    /* deliverOnAttempt= */ 1,
+                    /* observedOffset= */ 42L,
+                    /* observedTimestamp= */ startingTs - 5_000L);
+
+            try {
+                invokeResolveTimestampStartingOffset(scan, env, "s1", FIRST_AVAILABLE, startingTs);
+                throw new AssertionError("Expected IllegalStateException (no-match)");
+            } catch (IllegalStateException expected) {
+                assertThat(expected.getMessage())
+                        .as("A provable no-match must produce the descriptive no-match error "
+                                + "(mentioning the strategy escape hatch), not a probe timeout.")
+                        .contains("No offset matched the requested starting timestamp")
+                        .contains("startingOffsetsByTimestampStrategy");
+            }
+            assertThat(env.attemptCount())
+                    .as("Only the prove-absence probe should run before failing fast.")
+                    .isEqualTo(1);
+        }
+
+        @Test
+        @DisplayName("Prove-absence inconclusive (last_msg.ts >= requested ts) falls through to regular probe")
+        void startTimestampProveAbsenceFallsThroughWhenDataAtOrAfter() throws Exception {
+            long startingTs = 1_700_000_000_000L;
+            Map<String, String> opts = baseStreamOpts();
+            opts.put("startingOffsets", "timestamp");
+            opts.put("startingTimestamp", String.valueOf(startingTs));
+            opts.put("pollTimeoutMs", "1500");
+            RabbitMQScan scan = new RabbitMQScan(new ConnectorOptions(opts), schema());
+
+            // Attempt 1 = prove-absence probe: last message ts == startingTs → NOT < cutoff,
+            // inconclusive. Attempt 2 = regular timestamp probe: observes offset 17 → start = 17.
+            RetryProbeEnvironment env = new RetryProbeEnvironment(
+                    new Stats(0L, false, false, 99L),
+                    /* deliverOnAttempt= */ 1,
+                    /* observedOffset= */ 17L,
+                    /* observedTimestamp= */ startingTs);
+
+            Long resolved = invokeResolveTimestampStartingOffset(
+                    scan, env, "s1", FIRST_AVAILABLE, startingTs);
+            assertThat(resolved)
+                    .as("Data at-or-after the timestamp: prove-absence must not claim no-match; "
+                            + "the regular probe resolves the start offset.")
+                    .isEqualTo(17L);
+            assertThat(env.attemptCount())
+                    .as("Both the prove-absence probe and the regular timestamp probe should run.")
+                    .isGreaterThanOrEqualTo(2);
+        }
+    }
+
+    // ====================================================================
     // BUG-4-1 — availableNow second run after checkpoint commit hangs
     //
     // Status: NOT A CONNECTOR REGRESSION on this code path.
@@ -360,6 +470,29 @@ class Bugs4ReproTest {
             }
         }
         throw new NoSuchFieldException(name);
+    }
+
+    private static Long invokeResolveTimestampStartingOffset(
+            RabbitMQScan scan,
+            com.rabbitmq.stream.Environment env,
+            String stream,
+            long firstAvailable,
+            long timestamp) throws Exception {
+        Method method = RabbitMQScan.class.getDeclaredMethod(
+                "resolveTimestampStartingOffset",
+                com.rabbitmq.stream.Environment.class, String.class, long.class,
+                com.rabbitmq.stream.StreamStats.class, long.class);
+        method.setAccessible(true);
+        try {
+            return (Long) method.invoke(
+                    scan, env, stream, firstAvailable, env.queryStreamStats(stream), timestamp);
+        } catch (java.lang.reflect.InvocationTargetException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof RuntimeException re) {
+                throw re;
+            }
+            throw e;
+        }
     }
 
     private static Long invokeResolveTimestampEndingOffset(

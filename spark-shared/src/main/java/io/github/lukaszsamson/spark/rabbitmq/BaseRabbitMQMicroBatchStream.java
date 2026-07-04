@@ -1717,7 +1717,10 @@ class BaseRabbitMQMicroBatchStream
             Map<String, Long> perStreamTs = options.getStartingOffsetsByTimestamp();
             if (perStreamTs != null && perStreamTs.containsKey(stream)) {
                 long anchor = resolveTimestampStartingOffset(getEnvironment(), stream, perStreamTs.get(stream));
-                timestampAnchors.put(stream, anchor);
+                // putIfAbsent: the no-match tail fallback stores NO_TIMESTAMP_ANCHOR for
+                // the stream during resolution (the fallback start is an offset decision,
+                // not a timestamp match) and that sentinel must not be overwritten.
+                timestampAnchors.putIfAbsent(stream, anchor);
                 return anchor;
             }
         }
@@ -1728,7 +1731,8 @@ class BaseRabbitMQMicroBatchStream
             case TIMESTAMP -> {
                 long anchor = resolveTimestampStartingOffset(
                         getEnvironment(), stream, options.getStartingTimestamp());
-                timestampAnchors.put(stream, anchor);
+                // putIfAbsent: see the per-stream branch above.
+                timestampAnchors.putIfAbsent(stream, anchor);
                 yield anchor;
             }
         };
@@ -1780,6 +1784,24 @@ class BaseRabbitMQMicroBatchStream
                     "Failed to resolve first available offset for timestamp start in stream '"
                             + stream + "'", e);
         }
+        // Prove-absence pre-check (FABLE-EXPLORE-1), mirroring the batch planner in
+        // RabbitMQScan: when every timestamp observed in the last available chunk is
+        // strictly before the requested timestamp, the broker attaches the timestamp
+        // probe at the tail and no message can ever satisfy it — a broker-provable
+        // no-match. Without this, startingOffsetsByTimestampStrategy=latest was only
+        // reachable via NoOffsetException (empty stream) and a streaming query with a
+        // timestamp beyond all data burned the full probe budget before failing with
+        // TimestampResolutionTimeoutException. The (inconclusive) pre-check elapsed
+        // time is charged against the probe budget so planning stays bounded.
+        long totalProbeBudgetMs = timestampStartProbeTimeoutMs();
+        long preCheckStartNanos = System.nanoTime();
+        if (RabbitMQScan.proveAllBeforeCutoff(env, stream, timestamp,
+                RabbitMQScan.proveAbsenceBudgetMs(totalProbeBudgetMs)) >= 0L) {
+            return handleTimestampStartNoMatch(env, stream, firstAvailable, timestamp);
+        }
+        long preCheckElapsedMs = (System.nanoTime() - preCheckStartNanos) / 1_000_000L;
+        long remainingProbeBudgetMs = Math.max(1L, totalProbeBudgetMs - preCheckElapsedMs);
+
         final int maxAttempts = 3;
         for (int attempt = 1; attempt <= maxAttempts; attempt++) {
             BlockingQueue<Long> observedOffsets = new LinkedBlockingQueue<>();
@@ -1796,7 +1818,7 @@ class BaseRabbitMQMicroBatchStream
                         .builder()
                         .build();
 
-                Long observed = observedOffsets.poll(timestampStartProbeTimeoutMs(),
+                Long observed = observedOffsets.poll(remainingProbeBudgetMs,
                         TimeUnit.MILLISECONDS);
                 if (observed != null) {
                     return Math.max(firstAvailable, observed);
@@ -1850,6 +1872,13 @@ class BaseRabbitMQMicroBatchStream
             Environment env, String stream, long firstAvailable, long timestamp) {
         if (options.getStartingOffsetsByTimestampStrategy()
                 == StartingOffsetsByTimestampStrategy.LATEST) {
+            // The fallback start is an offset decision (tail at planning time), not a
+            // timestamp match. Disable the per-stream timestamp anchor so first-batch
+            // readers attach by offset: a timestamp(ts) attach with a beyond-all-data
+            // timestamp never delivers, and the first non-empty range would commit
+            // empty — silently skipping records. Kafka parity: after the fallback,
+            // records published later are delivered regardless of their timestamps.
+            timestampAnchors.put(stream, NO_TIMESTAMP_ANCHOR);
             long tailExclusive = queryStreamTailOffsetForLatest(env, stream);
             return Math.max(firstAvailable, tailExclusive);
         }

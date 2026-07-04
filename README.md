@@ -308,6 +308,15 @@ The connector provides at-least-once semantics for both source and sink:
 - **Sink (streaming)**: Publisher confirms ensure messages are persisted. With deduplication enabled (`producerName` set), retries in the same `(queryId, partitionId, epochId)` reuse the same producer identity and publishing sequence.
 - **Sink (batch)**: At-least-once only. Batch writer identities are task-scoped, so repeated `write.save()` calls or retried task attempts can append duplicates unless deterministic publishing IDs and producer identity semantics are provided explicitly by the application.
 
+### Bounded batch reads and the stream tail
+
+`endingOffsets=offset` is taken literally: if the requested ending offset is beyond the
+current stream tail, the batch readers wait for the missing data to arrive and fail the
+task with a timeout after `maxWaitMs` (default 5 minutes) rather than silently returning
+fewer records than requested. Use `endingOffsets=latest` (the default) to read exactly up
+to the current tail, or lower `maxWaitMs` to fail faster when an out-of-range ending
+offset is a possibility.
+
 ### Offset sources (priority order)
 
 On startup, the connector resolves starting offsets in this order:

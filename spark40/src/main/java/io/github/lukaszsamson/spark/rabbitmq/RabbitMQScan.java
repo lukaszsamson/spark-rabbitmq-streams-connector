@@ -404,7 +404,22 @@ final class RabbitMQScan implements Scan {
         // attach (remote broker behind a load balancer) does not exhaust the budget on
         // a single shot. See RabbitMQScan.splitProbeBudget and the comment in spark-shared.
         long totalBudgetMs = timestampProbeTimeoutMs();
-        long[] attemptBudgetsMs = splitProbeBudget(totalBudgetMs);
+
+        // Prove-absence pre-check — mirror of the spark-shared RabbitMQScan fix: a
+        // timestamp beyond all currently-available data is a provable no-match, so
+        // startingOffsetsByTimestampStrategy applies instead of an inconclusive
+        // TimestampResolutionTimeoutException after the full probe budget.
+        long absenceProbeBudgetMs = proveAbsenceBudgetMs(totalBudgetMs);
+        long preCheckStartNanos = System.nanoTime();
+        if (proveAllBeforeCutoff(env, stream, timestamp, absenceProbeBudgetMs) >= 0L) {
+            return handleTimestampStartNoMatch(env, stream, firstAvailable, stats, timestamp);
+        }
+        // Charge the (inconclusive) pre-check against the overall budget so total
+        // planning wall-clock stays bounded by pollTimeoutMs.
+        long preCheckElapsedMs = (System.nanoTime() - preCheckStartNanos) / 1_000_000L;
+        long remainingBudgetMs = Math.max(1L, totalBudgetMs - preCheckElapsedMs);
+
+        long[] attemptBudgetsMs = splitProbeBudget(remainingBudgetMs);
         Throwable lastError = null;
         for (int attempt = 0; attempt < attemptBudgetsMs.length; attempt++) {
             long attemptBudgetMs = attemptBudgetsMs[attempt];
@@ -536,10 +551,8 @@ final class RabbitMQScan implements Scan {
         // a deterministic exclusive end and the regular probe is unnecessary.
         // Mirror of spark-shared RabbitMQScan.proveAllBeforeCutoff.
         long totalBudgetMs = timestampProbeTimeoutMs();
-        long absenceProbeBudgetMs = Math.min(
-                totalBudgetMs,
-                Math.min(MAX_PROVE_ABSENCE_BUDGET_MS,
-                         Math.max(MIN_PROVE_ABSENCE_BUDGET_MS, totalBudgetMs / 8L)));
+        long absenceProbeBudgetMs = proveAbsenceBudgetMs(totalBudgetMs);
+        long preCheckStartNanos = System.nanoTime();
         long provenTail = proveAllBeforeCutoff(env, stream, timestamp, absenceProbeBudgetMs);
         if (provenTail >= 0L) {
             if (provenTail == 0L) {
@@ -550,11 +563,15 @@ final class RabbitMQScan implements Scan {
             }
             return provenTail;
         }
+        // Charge the (inconclusive) pre-check against the overall budget so total
+        // planning wall-clock stays bounded by pollTimeoutMs.
+        long preCheckElapsedMs = (System.nanoTime() - preCheckStartNanos) / 1_000_000L;
+        long remainingBudgetMs = Math.max(1L, totalBudgetMs - preCheckElapsedMs);
 
         // BUG-4-3 / BUG-4-5: split pollTimeoutMs across attempts so a slow consumer
         // attach does not exhaust the budget on a single shot. See spark-shared
         // RabbitMQScan.resolveTimestampEndingOffset for the full rationale.
-        long[] attemptBudgetsMs = splitProbeBudget(totalBudgetMs);
+        long[] attemptBudgetsMs = splitProbeBudget(remainingBudgetMs);
         Throwable lastError = null;
         for (int attempt = 0; attempt < attemptBudgetsMs.length; attempt++) {
             long attemptBudgetMs = attemptBudgetsMs[attempt];
@@ -614,7 +631,15 @@ final class RabbitMQScan implements Scan {
      * the maximum observed timestamp to guard against out-of-order per-message
      * {@code creation_time} within the last chunk (P2 review fix).
      */
-    private static long proveAllBeforeCutoff(
+    /** Mirror of spark-shared {@code RabbitMQScan.proveAbsenceBudgetMs} (kept in sync). */
+    static long proveAbsenceBudgetMs(long totalBudgetMs) {
+        return Math.min(
+                totalBudgetMs,
+                Math.min(MAX_PROVE_ABSENCE_BUDGET_MS,
+                         Math.max(MIN_PROVE_ABSENCE_BUDGET_MS, totalBudgetMs / 8L)));
+    }
+
+    static long proveAllBeforeCutoff(
             Environment env, String stream, long cutoff, long budgetMs) {
         AtomicLong lastObservedOffset = new AtomicLong(-1L);
         AtomicLong maxObservedTimestamp = new AtomicLong(Long.MIN_VALUE);

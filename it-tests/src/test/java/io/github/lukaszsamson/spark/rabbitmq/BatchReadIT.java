@@ -1138,10 +1138,15 @@ class BatchReadIT extends AbstractRabbitMQIT {
         assertThat(df4.collectAsList()).hasSize(5);
     }
 
-    // ---- IT-OFFSET-007: timestamp probe timeout strategy parity ----
+    // ---- IT-OFFSET-007: timestamp beyond all data is a provable no-match ----
+    // (FABLE-EXPLORE-1) A future starting timestamp on a non-empty stream used to burn
+    // the full probe budget and fail with TimestampResolutionTimeoutException regardless
+    // of strategy. The prove-absence pre-check now confirms the no-match, so the default
+    // strategy fails fast with a descriptive error and strategy=latest falls back to the
+    // tail, producing an empty batch.
 
     @Test
-    void batchReadTimestampProbeTimeoutErrorsByDefault() {
+    void batchReadTimestampBeyondDataErrorsByDefault() {
         publishMessages(stream, 10, "ts-");
 
         long futureTimestamp = System.currentTimeMillis() + 24 * 60 * 60 * 1000L;
@@ -1158,16 +1163,17 @@ class BatchReadIT extends AbstractRabbitMQIT {
                         "io.github.lukaszsamson.spark.rabbitmq.TestAddressResolver")
                 .load()
                 .collectAsList())
-                .hasMessageContaining("pollTimeoutMs");
+                .hasMessageContaining("No offset matched the requested starting timestamp")
+                .hasMessageContaining("startingOffsetsByTimestampStrategy");
     }
 
     @Test
-    void batchReadTimestampProbeTimeoutThrowsEvenWithLatestStrategy() {
+    void batchReadTimestampBeyondDataFallsBackToTailWithLatestStrategy() {
         publishMessages(stream, 10, "ts-");
 
         long futureTimestamp = System.currentTimeMillis() + 24 * 60 * 60 * 1000L;
 
-        assertThatThrownBy(() -> spark.read()
+        List<Row> rows = spark.read()
                 .format("rabbitmq_streams")
                 .option("endpoints", streamEndpoint())
                 .option("stream", stream)
@@ -1179,8 +1185,9 @@ class BatchReadIT extends AbstractRabbitMQIT {
                 .option("addressResolverClass",
                         "io.github.lukaszsamson.spark.rabbitmq.TestAddressResolver")
                 .load()
-                .collectAsList())
-                .hasMessageContaining("pollTimeoutMs");
+                .collectAsList();
+
+        assertThat(rows).isEmpty();
     }
 
     // ---- IT-OPT-006-source: invalid option combinations ----
