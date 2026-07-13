@@ -4,6 +4,7 @@ import com.rabbitmq.stream.ConsumerFlowStrategy;
 import com.rabbitmq.stream.Environment;
 import com.rabbitmq.stream.NoOffsetException;
 import com.rabbitmq.stream.StreamDoesNotExistException;
+import com.rabbitmq.stream.StreamNotAvailableException;
 import com.rabbitmq.stream.StreamStats;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataInputStream;
@@ -1604,10 +1605,92 @@ class BaseRabbitMQMicroBatchStream
     }
 
     long probeTailOffsetFromLastMessageWithRetry(Environment env, String stream) {
+        return probeTailOffsetWithRetry(env, stream,
+                com.rabbitmq.stream.OffsetSpecification.last());
+    }
+
+    long probeTailOffsetFromOffsetWithRetry(Environment env, String stream, long offset) {
+        return probeTailOffsetWithRetry(env, stream,
+                com.rabbitmq.stream.OffsetSpecification.offset(offset));
+    }
+
+    long probeTailOffsetPastTrackingEntries(Environment env, String stream, long lowerBound) {
+        // Offset tracking entries are normally sparse. Bound the scan so an
+        // operationally unhealthy broker cannot turn tail discovery into an
+        // unbounded sequence of consumer attaches.
+        final int maxOffsetsToProbe = 64;
+        for (int i = 0; i < maxOffsetsToProbe; i++) {
+            long candidate;
+            try {
+                candidate = Math.addExact(lowerBound, i);
+            } catch (ArithmeticException e) {
+                return 0L;
+            }
+            try {
+                long maxSeen = probeMessageOffsetInclusive(
+                        env,
+                        stream,
+                        com.rabbitmq.stream.OffsetSpecification.offset(candidate),
+                        TAIL_PROBE_WAIT_MS);
+                if (maxSeen >= candidate) {
+                    return maxSeen + 1L;
+                }
+            } catch (NoOffsetException e) {
+                return 0L;
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return 0L;
+            } catch (Exception e) {
+                LOG.debug("Tracking-gap probe failed for stream '{}' at offset {}: {}",
+                        stream, candidate, e.toString());
+            }
+        }
+        return 0L;
+    }
+
+    static long probeFirstMessageOffsetInclusive(
+            Environment env,
+            String stream,
+            com.rabbitmq.stream.OffsetSpecification offsetSpecification,
+            long firstMessageWaitMs)
+            throws InterruptedException {
+        ArrayBlockingQueue<Long> observedOffsets = new ArrayBlockingQueue<>(1);
+        com.rabbitmq.stream.Consumer probe = null;
+        try {
+            probe = env.consumerBuilder()
+                    .stream(stream)
+                    .offset(offsetSpecification)
+                    .noTrackingStrategy()
+                    .messageHandler((context, message) -> observedOffsets.offer(context.offset()))
+                    .flow()
+                    .initialCredits(1)
+                    .strategy(ConsumerFlowStrategy.creditOnChunkArrival(1))
+                    .builder()
+                    .build();
+            Long first = observedOffsets.poll(
+                    Math.max(1L, firstMessageWaitMs), TimeUnit.MILLISECONDS);
+            return first == null ? -1L : first;
+        } finally {
+            if (probe != null) {
+                try {
+                    probe.close();
+                } catch (Exception e) {
+                    LOG.debug("Error closing deliverable-offset probe for stream '{}': {}",
+                            stream, e.toString());
+                }
+            }
+        }
+    }
+
+    private long probeTailOffsetWithRetry(
+            Environment env,
+            String stream,
+            com.rabbitmq.stream.OffsetSpecification offsetSpecification) {
         long[] retryWaitsMs = {TAIL_PROBE_WAIT_MS, TAIL_PROBE_RETRY_WAIT_MS, TAIL_PROBE_FINAL_WAIT_MS};
         for (long waitMs : retryWaitsMs) {
             try {
-                long maxSeen = probeLastMessageOffsetInclusive(env, stream, waitMs);
+                long maxSeen = probeMessageOffsetInclusive(
+                        env, stream, offsetSpecification, waitMs);
                 if (maxSeen >= 0) {
                     return maxSeen + 1;
                 }
@@ -1627,13 +1710,26 @@ class BaseRabbitMQMicroBatchStream
     static long probeLastMessageOffsetInclusive(
             Environment env, String stream, long firstMessageWaitMs)
             throws InterruptedException {
+        return probeMessageOffsetInclusive(
+                env,
+                stream,
+                com.rabbitmq.stream.OffsetSpecification.last(),
+                firstMessageWaitMs);
+    }
+
+    static long probeMessageOffsetInclusive(
+            Environment env,
+            String stream,
+            com.rabbitmq.stream.OffsetSpecification offsetSpecification,
+            long firstMessageWaitMs)
+            throws InterruptedException {
         ArrayBlockingQueue<Long> observedOffsets = new ArrayBlockingQueue<>(1);
         AtomicLong maxObservedOffset = new AtomicLong(-1L);
         com.rabbitmq.stream.Consumer probe = null;
         try {
             probe = env.consumerBuilder()
                     .stream(stream)
-                    .offset(com.rabbitmq.stream.OffsetSpecification.last())
+                    .offset(offsetSpecification)
                     .noTrackingStrategy()
                     .messageHandler((context, message) -> {
                         long offset = context.offset();
@@ -1899,13 +1995,14 @@ class BaseRabbitMQMicroBatchStream
         StreamStats stats;
         try {
             stats = streamStatsCache.getOrLoad(env, stream);
-        } catch (com.rabbitmq.stream.StreamDoesNotExistException e) {
+        } catch (StreamDoesNotExistException | StreamNotAvailableException e) {
             if (options.isFailOnDataLoss()) {
                 throw new IllegalStateException(
-                        "Stream '" + stream + "' does not exist. " +
+                        "Stream '" + stream + "' does not exist or is unavailable. " +
                                 "It may have been deleted. Set failOnDataLoss=false to skip.", e);
             }
-            LOG.warn("Stream '{}' does not exist, skipping (failOnDataLoss=false)", stream);
+            LOG.warn("Stream '{}' does not exist or is unavailable, " +
+                    "skipping (failOnDataLoss=false)", stream);
             latestStartedOnEmptyStreams.remove(stream);
             return 0L;
         } catch (Exception e) {
@@ -1917,6 +2014,9 @@ class BaseRabbitMQMicroBatchStream
         // publishes or overshoot after recreation, so use them only as fallback.
         long statsTail = resolveTailOffset(stats);
         long probedTail = probeTailOffsetForLatestWithCache(env, stream);
+        if (probedTail == 0L && statsTail > 0L) {
+            probedTail = probeTailOffsetPastTrackingEntries(env, stream, statsTail);
+        }
         long resolved = probedTail > 0L ? probedTail : statsTail;
 
         if (probedTail == 0L && latestStartedOnEmptyStreams.contains(stream)) {
@@ -1973,6 +2073,9 @@ class BaseRabbitMQMicroBatchStream
         }
 
         long probedTail = probeTailOffsetFromLastMessageWithRetry(env, stream);
+        if (probedTail == 0L && refreshedTail > 0L) {
+            probedTail = probeTailOffsetFromOffsetWithRetry(env, stream, refreshedTail);
+        }
         if (probedTail > 0L) {
             refreshedTail = Math.max(refreshedTail, probedTail);
             confirmed = true;
@@ -2022,6 +2125,12 @@ class BaseRabbitMQMicroBatchStream
         // subsequent latestOffset() calls reuse the fresh probe value.
         long statsTail = queryStreamTailOffset(env, stream);
         long probedTail = probeTailOffsetFromLastMessageWithRetry(env, stream);
+        if (probedTail == 0L && statsTail > 0L) {
+            // OffsetSpecification.last() can resolve to a tracking-only chunk.
+            // Resume from the stats lower bound to discover user messages that
+            // precede a later tracking entry in the physical stream.
+            probedTail = probeTailOffsetPastTrackingEntries(env, stream, statsTail);
+        }
         long nowNanos = System.nanoTime();
         if (probedTail > 0L) {
             latestTailProbeCache.put(stream, new CachedTailProbe(

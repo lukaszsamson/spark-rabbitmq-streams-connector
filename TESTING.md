@@ -8,10 +8,10 @@
 
 ## Unit Tests
 
-Unit tests live in `core`, `spark35`, `spark40`, and `spark41` modules. They use mocks and do not require Docker. The `spark35_2.12` module compiles the same sources against Spark 3.5 with Scala 2.12. The shared unit suite (~2593 tests across core and the four Spark modules) covers option parsing and validation, source schema and row mapping, AMQP property coercions, offset JSON round-trip, tail and timestamp offset resolution, admission control and read limits, split-offset merge, push-to-pull queue bridge, sink confirm tracking and routing, and Spark 4.1 real-time mode.
+Unit tests live in `core` and the four `*-tests` modules that run the shared test suite against each Spark/Scala combination. They use mocks and do not require Docker. The `spark35_2.12` artifact module compiles the connector sources against Spark 3.5 with Scala 2.12; `spark35_2.12-tests` runs the shared unit suite for that combination. The shared unit suite (more than 2,500 tests across core and the four Spark combinations) covers option parsing and validation, source schema and row mapping, AMQP property coercions, offset JSON round-trip, tail and timestamp offset resolution, admission control and read limits, split-offset merge, push-to-pull queue bridge, sink confirm tracking and routing, and Spark 4.1 real-time mode.
 
 ```bash
-mvn verify -pl core,spark35,spark35_2.12,spark40,spark41 -am
+mvn verify -pl core,spark35-tests,spark35_2.12-tests,spark40-tests,spark41-tests -am
 ```
 
 ## Mutation Testing (PIT)
@@ -89,6 +89,8 @@ Alternatively, enable "Allow the default Docker socket to be used" in Docker Des
 | `BatchWriteIT` | Batch writes: write and read back, application properties, round-trip via connector |
 | `StreamingIT` | Structured Streaming: Trigger.AvailableNow, maxRecordsPerTrigger, streaming write, checkpoint resume, server-side offset tracking, broker offset recovery |
 | `SuperStreamIT` | Superstreams: batch read across partitions, batch write with routing, routing_key column, streaming write, partition stream names, failOnDataLoss with deleted partitions |
+| `RealTimeModeIT` | Spark 4.1 real-time reads: lifecycle, offsets, lag metrics, timeout and close behavior |
+| `BugsReproIT` | Regression scenarios for checkpointing, retention, SAC, compression, offset tracking, and delayed admission control |
 
 ## Running All Tests
 

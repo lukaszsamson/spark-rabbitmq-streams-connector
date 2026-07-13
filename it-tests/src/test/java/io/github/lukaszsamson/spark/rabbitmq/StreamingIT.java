@@ -1,6 +1,7 @@
 package io.github.lukaszsamson.spark.rabbitmq;
 
 import com.rabbitmq.stream.Message;
+import org.apache.spark.api.java.function.VoidFunction2;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.RowFactory;
@@ -1712,11 +1713,12 @@ class StreamingIT extends AbstractRabbitMQIT {
         }
     }
 
-    // ---- IT-ALO-002: sink task failure after partial writes causes duplicates ----
+    // ---- IT-ALO-002: failed batches replay and do not commit source offsets early ----
 
     @Test
-    void streamingSinkFailureAfterPartialWritesCausesDuplicates() throws Exception {
+    void streamingFailedBatchReplaysAndCommitsOffsetsOnlyAfterRetry() throws Exception {
         final int expectedCount = 12;
+        String consumerName = "it-failed-batch-" + System.currentTimeMillis();
         publishMessages(sourceStream, expectedCount, "dup-");
 
         Path outputDir = Files.createTempDirectory("spark-output-alo-dup-");
@@ -1728,6 +1730,8 @@ class StreamingIT extends AbstractRabbitMQIT {
                 .option("endpoints", streamEndpoint())
                 .option("stream", sourceStream)
                 .option("startingOffsets", "earliest")
+                .option("consumerName", consumerName)
+                .option("storeBrokerOffsets", "true")
                 .option("metadataFields", "")
                 .option("addressResolverClass",
                         "io.github.lukaszsamson.spark.rabbitmq.TestAddressResolver")
@@ -1748,51 +1752,34 @@ class StreamingIT extends AbstractRabbitMQIT {
 
         assertThatThrownBy(() -> query.awaitTermination(30_000))
                 .hasMessageContaining("Intentional sink failure");
+        assertThat(hasStoredOffset(consumerName, sourceStream))
+                .as("a failed micro-batch must not advance broker-side source progress")
+                .isFalse();
 
         StreamingQuery retry = spark.readStream()
                 .format("rabbitmq_streams")
                 .option("endpoints", streamEndpoint())
                 .option("stream", sourceStream)
                 .option("startingOffsets", "earliest")
-                .option("storeBrokerOffsets", "false")
+                .option("consumerName", consumerName)
+                .option("storeBrokerOffsets", "true")
                 .option("metadataFields", "")
                 .option("addressResolverClass",
                         "io.github.lukaszsamson.spark.rabbitmq.TestAddressResolver")
                 .load()
                 .writeStream()
-                .format("parquet")
-                .option("path", outputDir.toString())
+                .foreachBatch((VoidFunction2<Dataset<Row>, Long>)
+                        (batch, batchId) -> batch.write()
+                                .mode("append")
+                                .format("parquet")
+                                .save(outputDir.toString()))
                 .option("checkpointLocation", failureCheckpoint.toString())
                 .trigger(Trigger.AvailableNow())
                 .start();
 
-        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(45);
-        long observed = 0L;
-        while (retry.isActive() && System.nanoTime() < deadlineNanos) {
-            observed = readOutputCount(outputDir);
-            if (observed >= expectedCount) {
-                retry.stop();
-                retry.awaitTermination(10_000);
-                break;
-            }
-            Thread.sleep(250);
-        }
-
-        boolean terminated = !retry.isActive();
-        if (!terminated) {
-            observed = readOutputCount(outputDir);
-            retry.stop();
-            retry.awaitTermination(10_000);
-            if (observed >= expectedCount) {
-                terminated = true;
-            }
-        }
-        if (!terminated) {
-            StreamingQueryProgress lastProgress = retry.lastProgress();
-            String progress = lastProgress == null ? "null" : lastProgress.prettyJson();
-            throw new AssertionError(
-                    "Retry query did not terminate within 120000ms; lastProgress=" + progress);
-        }
+        assertThat(retry.awaitTermination(120_000))
+                .as("AvailableNow retry must finish the previously uncommitted batch")
+                .isTrue();
 
         List<String> values = spark.read().schema(MINIMAL_OUTPUT_SCHEMA)
                 .parquet(outputDir.toString())
@@ -1800,11 +1787,15 @@ class StreamingIT extends AbstractRabbitMQIT {
                 .map(row -> new String((byte[]) row.getAs("value")))
                 .toList();
 
-        Set<String> unique = Set.copyOf(values);
-        // At-least-once semantics allow duplicates on retry, but Spark may also resume
-        // without duplicates depending on failure timing/checkpoint state.
-        assertThat(values.size()).isGreaterThanOrEqualTo(unique.size());
-        assertThat(unique).hasSize(expectedCount);
+        Map<String, Long> occurrences = values.stream()
+                .collect(Collectors.groupingBy(value -> value, Collectors.counting()));
+        assertThat(occurrences).hasSize(expectedCount);
+        assertThat(occurrences.values())
+                .as("the uncommitted batch must replay; the non-transactional sink is at-least-once")
+                .allMatch(count -> count == 2L);
+        assertThat(queryStoredOffset(consumerName, sourceStream))
+                .as("broker-side progress advances only after the replayed batch commits")
+                .isEqualTo(expectedCount - 1L);
     }
 
     // ---- IT-SPLIT-001: minPartitions split in streaming ----
@@ -1961,6 +1952,77 @@ class StreamingIT extends AbstractRabbitMQIT {
         long totalCount = spark.read().schema(MINIMAL_OUTPUT_SCHEMA)
                 .parquet(outputDir.toString()).count();
         assertThat(totalCount).isEqualTo(50);
+    }
+
+    @Test
+    void streamingAvailableNowResumeReadsMessagesPublishedAfterBrokerOffsetTracking() throws Exception {
+        String consumerName = "it-resume-after-tracking-" + System.currentTimeMillis();
+        publishMessages(sourceStream, 10);
+        Thread.sleep(200);
+
+        Path outputDir = Files.createTempDirectory("spark-output-resume-after-tracking-");
+
+        StreamingQuery firstRun = spark.readStream()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", sourceStream)
+                .option("startingOffsets", "earliest")
+                .option("consumerName", consumerName)
+                .option("storeBrokerOffsets", "true")
+                .option("maxRecordsPerTrigger", "3")
+                // A low queue-poll latency must not shorten the separate probe that
+                // skips broker tracking entries during checkpoint resume.
+                .option("pollTimeoutMs", "100")
+                .option("maxWaitMs", "5000")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "io.github.lukaszsamson.spark.rabbitmq.TestAddressResolver")
+                .load()
+                .writeStream()
+                .format("parquet")
+                .option("path", outputDir.toString())
+                .option("checkpointLocation", checkpointDir.toString())
+                .trigger(Trigger.AvailableNow())
+                .start();
+
+        assertThat(firstRun.awaitTermination(120_000)).isTrue();
+        assertThat(spark.read().schema(MINIMAL_OUTPUT_SCHEMA)
+                .parquet(outputDir.toString()).count()).isEqualTo(10);
+
+        // storeOffset() appends a tracking entry to the physical stream. Messages
+        // published afterward therefore need not be contiguous with Spark's prior
+        // exclusive end offset.
+        publishMessages(sourceStream, 2);
+        Thread.sleep(200);
+
+        StreamingQuery secondRun = spark.readStream()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", sourceStream)
+                .option("startingOffsets", "earliest")
+                .option("consumerName", consumerName)
+                .option("storeBrokerOffsets", "true")
+                .option("maxRecordsPerTrigger", "3")
+                .option("pollTimeoutMs", "100")
+                .option("maxWaitMs", "5000")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "io.github.lukaszsamson.spark.rabbitmq.TestAddressResolver")
+                .load()
+                .writeStream()
+                .format("parquet")
+                .option("path", outputDir.toString())
+                .option("checkpointLocation", checkpointDir.toString())
+                .trigger(Trigger.AvailableNow())
+                .start();
+
+        assertThat(secondRun.awaitTermination(30_000))
+                .as("AvailableNow restart should terminate after reading post-tracking messages")
+                .isTrue();
+        Dataset<Row> result = spark.read().schema(MINIMAL_OUTPUT_SCHEMA)
+                .parquet(outputDir.toString());
+        assertThat(result.count()).isEqualTo(12);
+        assertThat(result.select("offset").distinct().count()).isEqualTo(12);
     }
 
     // ---- IT-RL-001: maxBytesPerTrigger only ----
