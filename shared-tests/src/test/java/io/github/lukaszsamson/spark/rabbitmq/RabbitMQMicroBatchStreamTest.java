@@ -15,6 +15,7 @@ import com.rabbitmq.stream.Environment;
 import com.rabbitmq.stream.NoOffsetException;
 import com.rabbitmq.stream.ProducerBuilder;
 import com.rabbitmq.stream.StreamCreator;
+import com.rabbitmq.stream.StreamNotAvailableException;
 import com.rabbitmq.stream.StreamStats;
 import com.rabbitmq.stream.codec.QpidProtonCodec;
 
@@ -858,6 +859,48 @@ class RabbitMQMicroBatchStreamTest {
                     start, ReadLimit.allAvailable());
 
             assertThat(latest.getStreamOffsets()).containsEntry("test-stream", 7L);
+        }
+
+        @Test
+        void latestOffsetSkipsTemporarilyUnavailableStreamWhenFailOnDataLossFalse()
+                throws Exception {
+            Map<String, String> opts = new LinkedHashMap<>();
+            opts.put("endpoints", "localhost:5552");
+            opts.put("stream", "test-stream");
+            opts.put("failOnDataLoss", "false");
+
+            RabbitMQMicroBatchStream stream = createStream(new ConnectorOptions(opts));
+            Environment env = mock(Environment.class);
+            when(env.queryStreamStats("test-stream"))
+                    .thenThrow(new StreamNotAvailableException("test-stream"));
+            setPrivateField(stream, "environment", env);
+            // Simulate a stream that was discovered successfully and became unavailable
+            // during a later topology-refresh cycle.
+            setPrivateField(stream, "streams", List.of("test-stream"));
+
+            RabbitMQStreamOffset start = new RabbitMQStreamOffset(Map.of("test-stream", 0L));
+            RabbitMQStreamOffset latest = (RabbitMQStreamOffset) stream.latestOffset(
+                    start, ReadLimit.allAvailable());
+
+            assertThat(latest).isEqualTo(start);
+        }
+
+        @Test
+        void latestOffsetFailsForTemporarilyUnavailableStreamWhenFailOnDataLossTrue()
+                throws Exception {
+            RabbitMQMicroBatchStream stream = createStream(minimalOptions());
+            Environment env = mock(Environment.class);
+            when(env.queryStreamStats("test-stream"))
+                    .thenThrow(new StreamNotAvailableException("test-stream"));
+            setPrivateField(stream, "environment", env);
+            setPrivateField(stream, "streams", List.of("test-stream"));
+
+            assertThatThrownBy(() -> stream.latestOffset(
+                    new RabbitMQStreamOffset(Map.of("test-stream", 0L)),
+                    ReadLimit.allAvailable()))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("does not exist or is unavailable")
+                    .hasCauseInstanceOf(StreamNotAvailableException.class);
         }
 
         @Test

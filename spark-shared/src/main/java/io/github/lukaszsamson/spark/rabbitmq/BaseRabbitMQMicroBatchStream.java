@@ -4,6 +4,7 @@ import com.rabbitmq.stream.ConsumerFlowStrategy;
 import com.rabbitmq.stream.Environment;
 import com.rabbitmq.stream.NoOffsetException;
 import com.rabbitmq.stream.StreamDoesNotExistException;
+import com.rabbitmq.stream.StreamNotAvailableException;
 import com.rabbitmq.stream.StreamStats;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataInputStream;
@@ -1994,13 +1995,14 @@ class BaseRabbitMQMicroBatchStream
         StreamStats stats;
         try {
             stats = streamStatsCache.getOrLoad(env, stream);
-        } catch (com.rabbitmq.stream.StreamDoesNotExistException e) {
+        } catch (StreamDoesNotExistException | StreamNotAvailableException e) {
             if (options.isFailOnDataLoss()) {
                 throw new IllegalStateException(
-                        "Stream '" + stream + "' does not exist. " +
+                        "Stream '" + stream + "' does not exist or is unavailable. " +
                                 "It may have been deleted. Set failOnDataLoss=false to skip.", e);
             }
-            LOG.warn("Stream '{}' does not exist, skipping (failOnDataLoss=false)", stream);
+            LOG.warn("Stream '{}' does not exist or is unavailable, " +
+                    "skipping (failOnDataLoss=false)", stream);
             latestStartedOnEmptyStreams.remove(stream);
             return 0L;
         } catch (Exception e) {
