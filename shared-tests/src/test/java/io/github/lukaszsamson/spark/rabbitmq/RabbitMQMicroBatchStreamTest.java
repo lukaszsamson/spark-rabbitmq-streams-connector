@@ -15,6 +15,7 @@ import com.rabbitmq.stream.Environment;
 import com.rabbitmq.stream.NoOffsetException;
 import com.rabbitmq.stream.ProducerBuilder;
 import com.rabbitmq.stream.StreamCreator;
+import com.rabbitmq.stream.StreamException;
 import com.rabbitmq.stream.StreamNotAvailableException;
 import com.rabbitmq.stream.StreamStats;
 import com.rabbitmq.stream.codec.QpidProtonCodec;
@@ -901,6 +902,49 @@ class RabbitMQMicroBatchStreamTest {
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessageContaining("does not exist or is unavailable")
                     .hasCauseInstanceOf(StreamNotAvailableException.class);
+        }
+
+        @Test
+        void latestOffsetReturnsStartWhenStatsQueryIsInterruptedByQueryCancellation()
+                throws Exception {
+            RabbitMQMicroBatchStream stream = createStream(minimalOptions());
+            Environment env = mock(Environment.class);
+            when(env.queryStreamStats("test-stream")).thenAnswer(invocation -> {
+                Thread.currentThread().interrupt();
+                throw new StreamException(
+                        "Could not execute operation after 3 attempts",
+                        new StreamException(
+                                "Interrupted while waiting for response",
+                                new InterruptedException("query stopped")));
+            });
+            setPrivateField(stream, "environment", env);
+            setPrivateField(stream, "streams", List.of("test-stream"));
+
+            RabbitMQStreamOffset start = new RabbitMQStreamOffset(Map.of("test-stream", 40L));
+            try {
+                assertThat(stream.latestOffset(start, ReadLimit.allAvailable())).isEqualTo(start);
+                assertThat(Thread.currentThread().isInterrupted()).isTrue();
+            } finally {
+                // Do not leak the simulated Spark cancellation into the JUnit worker.
+                Thread.interrupted();
+            }
+        }
+
+        @Test
+        void latestOffsetStillFailsForNonInterruptedStatsQueryErrors() throws Exception {
+            RabbitMQMicroBatchStream stream = createStream(minimalOptions());
+            Environment env = mock(Environment.class);
+            when(env.queryStreamStats("test-stream"))
+                    .thenThrow(new StreamException("locator unavailable"));
+            setPrivateField(stream, "environment", env);
+            setPrivateField(stream, "streams", List.of("test-stream"));
+
+            assertThatThrownBy(() -> stream.latestOffset(
+                    new RabbitMQStreamOffset(Map.of("test-stream", 40L)),
+                    ReadLimit.allAvailable()))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("Failed to query stream stats")
+                    .hasCauseInstanceOf(StreamException.class);
         }
 
         @Test

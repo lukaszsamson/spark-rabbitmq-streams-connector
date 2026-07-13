@@ -789,9 +789,25 @@ class BaseRabbitMQMicroBatchStream
             }
         }
 
-        Map<String, Long> tailOffsets = availableNowSnapshot != null
-                ? new LinkedHashMap<>(availableNowSnapshot)
-                : queryTailOffsets();
+        Map<String, Long> tailOffsets;
+        try {
+            tailOffsets = availableNowSnapshot != null
+                    ? new LinkedHashMap<>(availableNowSnapshot)
+                    : queryTailOffsets();
+        } catch (RuntimeException e) {
+            // MicroBatchExecution.stop() marks the query terminated and interrupts its
+            // execution thread before Spark calls source.stop(). If that interrupt lands
+            // while the RabbitMQ client is waiting for a stats response, it is wrapped in
+            // StreamException even though this is normal query cancellation. Do not turn
+            // that shutdown race into a terminal StreamingQueryException or advance an
+            // offset: return the last safe planning position and preserve the interrupt.
+            if (Thread.currentThread().isInterrupted()
+                    && hasCause(e, InterruptedException.class)) {
+                LOG.debug("Tail offset query interrupted during query cancellation");
+                return latestOffsetDuringStop(startOffset);
+            }
+            throw e;
+        }
 
         // Guard: if tailOffsets is empty, no streams could be queried
         if (tailOffsets.isEmpty()) {
@@ -991,6 +1007,17 @@ class BaseRabbitMQMicroBatchStream
             return startOffset;
         }
         return new RabbitMQStreamOffset(Map.of());
+    }
+
+    private static boolean hasCause(Throwable throwable, Class<? extends Throwable> causeType) {
+        Throwable current = throwable;
+        while (current != null) {
+            if (causeType.isInstance(current)) {
+                return true;
+            }
+            current = current.getCause();
+        }
+        return false;
     }
 
     // ---- SupportsTriggerAvailableNow ----

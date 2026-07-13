@@ -2710,7 +2710,16 @@ class StreamingIT extends AbstractRabbitMQIT {
         // Publish data after query started
         Thread.sleep(3_000);
         publishMessages(sourceStream, 40, "late-");
-        Thread.sleep(5_000);
+
+        // Wait for the post-start data to be durably committed by the sink before
+        // exercising query.stop(). A fixed sleep can interrupt an in-flight file-sink
+        // batch on slower runners and turn this source-offset test into a sink race.
+        query.processAllAvailable();
+
+        long countBeforeStop = readOutputCount(outputDir);
+        assertThat(countBeforeStop)
+                .as("latest on empty stream should commit data published after start")
+                .isEqualTo(40L);
 
         query.stop();
         query.awaitTermination(30_000);
