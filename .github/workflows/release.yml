@@ -144,7 +144,7 @@ jobs:
               ;;
           esac
 
-          for attempt in $(seq 1 60); do
+          for attempt in $(seq 1 180); do
             response="$(curl --fail --silent --show-error --request POST \
               --header "Authorization: Bearer $auth" "$status_url")"
             state="$(jq -r '.deploymentState' <<<"$response")"
@@ -159,7 +159,7 @@ jobs:
             sleep 10
           done
 
-          echo "Timed out waiting for Central deployment to publish" >&2
+          echo "Timed out after 30 minutes waiting for Central deployment to publish" >&2
           exit 1
 
       - name: Set up JDK 17
