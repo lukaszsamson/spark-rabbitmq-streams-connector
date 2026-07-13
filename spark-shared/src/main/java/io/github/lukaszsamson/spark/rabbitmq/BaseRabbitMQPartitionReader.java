@@ -48,6 +48,7 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
     private static final long MAX_STATS_TAIL_CACHE_WINDOW_MS = 250L;
     final String stream;
     final long startOffset;
+    volatile long consumerStartOffset;
     volatile long endOffset;
     final ConnectorOptions options;
     final boolean useConfiguredStartingOffset;
@@ -139,6 +140,7 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
     BaseRabbitMQPartitionReader(RabbitMQInputPartition partition, ConnectorOptions options) {
         this.stream = partition.getStream();
         this.startOffset = partition.getStartOffset();
+        this.consumerStartOffset = this.startOffset;
         this.endOffset = partition.getEndOffset();
         this.options = options;
         this.useConfiguredStartingOffset = partition.isUseConfiguredStartingOffset();
@@ -390,6 +392,7 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
         } catch (Exception e) {
             LOG.warn("Error closing consumer for stream '{}'", stream, e);
         }
+
         if (pooledEnvironment) {
             EnvironmentPool.getInstance().release(options);
             environment = null;
@@ -436,6 +439,34 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
         } catch (Exception e) {
             // Non-fatal: cannot check, proceed without metric
             LOG.debug("Cannot check offset range for stream '{}': {}", stream, e.getMessage());
+        }
+
+        boolean streamingReader = messageSizeTrackerScope != null;
+        if (startOffset > 0L
+                && hasFinitePlannedEnd()
+                && options.isStoreBrokerOffsets(streamingReader)) {
+            try {
+                long firstDeliverable = BaseRabbitMQMicroBatchStream.probeFirstMessageOffsetInclusive(
+                        environment,
+                        stream,
+                        OffsetSpecification.offset(startOffset),
+                        Math.min(500L, options.getPollTimeoutMs()));
+                if (firstDeliverable >= endOffset) {
+                    finished = true;
+                    return;
+                }
+                if (firstDeliverable > startOffset) {
+                    consumerStartOffset = firstDeliverable;
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(
+                        "Interrupted while probing the first deliverable offset for stream '"
+                                + stream + "'", e);
+            } catch (Exception e) {
+                LOG.debug("Unable to probe first deliverable offset for stream '{}': {}",
+                        stream, e.toString());
+            }
         }
 
         // Late-bind endOffset for batch reads with endingOffsets=latest.
@@ -809,7 +840,7 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
         // Spark already plans split ranges from resolved numeric offsets. Seeking by
         // timestamp here forces the executor to replay historical backlog just to skip
         // to startOffset, which can starve bounded micro-batches in SAC/SST live streams.
-        return OffsetSpecification.offset(startOffset);
+        return OffsetSpecification.offset(consumerStartOffset);
     }
 
     String resolveSingleActiveConsumerName() {

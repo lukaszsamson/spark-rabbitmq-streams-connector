@@ -1963,6 +1963,73 @@ class StreamingIT extends AbstractRabbitMQIT {
         assertThat(totalCount).isEqualTo(50);
     }
 
+    @Test
+    void streamingAvailableNowResumeReadsMessagesPublishedAfterBrokerOffsetTracking() throws Exception {
+        String consumerName = "it-resume-after-tracking-" + System.currentTimeMillis();
+        publishMessages(sourceStream, 10);
+        Thread.sleep(200);
+
+        Path outputDir = Files.createTempDirectory("spark-output-resume-after-tracking-");
+
+        StreamingQuery firstRun = spark.readStream()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", sourceStream)
+                .option("startingOffsets", "earliest")
+                .option("consumerName", consumerName)
+                .option("storeBrokerOffsets", "true")
+                .option("maxRecordsPerTrigger", "3")
+                .option("maxWaitMs", "5000")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "io.github.lukaszsamson.spark.rabbitmq.TestAddressResolver")
+                .load()
+                .writeStream()
+                .format("parquet")
+                .option("path", outputDir.toString())
+                .option("checkpointLocation", checkpointDir.toString())
+                .trigger(Trigger.AvailableNow())
+                .start();
+
+        assertThat(firstRun.awaitTermination(120_000)).isTrue();
+        assertThat(spark.read().schema(MINIMAL_OUTPUT_SCHEMA)
+                .parquet(outputDir.toString()).count()).isEqualTo(10);
+
+        // storeOffset() appends a tracking entry to the physical stream. Messages
+        // published afterward therefore need not be contiguous with Spark's prior
+        // exclusive end offset.
+        publishMessages(sourceStream, 2);
+        Thread.sleep(200);
+
+        StreamingQuery secondRun = spark.readStream()
+                .format("rabbitmq_streams")
+                .option("endpoints", streamEndpoint())
+                .option("stream", sourceStream)
+                .option("startingOffsets", "earliest")
+                .option("consumerName", consumerName)
+                .option("storeBrokerOffsets", "true")
+                .option("maxRecordsPerTrigger", "3")
+                .option("maxWaitMs", "5000")
+                .option("metadataFields", "")
+                .option("addressResolverClass",
+                        "io.github.lukaszsamson.spark.rabbitmq.TestAddressResolver")
+                .load()
+                .writeStream()
+                .format("parquet")
+                .option("path", outputDir.toString())
+                .option("checkpointLocation", checkpointDir.toString())
+                .trigger(Trigger.AvailableNow())
+                .start();
+
+        assertThat(secondRun.awaitTermination(30_000))
+                .as("AvailableNow restart should terminate after reading post-tracking messages")
+                .isTrue();
+        Dataset<Row> result = spark.read().schema(MINIMAL_OUTPUT_SCHEMA)
+                .parquet(outputDir.toString());
+        assertThat(result.count()).isEqualTo(12);
+        assertThat(result.select("offset").distinct().count()).isEqualTo(12);
+    }
+
     // ---- IT-RL-001: maxBytesPerTrigger only ----
 
     @Test

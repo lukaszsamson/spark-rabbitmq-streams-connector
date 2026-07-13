@@ -105,10 +105,9 @@ stream.writeStream()
 
 ### Real-time mode (Spark 4.1 only)
 
-The `spark-rabbitmq-streams-connector-spark41` artifact implements Spark's `SupportsRealTimeMode` interface, enabling low-latency Structured Streaming reads via Spark's real-time mode API. No code change is required: Spark activates real-time mode automatically when the query and source support it.
+The `spark-rabbitmq-streams-connector-spark41` artifact implements Spark's `SupportsRealTimeMode` interface, enabling low-latency Structured Streaming reads via Spark's experimental real-time mode API. Select `Trigger.RealTime(...)` explicitly; the default trigger remains micro-batch even when the source supports real-time mode.
 
 ```java
-// Real-time mode is activated by Spark automatically when using spark41 artifact
 Dataset<Row> stream = spark.readStream()
     .format("rabbitmq_streams")
     .option("endpoints", "localhost:5552")
@@ -119,6 +118,7 @@ Dataset<Row> stream = spark.readStream()
 StreamingQuery query = stream.writeStream()
     .format("console")
     .option("checkpointLocation", "/tmp/checkpoint")
+    .trigger(Trigger.RealTime("5 seconds"))
     .start();
 ```
 
@@ -266,7 +266,7 @@ By default, unrecognized columns cause an error. Set `ignoreUnknownColumns=true`
 | `initialCredits` | int | 10 | Initial chunk credits |
 | `queueCapacity` | int | 10000 | Internal queue capacity (messages) |
 | `estimatedMessageSizeBytes` | int | 1024 | Initial message size estimate for byte-based limits |
-| `tailProbeCacheMs` | long | 1000 | TTL (ms) for cached tail-offset probe results in per-trigger `latestOffset()`. Increase to reduce broker churn with many streams or short trigger intervals; decrease for fresher tail visibility. Only relevant on RabbitMQ &lt; 4.3 where `committedOffset()` is unavailable |
+| `tailProbeCacheMs` | long | 1000 | TTL (ms) for cached tail-offset probe results in per-trigger `latestOffset()`. Increase to reduce broker churn with many streams or short trigger intervals; decrease for fresher tail visibility. The probe supplements broker statistics on all supported RabbitMQ versions because committed-offset statistics can lag fresh publishes. |
 
 ### Filtering options (RabbitMQ 3.13+)
 
