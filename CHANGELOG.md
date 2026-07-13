@@ -9,6 +9,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Changed
 - Release automation now uses Central Publishing Maven Plugin `0.11.0`, waits for automatic publication, and can resume an already-validated Central deployment for up to 30 minutes without uploading duplicate artifacts.
 
+### Fixed
+- Transient RabbitMQ stream-stat RPC failures during connection or super-stream partition recovery are retried without masking missing/unavailable-stream data-loss semantics or Spark query cancellation.
+
 ## [0.2.0] - 2026-07-13
 
 ### Added

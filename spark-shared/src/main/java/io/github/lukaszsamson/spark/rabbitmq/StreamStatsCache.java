@@ -2,7 +2,12 @@ package io.github.lukaszsamson.spark.rabbitmq;
 
 import com.rabbitmq.stream.Environment;
 import com.rabbitmq.stream.NoOffsetException;
+import com.rabbitmq.stream.StreamDoesNotExistException;
+import com.rabbitmq.stream.StreamException;
+import com.rabbitmq.stream.StreamNotAvailableException;
 import com.rabbitmq.stream.StreamStats;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
@@ -22,6 +27,16 @@ import java.util.concurrent.TimeUnit;
  * unchanged.
  */
 final class StreamStatsCache {
+
+    private static final Logger LOG = LoggerFactory.getLogger(StreamStatsCache.class);
+
+    /**
+     * Short, bounded retries for locator RPCs that race with connection or topology recovery.
+     * The Java client normally retries locator unavailability itself, but a connection closing
+     * after dispatch can currently surface as another RuntimeException (including a null stats
+     * response) instead of LocatorNotAvailableException.
+     */
+    private static final long[] TRANSIENT_RETRY_DELAYS_MS = {50L, 200L};
 
     /** Sentinel for "field threw NoOffsetException at capture time". */
     private static final long NO_OFFSET = Long.MIN_VALUE;
@@ -50,10 +65,45 @@ final class StreamStatsCache {
         // get() and put() and issue duplicate queryStreamStats calls for the same
         // stream during a cache miss. We tolerate that rare stampede because
         // correctness only requires that every read sees a consistent snapshot.
-        StreamStats fresh = capture(env.queryStreamStats(stream));
+        StreamStats fresh = loadWithRetry(env, stream);
         long expiresAtNanos = nowNanos + ttlNanos;
         entries.put(stream, new Entry(fresh, expiresAtNanos));
         return fresh;
+    }
+
+    private static StreamStats loadWithRetry(Environment env, String stream) {
+        for (int attempt = 0; ; attempt++) {
+            try {
+                return capture(env.queryStreamStats(stream));
+            } catch (StreamDoesNotExistException | StreamNotAvailableException e) {
+                // These are topology/data-loss outcomes, not transient locator failures.
+                // The caller applies failOnDataLoss semantics to them.
+                throw e;
+            } catch (RuntimeException e) {
+                // Spark query cancellation interrupts the execution thread. Preserve the
+                // client's wrapped InterruptedException so latestOffset can take its normal
+                // cancellation path without issuing another broker request.
+                if (Thread.currentThread().isInterrupted()
+                        || attempt >= TRANSIENT_RETRY_DELAYS_MS.length) {
+                    throw e;
+                }
+
+                long delayMs = TRANSIENT_RETRY_DELAYS_MS[attempt];
+                LOG.debug(
+                        "Stream stats query for '{}' failed on attempt {}, retrying after {} ms: {}",
+                        stream, attempt + 1, delayMs, e.toString());
+                try {
+                    Thread.sleep(delayMs);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    StreamException cancellation = new StreamException(
+                            "Interrupted while retrying stream stats for '" + stream + "'",
+                            interrupted);
+                    cancellation.addSuppressed(e);
+                    throw cancellation;
+                }
+            }
+        }
     }
 
     /** Drop a stale entry, e.g. after detecting a topology change for {@code stream}. */
