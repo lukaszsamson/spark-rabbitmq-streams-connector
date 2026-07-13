@@ -17,7 +17,7 @@
         <maven.compiler.release>17</maven.compiler.release>
         <spark.version>4.1.1</spark.version>
         <scala.binary.version>2.13</scala.binary.version>
-        <connector.version>0.2.0-SNAPSHOT</connector.version>
+        <connector.version>0.2.0</connector.version>
     </properties>
 
     <dependencies>

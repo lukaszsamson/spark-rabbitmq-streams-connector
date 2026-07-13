@@ -5,20 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
-### Fixed
-- `startingOffsets=timestamp` with a timestamp beyond all currently-available data on a non-empty stream now resolves as a broker-provable no-match instead of burning the full `pollTimeoutMs` probe budget and failing with `TimestampResolutionTimeoutException`. This makes `startingOffsetsByTimestampStrategy=latest` actually reachable in its primary use case (falls back to tail, producing an empty batch until new data arrives); with the default `error` strategy the planner now fails fast with the descriptive no-match error. Applies to both batch planning and streaming `initialOffset` resolution; the starting-timestamp resolvers reuse the same prove-absence pre-check the ending-timestamp resolver already had, and the pre-check's elapsed time is charged against the `pollTimeoutMs` probe budget so planning wall-clock stays bounded.
-- Streaming `startingOffsetsByTimestampStrategy=latest` fallback no longer silently skips records published after the query starts. The fallback start is an offset decision, so the per-stream timestamp anchor is disabled: previously the first micro-batch attached readers with `OffsetSpecification.timestamp(ts)`, which never delivers when the timestamp is beyond all data, and the first non-empty offset range committed empty — advancing the checkpoint past unread records. This also fixes the pre-existing empty-stream (`NoOffsetException`) fallback path, which had the same latent silent-skip.
+
+## [0.2.0] - 2026-07-13
+
+### Added
+- Spark 4.1 real-time mode support (`SupportsRealTimeMode`) for low-latency Structured Streaming reads; unsupported with `minPartitions`/`maxRecordsPerPartition`/`maxRecordsPerTrigger`/`maxBytesPerTrigger`/`minOffsetsPerTrigger`/`maxWaitMs`.
 
 ### Changed
 - **Breaking:** Broker-stored offsets are no longer used for query recovery. On a fresh start (no Spark checkpoint), the connector resolves initial offsets from configured `startingOffsets` / `startingOffsetsByTimestamp` only, matching Kafka source semantics. Users that previously relied on broker-stored offsets to resume across query restarts must rely on Spark checkpoints (or set `startingOffsets` explicitly).
 - **Breaking (option rename):** `serverSideOffsetTracking` is renamed to `storeBrokerOffsets` and its semantics are clarified as best-effort write-only telemetry. The old name remains accepted as a deprecated alias for one release and emits a warning at parse time.
-- Bumped RabbitMQ Stream Java client to `1.6.0`. Picks up resilient handling of `Throwable` from compression codecs (native LZ4/Zstd `Error`s no longer kill the consumer pipeline; producer messages are nacked locally), tolerant broker-version parsing for Tanzu/custom builds, a fix for the `resolve_offset_spec` availability check, and dependency bumps (Netty 4.2.12, lz4-java 1.11, amqp-client 5.29).
+- Timestamp planning now distinguishes broker-confirmed no-match from probe-budget exhaustion. A timed-out probe fails with `TimestampResolutionTimeoutException` instead of silently falling back to tail or earliest and potentially skipping or over-including records.
+- `minOffsetsPerTrigger > maxRecordsPerTrigger` is rejected during source validation.
+- Duplicate stream keys in checkpoint offset JSON are rejected instead of silently keeping the last value.
+- Bumped RabbitMQ Stream Java client to `1.6.0`, including more resilient compression error handling, tolerant broker-version parsing, a `resolve_offset_spec` availability fix, and dependency updates.
+
+### Fixed
+- `startingOffsets=timestamp` with a timestamp beyond all currently-available data on a non-empty stream now resolves as a broker-provable no-match instead of burning the full `pollTimeoutMs` probe budget and failing with `TimestampResolutionTimeoutException`. This makes `startingOffsetsByTimestampStrategy=latest` actually reachable in its primary use case (falls back to tail, producing an empty batch until new data arrives); with the default `error` strategy the planner now fails fast with the descriptive no-match error. Applies to both batch planning and streaming `initialOffset` resolution; the starting-timestamp resolvers reuse the same prove-absence pre-check the ending-timestamp resolver already had, and the pre-check's elapsed time is charged against the `pollTimeoutMs` probe budget so planning wall-clock stays bounded.
+- Streaming `startingOffsetsByTimestampStrategy=latest` fallback no longer silently skips records published after the query starts. The fallback start is an offset decision, so the per-stream timestamp anchor is disabled: previously the first micro-batch attached readers with `OffsetSpecification.timestamp(ts)`, which never delivers when the timestamp is beyond all data, and the first non-empty offset range committed empty — advancing the checkpoint past unread records. This also fixes the pre-existing empty-stream (`NoOffsetException`) fallback path, which had the same latent silent-skip.
+- Structured Streaming checkpoint resume no longer stalls or skips post-checkpoint messages when `storeBrokerOffsets=true` inserts tracking-only physical offsets into a stream.
+- Tail discovery now probes past tracking-only entries and prefers observed message offsets when broker statistics lag fresh publishes or temporarily overshoot after stream recreation.
+- Superstream partition churn treats temporarily unavailable partitions consistently with missing partitions: strict mode fails, while `failOnDataLoss=false` skips and recovers.
+- Failed micro-batches retain their planned offset range for replay instead of advancing the checkpoint past unread records.
+- Broker offset persistence invalidates the per-stream statistics cache so subsequent planning observes newly committed telemetry.
+- Sink publishing-ID high-watermark, publisher-confirm accounting, and retry identity handling were hardened to preserve streaming deduplication guarantees.
+- Matching an `application_properties` `routing_key` entry against the explicit `routing_key` column is now case-insensitive, preventing duplicate wire entries.
 
 ### Removed
 - Internal `StoredOffsetLookup` helper and its temporary tracking-consumer offset-recovery path.
 
+## [0.1.0] - 2026-04-02
+
 ### Added
-- Spark 4.1 real-time mode support (`SupportsRealTimeMode`) for low-latency Structured Streaming reads; unsupported with `minPartitions`/`maxRecordsPerPartition`/`maxRecordsPerTrigger`/`maxBytesPerTrigger`/`minOffsetsPerTrigger`/`maxWaitMs`.
 - Spark DataSource V2 connector for RabbitMQ Streams (`rabbitmq_streams` provider name).
 - Batch read and write support for streams and superstreams.
 - Structured Streaming micro-batch source and sink.
@@ -28,7 +45,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Sink schema with `value`, optional routing key, AMQP properties, and application properties.
 - Offset handling: `earliest`, `latest`, `offset`, and `timestamp` starting modes.
 - Spark checkpoint integration as source of truth for offsets.
-- Optional broker offset telemetry via `storeBrokerOffsets` (write-only).
+- Optional server-side offset tracking via RabbitMQ `storeOffset()` and broker-offset recovery on startup.
 - Admission control via `maxRecordsPerTrigger` and `maxBytesPerTrigger`.
 - `Trigger.AvailableNow` support with tail offset snapshot.
 - `minPartitions` for splitting streams into multiple Spark partitions by offset ranges.
@@ -63,27 +80,3 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `netty.eventLoopGroup`, `netty.byteBufAllocator`, `netty.channelCustomizer`,
   and `netty.bootstrapCustomizer`.
 - Sink schema support for optional `publishing_id` per-row dedup publishing ID override.
-
-### Changed
-- Timestamp probe semantics on planning now distinguish broker-confirmed no-match from
-  probe-budget exhaustion. A timed-out probe fails planning with
-  `TimestampResolutionTimeoutException` for both `startingOffsets=timestamp` and
-  `endingOffsets=timestamp`, regardless of `startingOffsetsByTimestampStrategy`.
-  **Breaking**: previously, a probe timeout was treated as confirmed no-match —
-  with `startingOffsetsByTimestampStrategy=latest` the start would silently jump
-  to tail, and `endingOffsets=timestamp` would silently fall back to the stream
-  tail. Both behaviors could skip or over-include records under operational
-  delay. Increase `pollTimeoutMs` to extend the probe budget when a timeout is
-  observed.
-- Reject `minOffsetsPerTrigger > maxRecordsPerTrigger` at source validation
-  (Kafka-parity message). Previously the conflict was silently accepted.
-- `RabbitMQStreamOffset.fromJson` now rejects duplicate stream keys instead of
-  silently keeping only the last value.
-- Sink: matching of an `application_properties` `routing_key` map entry against
-  the explicit `routing_key` column is now case-insensitive, so mixed-case
-  variants no longer produce a duplicate wire entry.
-
-### Fixed
-- Broker offset persistence now invalidates the per-stream stats cache after a
-  successful `storeOffset`, so subsequent planning observes the new committed
-  offset instead of a stale cached snapshot.

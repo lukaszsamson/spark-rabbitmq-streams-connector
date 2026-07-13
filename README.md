@@ -1,4 +1,4 @@
-# Sparkling Rabbit
+# Spark RabbitMQ Streams Connector
 
 RabbitMQ Streams and Superstreams connector for Apache Spark.
 
