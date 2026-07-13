@@ -40,6 +40,12 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
     /** Executor-side tail probe timeout — longer than driver-side (250ms) to allow for
      *  cold-start consumer setup (new environment, address resolution, etc.). */
     static final long EXECUTOR_TAIL_PROBE_WAIT_MS = 5_000L;
+    /**
+     * The tracking-entry recovery probe needs enough time for a cold consumer attach.
+     * Keep this independent of pollTimeoutMs, which controls ordinary queue pulls and
+     * may intentionally be configured very low for responsive task cancellation.
+     */
+    static final long DELIVERABLE_OFFSET_PROBE_WAIT_MS = 500L;
     private static final long CLOSED_CHECK_INTERVAL_MS = 100L;
     private static final long CONSUMER_INIT_RETRY_WINDOW_MS = 10_000L;
     private static final long MIN_TAIL_PROBE_CACHE_WINDOW_MS = 25L;
@@ -450,7 +456,7 @@ class BaseRabbitMQPartitionReader implements PartitionReader<InternalRow> {
                         environment,
                         stream,
                         OffsetSpecification.offset(startOffset),
-                        Math.min(500L, options.getPollTimeoutMs()));
+                        DELIVERABLE_OFFSET_PROBE_WAIT_MS);
                 if (firstDeliverable >= endOffset) {
                     finished = true;
                     return;

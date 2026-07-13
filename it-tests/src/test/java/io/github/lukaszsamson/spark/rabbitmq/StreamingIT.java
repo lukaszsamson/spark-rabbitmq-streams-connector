@@ -1970,6 +1970,9 @@ class StreamingIT extends AbstractRabbitMQIT {
                 .option("consumerName", consumerName)
                 .option("storeBrokerOffsets", "true")
                 .option("maxRecordsPerTrigger", "3")
+                // A low queue-poll latency must not shorten the separate probe that
+                // skips broker tracking entries during checkpoint resume.
+                .option("pollTimeoutMs", "100")
                 .option("maxWaitMs", "5000")
                 .option("metadataFields", "")
                 .option("addressResolverClass",
@@ -2000,6 +2003,7 @@ class StreamingIT extends AbstractRabbitMQIT {
                 .option("consumerName", consumerName)
                 .option("storeBrokerOffsets", "true")
                 .option("maxRecordsPerTrigger", "3")
+                .option("pollTimeoutMs", "100")
                 .option("maxWaitMs", "5000")
                 .option("metadataFields", "")
                 .option("addressResolverClass",
